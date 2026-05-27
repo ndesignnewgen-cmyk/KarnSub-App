@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(flutter analyze *)",
+      "Bash(flutter build *)",
+      "Bash(not exist *)",
+      "PowerShell(New-Item -ItemType Directory -Force -Path \"C:\\\\Users\\\\Nou\\\\Desktop\\\\annie-kaydee\\\\subtitle_app\\\\tool\")",
+      "Bash(dart run *)",
+      "Bash(dart tool/gen_pro_key.dart 10)",
+      "Bash(flutter pub *)",
+      "PowerShell($bin = \"$env:LOCALAPPDATA\\\\Pub\\\\Cache\\\\bin\"; Write-Output \"BIN DIR: $bin\"; if \\(Test-Path $bin\\) { Get-ChildItem $bin | Select-Object Name } else { Write-Output \"NOT FOUND\" })",
+      "PowerShell($bin = \"$env:LOCALAPPDATA\\\\Pub\\\\Cache\\\\bin\"; $items = Get-ChildItem -Path $bin -ErrorAction SilentlyContinue; Write-Output \"Count: $\\($items.Count\\)\"; $items | ForEach-Object { Write-Output $_.Name })",
+      "PowerShell($kt = \"C:\\\\Program Files\\\\Android\\\\Android Studio\\\\jbr\\\\bin\\\\keytool.exe\"; $ks = \"$env:USERPROFILE\\\\.android\\\\debug.keystore\"; if \\(Test-Path $ks\\) { & $kt -list -v -keystore $ks -alias androiddebugkey -storepass android -keypass android | Select-String \"SHA1:|SHA256:\" } else { Write-Output \"debug.keystore NOT FOUND — run 'flutter build apk --debug' once to create it\" })",
+      "Bash(python -c \"import PIL; print\\('PIL', PIL.__version__\\)\")",
+      "Bash(magick --version)",
+      "Bash(where magick *)",
+      "Bash(echo \"EXIT_AAB=$?\")",
+      "Bash(echo \"EXIT_APK=$?\")",
+      "PowerShell($img = \"C:\\\\Users\\\\Nou\\\\Desktop\\\\annie-kaydee\\\\subtitle_app\\\\assets\\\\icon\\\\watermark_logo.png\"; Add-Type -AssemblyName System.Drawing; $b = [System.Drawing.Image]::FromFile\\($img\\); Write-Output \"watermark_logo.png = $\\($b.Width\\) x $\\($b.Height\\) px\"; $b.Dispose\\(\\))"
+    ]
+  }
+}
