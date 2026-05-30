@@ -522,7 +522,7 @@ class AudioSyncService {
       globalEnd = globalEnd > s.endTime.inMilliseconds ? globalEnd : s.endTime.inMilliseconds;
       final sw = (s.words != null && s.words!.isNotEmpty)
           ? s.words!.where((w) => w.isNotEmpty).toList()
-          : s.text.split(' ').where((w) => w.isNotEmpty).toList();
+          : splitLaoHighlightUnits(s.text).where((w) => w.trim().isNotEmpty).toList();
       if (sw.isEmpty) continue;
       final hasT = s.wordTimings != null && s.wordTimings!.length == sw.length;
       final st = s.startTime.inMilliseconds;
@@ -595,7 +595,7 @@ class AudioSyncService {
     for (final s in segs) {
       final sw = (s.words != null && s.words!.isNotEmpty)
           ? s.words!.where((w) => w.isNotEmpty).toList()
-          : s.text.split(' ').where((w) => w.isNotEmpty).toList();
+          : splitLaoHighlightUnits(s.text).where((w) => w.trim().isNotEmpty).toList();
       if (sw.isEmpty) continue;
       final hasT = s.wordTimings != null && s.wordTimings!.length == sw.length;
       final st = s.startTime.inMilliseconds;
@@ -607,36 +607,50 @@ class AudioSyncService {
     }
     if (words.isEmpty) return segs;
 
-    // Assign words to speech regions in ORDER (monotonic), giving each region a
-    // share of words proportional to its duration. This is immune to Gemini
-    // timestamp drift — a later word can never jump back to an earlier region,
-    // which is what made the END of long clips desync with nearest-time matching.
-    final wr = List<int>.filled(words.length, 0);
-    {
-      num totalDur = 0;
+    // Calculate the global median shift between word starts and their nearest region starts.
+    // This aligns the timelines globally first and prevents local feedback loops or runaway drift.
+    final deltas = <int>[];
+    for (final t in starts) {
+      int nearestStart = regions[0][0];
+      int minDist = (t - nearestStart).abs();
       for (final r in regions) {
-        totalDur += (r[1] - r[0]).clamp(1, 1 << 31);
-      }
-      if (totalDur <= 0) totalDur = 1;
-      final k = words.length;
-      int cursor = 0;
-      double acc = 0;
-      for (int r = 0; r < regions.length; r++) {
-        final dur = (regions[r][1] - regions[r][0]).clamp(1, 1 << 31);
-        acc += k * dur / totalDur;
-        int upto = acc.round();
-        if (upto < cursor) upto = cursor;
-        if (upto > k) upto = k;
-        if (r == regions.length - 1) upto = k; // last region takes the remainder
-        for (int x = cursor; x < upto; x++) {
-          wr[x] = r;
+        final d = (t - r[0]).abs();
+        if (d < minDist) {
+          minDist = d;
+          nearestStart = r[0];
         }
-        cursor = upto;
       }
-      for (int x = cursor; x < k; x++) {
-        wr[x] = regions.length - 1;
+      if (minDist <= 3000) {
+        deltas.add(nearestStart - t);
       }
     }
+    int medianShift = 0;
+    if (deltas.isNotEmpty) {
+      final d = [...deltas]..sort();
+      medianShift = d[d.length ~/ 2];
+    }
+
+    // Assign each word to its best matching actual speech region sequentially.
+    // Monotonic matching guarantees that words remain in chronological order.
+    final wr = List<int>.filled(words.length, 0);
+    int lastRegion = 0;
+    for (int i = 0; i < words.length; i++) {
+      final t = starts[i];
+      final correctedT = t + medianShift;
+      int best = lastRegion;
+      double bestD = 1e30;
+      for (int r = lastRegion; r < regions.length; r++) {
+        final rs = regions[r][0], re = regions[r][1];
+        final d = (correctedT < rs) ? rs - correctedT : (correctedT > re ? correctedT - re : 0.0);
+        if (d < bestD) {
+          bestD = d.toDouble();
+          best = r;
+        }
+      }
+      wr[i] = best;
+      lastRegion = best;
+    }
+
 
     int charLen(String s) => s.replaceAll(' ', '').length.clamp(1, 1000);
     final out = <SubtitleSegment>[];

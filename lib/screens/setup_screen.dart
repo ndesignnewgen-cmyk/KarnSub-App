@@ -6,6 +6,7 @@ import '../theme/app_theme.dart';
 import '../models/subtitle_style_model.dart';
 import '../providers/project_provider.dart';
 import '../services/free_quota_service.dart';
+import '../services/api_config.dart';
 import '../widgets/style_preview_card.dart';
 import 'processing_screen.dart';
 import 'editor_screen.dart';
@@ -23,9 +24,13 @@ class _SetupScreenState extends State<SetupScreen> {
   AspectRatioMode _aspectRatio = AspectRatioMode.ratio9x16;
   SubtitlePreset _selectedStyle = subtitlePresets.first;
   WordSplit _wordSplit = WordSplit.none;
-  TranslateMode _translateMode = TranslateMode.none;
-  String _language = 'lo';
+  TranslateMode _translateMode = TranslateMode.translate;
+  String _sourceLanguage = 'th';
+  String _targetLanguage = 'lo';
+  String _aiEngine = 'gemini';
   bool _isPro = false;
+  bool _hasGroqKey = false;
+  bool _hasOpenAiKey = false;
   final _nameController = TextEditingController();
 
   @override
@@ -36,7 +41,16 @@ class _SetupScreenState extends State<SetupScreen> {
 
   Future<void> _loadProStatus() async {
     final pro = await FreeQuotaService.isPro();
-    if (mounted) setState(() => _isPro = pro);
+    final groq = await ApiConfig.hasGroqKey();
+    final openAi = await ApiConfig.hasOpenAiKey();
+    if (mounted) {
+      setState(() {
+        _isPro = pro;
+        _hasGroqKey = groq;
+        _hasOpenAiKey = openAi;
+        _aiEngine = 'gemini'; // Default to Gemini
+      });
+    }
   }
 
   @override
@@ -84,12 +98,17 @@ class _SetupScreenState extends State<SetupScreen> {
     project.selectedStyle = _selectedStyle;
     project.wordSplit = _wordSplit;
     project.translateMode = _translateMode;
-    project.language = _language;
+    project.language = _targetLanguage;
+    project.sourceLanguage = _sourceLanguage;
+    project.showBilingual = (_translateMode == TranslateMode.bilingual);
 
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(
-        builder: (_) => ProcessingScreen(videoPath: _videoPath!),
+        builder: (_) => ProcessingScreen(
+          videoPath: _videoPath!,
+          aiEngine: _aiEngine,
+        ),
       ),
     );
   }
@@ -114,6 +133,7 @@ class _SetupScreenState extends State<SetupScreen> {
             const SizedBox(height: 8),
             _buildNameField(),
             const SizedBox(height: 24),
+
             _buildSectionLabel('ອັບໂຫລດວິດີໂອ'),
             const SizedBox(height: 8),
             _buildVideoUpload(),
@@ -126,13 +146,90 @@ class _SetupScreenState extends State<SetupScreen> {
             const SizedBox(height: 10),
             _buildStyleGrid(),
             const SizedBox(height: 24),
-            _buildSectionLabel('ການແປພາສາ'),
+            _buildSectionLabel('ພາສາສຽງໃນວິດີໂອ (Speech Audio)'),
             const SizedBox(height: 10),
-            _buildTranslateOptions(),
+            _buildSourceLanguageSelector(),
             const SizedBox(height: 24),
-            _buildSectionLabel('ພາສາທີ່ເວົ້າໃນວິດີໂອ'),
+            _buildSectionLabel('ພາສາ Subtitles ທີ່ຕ້ອງການ'),
             const SizedBox(height: 10),
-            _buildLanguageSelector(),
+            _buildTargetLanguageSelector(),
+            const SizedBox(height: 24),
+            _buildSectionLabel('ເຄື່ອງມື AI ຖອດສຽງ (AI Engine)'),
+            const SizedBox(height: 10),
+            _buildAiEngineSelector(),
+            const SizedBox(height: 24),
+            _buildSectionLabel('ຮູບແບບການສະແດງຜົນ (Translation Mode)'),
+            const SizedBox(height: 10),
+            _buildDisplayModeSelector(),
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 300),
+              height: (_targetLanguage == 'lo') ? null : 0,
+              margin: EdgeInsets.only(top: (_targetLanguage == 'lo') ? 12 : 0),
+              child: (_targetLanguage == 'lo')
+                  ? Builder(
+                      builder: (context) {
+                        final hasWhisperTiming = _hasGroqKey || _hasOpenAiKey;
+                        final isGemini = _aiEngine == 'gemini';
+                        
+                        return Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              colors: [
+                                AppColors.primary.withValues(alpha: 0.15),
+                                AppColors.primary.withValues(alpha: 0.05),
+                              ],
+                            ),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: AppColors.primary.withValues(alpha: 0.35)),
+                          ),
+                          child: Row(
+                            children: [
+                              Icon(
+                                isGemini ? Icons.auto_awesome : Icons.bolt,
+                                color: AppColors.primary,
+                                size: 20,
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      isGemini
+                                          ? (hasWhisperTiming
+                                              ? '⚡️ Hybrid AI Mode (ແນະນຳທີ່ສຸດ)'
+                                              : '♊️ Gemini Direct Lao Mode')
+                                          : '⚡️ Whisper Direct Transcribe',
+                                      style: const TextStyle(
+                                        color: AppColors.primary,
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      isGemini
+                                          ? (hasWhisperTiming
+                                              ? 'ຖອດສຽງເປັນພາສາລາວທຳມະຊາດດ້ວຍ Gemini + ໃຊ້ Whisper ຈັບເວລາໃຫ້ຕົງສຽງເວົ້າ 100%'
+                                              : 'ຖອດສຽງໄທເປັນລາວໂດຍກົງດ້ວຍ Gemini. (ໃສ່ Groq/OpenAI Key ໃນ Settings ເພື່ອໃຫ້ເວລາຕົງເປະ)')
+                                          : 'ຖອດສຽງພາສາໄທດ້ວຍ Whisper + ແປເປັນລາວອັດຕະໂນມັດ.',
+                                      style: const TextStyle(
+                                        color: AppColors.primary,
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    )
+                  : const SizedBox.shrink(),
+            ),
             const SizedBox(height: 24),
             _buildSectionLabel('ການແບ່ງ Subtitle'),
             const SizedBox(height: 10),
@@ -160,6 +257,8 @@ class _SetupScreenState extends State<SetupScreen> {
       ),
     );
   }
+
+
 
   Widget _buildNameField() {
     return TextField(
@@ -355,67 +454,132 @@ class _SetupScreenState extends State<SetupScreen> {
     );
   }
 
-  Widget _buildTranslateOptions() {
-    final options = [
-      (TranslateMode.none, 'ບໍ່ແປ', false),
-      (TranslateMode.translate, 'ແປພາສາ', true),
-      (TranslateMode.bilingual, 'Bilingual', true),
+  Widget _buildSourceLanguageSelector() {
+    final langs = [
+      ('th', '🇹🇭 ພາສາໄທ', 'ສຽງເວົ້າພາສາໄທ'),
+      ('lo', '🇱🇦 ພາສາລາວ', 'ສຽງເວົ້າພາສາລາວ'),
+      ('en', '🇬🇧 English', 'English Speech'),
+      ('', '🤖 Auto Detect', 'ກວດຫາອັດຕະໂນມັດ'),
+    ];
+    return GridView.builder(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 2,
+        crossAxisSpacing: 8,
+        mainAxisSpacing: 8,
+        mainAxisExtent: 65,
+      ),
+      itemCount: langs.length,
+      itemBuilder: (context, index) {
+        final l = langs[index];
+        final isSelected = _sourceLanguage == l.$1;
+        return GestureDetector(
+          onTap: () {
+            setState(() {
+              _sourceLanguage = l.$1;
+              // If source matches target, turn off translation
+              if (_sourceLanguage == _targetLanguage) {
+                _translateMode = TranslateMode.none;
+              } else if (_targetLanguage == 'lo' && _sourceLanguage == 'th') {
+                _translateMode = TranslateMode.translate;
+              }
+            });
+          },
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 200),
+            padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+            decoration: BoxDecoration(
+              color: isSelected ? AppColors.primary.withValues(alpha: 0.12) : AppColors.surface,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: isSelected ? AppColors.primary : AppColors.border,
+                width: isSelected ? 1.8 : 1,
+              ),
+            ),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  l.$2,
+                  style: TextStyle(
+                    color: isSelected ? AppColors.primary : AppColors.textPrimary,
+                    fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
+                    fontSize: 13,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  l.$3,
+                  style: TextStyle(
+                    color: isSelected ? AppColors.primary.withValues(alpha: 0.8) : AppColors.textSecondary,
+                    fontSize: 10,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildTargetLanguageSelector() {
+    final langs = [
+      ('lo', '🇱🇦 ພາສາລາວ', 'ຊັບພາສາລາວ'),
+      ('th', '🇹🇭 ພາສາໄທ', 'ซับไทย'),
+      ('en', '🇬🇧 English', 'English Sub'),
     ];
     return Row(
-      children: options.map((o) {
-        final isSelected = _translateMode == o.$1;
-        final isPremium = o.$3;
-        final locked = isPremium && !_isPro;
+      children: langs.map((l) {
+        final isSelected = _targetLanguage == l.$1;
         return Expanded(
           child: GestureDetector(
-            onTap: locked
-                ? () => _showProFeatureDialog(o.$2)
-                : () => setState(() => _translateMode = o.$1),
-            child: Container(
+            onTap: () {
+              setState(() {
+                _targetLanguage = l.$1;
+                // If target matches source, turn off translation
+                if (_sourceLanguage == _targetLanguage) {
+                  _translateMode = TranslateMode.none;
+                } else {
+                  _translateMode = TranslateMode.translate;
+                }
+              });
+            },
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 200),
               margin: const EdgeInsets.only(right: 8),
-              padding: const EdgeInsets.symmetric(vertical: 10),
+              padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
               decoration: BoxDecoration(
-                color: isSelected
-                    ? AppColors.primary.withOpacity(0.15)
-                    : AppColors.surface,
-                borderRadius: BorderRadius.circular(10),
+                color: isSelected ? AppColors.primary.withValues(alpha: 0.12) : AppColors.surface,
+                borderRadius: BorderRadius.circular(12),
                 border: Border.all(
                   color: isSelected ? AppColors.primary : AppColors.border,
-                  width: isSelected ? 1.5 : 1,
+                  width: isSelected ? 1.8 : 1,
                 ),
               ),
               child: Column(
                 children: [
                   Text(
-                    o.$2,
+                    l.$2,
                     style: TextStyle(
-                      color: isSelected
-                          ? AppColors.primary
-                          : AppColors.textSecondary,
-                      fontSize: 12,
-                      fontWeight: isSelected
-                          ? FontWeight.bold
-                          : FontWeight.normal,
+                      color: isSelected ? AppColors.primary : AppColors.textPrimary,
+                      fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
+                      fontSize: 13,
                     ),
                     textAlign: TextAlign.center,
                   ),
-                  if (locked) ...[
-                    const SizedBox(height: 2),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 4,
-                        vertical: 1,
-                      ),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFFFD700).withOpacity(0.2),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: const Text(
-                        'PRO',
-                        style: TextStyle(color: Color(0xFFFFD700), fontSize: 9),
-                      ),
+                  const SizedBox(height: 2),
+                  Text(
+                    l.$3,
+                    style: TextStyle(
+                      color: isSelected ? AppColors.primary.withValues(alpha: 0.8) : AppColors.textSecondary,
+                      fontSize: 10,
                     ),
-                  ],
+                    textAlign: TextAlign.center,
+                  ),
                 ],
               ),
             ),
@@ -425,38 +589,164 @@ class _SetupScreenState extends State<SetupScreen> {
     );
   }
 
-  Widget _buildLanguageSelector() {
-    final langs = [('lo', 'ລາວ'), ('th', 'ໄທ'), ('en', 'ອັງກິດ'), ('', 'Auto')];
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: Row(
-        children: langs.map((l) {
-          final isSelected = _language == l.$1;
-          return GestureDetector(
-            onTap: () => setState(() => _language = l.$1),
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 150),
-              margin: const EdgeInsets.only(right: 8),
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-              decoration: BoxDecoration(
-                color: isSelected ? AppColors.primary : AppColors.surface,
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(
-                  color: isSelected ? AppColors.primary : AppColors.border,
+  Widget _buildDisplayModeSelector() {
+    // Only show translation/bilingual modes if target != source
+    final isTranslating = _sourceLanguage != _targetLanguage;
+    final options = [
+      (TranslateMode.none, 'ບໍ່ແປ', 'ສະແດງພາສາເດີມ', false),
+      (TranslateMode.translate, 'ແປພາສາ', 'ສະແດງຊັບແປ', true),
+      (TranslateMode.bilingual, 'ສອງພາສາ', 'Bilingual (2 ແຖວ)', true),
+    ];
+    
+    return Row(
+      children: options.map((o) {
+        final isSelected = _translateMode == o.$1;
+        final isPremium = o.$4;
+        final locked = isPremium && !_isPro;
+        
+        // If not translating, force TranslateMode.none as selected and disable others
+        final disabled = !isTranslating && o.$1 != TranslateMode.none;
+        
+        return Expanded(
+          child: GestureDetector(
+            onTap: disabled 
+                ? null
+                : (locked
+                    ? () => _showProFeatureDialog(o.$2)
+                    : () => setState(() => _translateMode = o.$1)),
+            child: AnimatedOpacity(
+              duration: const Duration(milliseconds: 200),
+              opacity: disabled ? 0.4 : 1.0,
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 200),
+                margin: const EdgeInsets.only(right: 8),
+                padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
+                decoration: BoxDecoration(
+                  color: isSelected && !disabled
+                      ? AppColors.primary.withValues(alpha: 0.12)
+                      : AppColors.surface,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: isSelected && !disabled ? AppColors.primary : AppColors.border,
+                    width: isSelected && !disabled ? 1.8 : 1,
+                  ),
                 ),
-              ),
-              child: Text(
-                l.$2,
-                style: TextStyle(
-                  color: isSelected ? Colors.white : AppColors.textSecondary,
-                  fontSize: 13,
-                  fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                child: Column(
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          o.$2,
+                          style: TextStyle(
+                            color: isSelected && !disabled ? AppColors.primary : AppColors.textPrimary,
+                            fontWeight: isSelected && !disabled ? FontWeight.bold : FontWeight.w500,
+                            fontSize: 13,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                        if (locked) ...[
+                          const SizedBox(width: 4),
+                          const Icon(Icons.lock_outline, size: 10, color: Color(0xFFFFD700)),
+                        ],
+                      ],
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      o.$3,
+                      style: TextStyle(
+                        color: isSelected && !disabled ? AppColors.primary.withValues(alpha: 0.8) : AppColors.textSecondary,
+                        fontSize: 10,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                  ],
                 ),
               ),
             ),
-          );
-        }).toList(),
-      ),
+          ),
+        );
+      }).toList(),
+    );
+  }
+
+  Widget _buildAiEngineSelector() {
+    final engines = [
+      ('gemini', '♊️ Gemini AI', 'ແນະນຳສຳລັບຊັບລາວ (ແປໂດຍກົງ)', true),
+      ('groq', '⚡️ Groq Whisper', 'ຖອດສຽງໄວສູງສຸດ', _hasGroqKey),
+      ('whisper', '🧠 OpenAI Whisper', 'ຈັບເວລາລະອຽດ', _hasOpenAiKey),
+    ];
+    return Row(
+      children: engines.map((e) {
+        final isSelected = _aiEngine == e.$1;
+        final isAvailable = e.$4;
+        return Expanded(
+          child: GestureDetector(
+            onTap: !isAvailable
+                ? () {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text('ກາລຸນາໃສ່ API Key ສໍາລັບ ${e.$2} ໃນໜ້າ Settings ກ່ອນ'),
+                        backgroundColor: AppColors.accent,
+                      ),
+                    );
+                  }
+                : () {
+                    setState(() => _aiEngine = e.$1);
+                  },
+            child: AnimatedOpacity(
+              duration: const Duration(milliseconds: 200),
+              opacity: isAvailable ? 1.0 : 0.45,
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 200),
+                margin: const EdgeInsets.only(right: 8),
+                padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
+                decoration: BoxDecoration(
+                  color: isSelected && isAvailable
+                      ? AppColors.primary.withValues(alpha: 0.12)
+                      : AppColors.surface,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: isSelected && isAvailable ? AppColors.primary : AppColors.border,
+                    width: isSelected && isAvailable ? 1.8 : 1,
+                  ),
+                ),
+                child: Column(
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          e.$2,
+                          style: TextStyle(
+                            color: isSelected && isAvailable ? AppColors.primary : AppColors.textPrimary,
+                            fontWeight: isSelected && isAvailable ? FontWeight.bold : FontWeight.w500,
+                            fontSize: 12,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                        if (!isAvailable) ...[
+                          const SizedBox(width: 4),
+                          const Icon(Icons.lock_outline, size: 10, color: AppColors.textSecondary),
+                        ],
+                      ],
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      e.$3,
+                      style: TextStyle(
+                        color: isSelected && isAvailable ? AppColors.primary.withValues(alpha: 0.8) : AppColors.textSecondary,
+                        fontSize: 9,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      }).toList(),
     );
   }
 
@@ -668,7 +958,7 @@ class _SetupScreenState extends State<SetupScreen> {
     project.aspectRatio = _aspectRatio;
     project.selectedStyle = _selectedStyle;
     project.wordSplit = _wordSplit;
-    project.language = _language;
+    project.language = _targetLanguage;
 
     Navigator.pushReplacement(
       context,

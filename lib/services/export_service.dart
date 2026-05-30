@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:flutter/foundation.dart';
@@ -6,6 +7,7 @@ import 'package:path/path.dart' as p;
 import 'package:saver_gallery/saver_gallery.dart';
 import '../models/subtitle_style_model.dart';
 import 'lao_font_service.dart';
+import 'audio_synth.dart';
 
 class ExportException implements Exception {
   final String message;
@@ -258,22 +260,139 @@ class ExportService {
       }
     });
 
+    final hasSfx = project.sfxBlocks.isNotEmpty;
+    String exportedPath = '';
+
     try {
-      await _channel.invokeMethod('burnSubtitles', {
+      exportedPath = await _channel.invokeMethod('burnSubtitles', {
         'videoPath': videoPath,
         'outputPath': tempOutputPath,
         'fileName': fileName,
         'segments': segmentsData,
         'style': styleData,
+        'autoCut': project.isAutoCut,
+        'returnTempPath': hasSfx,
       });
     } on PlatformException catch (e) {
-      throw ExportException('Export ຜິດພາດ: ${e.message ?? 'Unknown'}');
-    } finally {
       _channel.setMethodCallHandler(null);
+      throw ExportException('Export ຜິດພາດ: ${e.message ?? 'Unknown'}');
+    }
+    
+    _channel.setMethodCallHandler(null);
+
+    if (hasSfx) {
+      onProgress?.call(0.95, 'ກຳລັງ Mix SFX ເຂົ້າສຽງ...');
+      try {
+        final mixedVideoPath = await _mixSfxNative(
+          exportedPath, project.sfxBlocks, tempDir.path, ts, fileName,
+        );
+        onProgress?.call(1.0, 'ສຳເລັດ!');
+        return mixedVideoPath;
+      } catch (e) {
+        debugPrint('[ExportService] SFX mix failed, saving without SFX: $e');
+        // fallback: save the subtitle-only video
+        final saveResult = await SaverGallery.saveFile(
+          filePath: exportedPath,
+          fileName: fileName,
+          androidRelativePath: 'Movies/SubtitleAI',
+          skipIfExists: false,
+        );
+        try { File(exportedPath).deleteSync(); } catch (_) {}
+        onProgress?.call(1.0, 'ສຳເລັດ! (ບໍ່ມີ SFX)');
+        return saveResult.isSuccess ? 'Movies/SubtitleAI/$fileName' : exportedPath;
+      }
+    } else {
+      onProgress?.call(1.0, 'ສຳເລັດ!');
+      return exportedPath;
+    }
+  }
+
+  /// Mix SFX blocks into the video audio using pure Dart PCM mixing + native muxer.
+  /// No FFmpeg required — uses the existing extractAudio + replaceAudioTrack native methods.
+  static Future<String> _mixSfxNative(
+    String videoPath,
+    List<SfxBlock> sfxBlocks,
+    String tempDirPath,
+    int ts,
+    String fileName,
+  ) async {
+    const sampleRate = 16000; // matches native extractAudio TARGET_SAMPLE_RATE
+    final extractedWav = p.join(tempDirPath, 'orig_audio_$ts.wav');
+    final mixedWav    = p.join(tempDirPath, 'mixed_audio_$ts.wav');
+    final mixedVideo  = p.join(tempDirPath, 'sfx_video_$ts.mp4');
+
+    // 1. Extract original audio from the subtitle-burned video
+    await _channel.invokeMethod('extractAudio', {
+      'videoPath': videoPath,
+      'outputPath': extractedWav,
+    });
+
+    // 2. Read WAV → Int16List PCM
+    final wavBytes = await File(extractedWav).readAsBytes();
+    if (wavBytes.length <= 44) throw Exception('Extracted WAV too small');
+    // WAV is little-endian 16-bit PCM starting at byte 44
+    final pcm = Int16List.view(wavBytes.buffer, 44);
+
+    // 3. Mix each SFX block into the PCM buffer at its start-time offset
+    for (final block in sfxBlocks) {
+      final sfxBytes = _generateSfxPcm(block.type, sampleRate);
+      final sfxSamples = Int16List.view(sfxBytes.buffer);
+      final offsetSamples = (block.startTime.inMilliseconds * sampleRate ~/ 1000)
+          .clamp(0, pcm.length - 1);
+      final copyLen = sfxSamples.length.clamp(0, pcm.length - offsetSamples);
+      for (int i = 0; i < copyLen; i++) {
+        final mixed = (pcm[offsetSamples + i] + sfxSamples[i]).clamp(-32768, 32767);
+        pcm[offsetSamples + i] = mixed;
+      }
     }
 
-    onProgress?.call(1.0, 'ສຳເລັດ!');
+    // 4. Write back as WAV (reuse original header, update PCM region in-place)
+    final mixed = wavBytes.toList();
+    final pcmBytes = pcm.buffer.asUint8List(pcm.offsetInBytes, pcm.lengthInBytes);
+    for (int i = 0; i < pcmBytes.length; i++) {
+      mixed[44 + i] = pcmBytes[i];
+    }
+    await File(mixedWav).writeAsBytes(mixed);
+
+    // 5. Mux mixed audio back into video using existing native replaceAudioTrack
+    await _channel.invokeMethod('replaceAudioTrack', {
+      'videoPath': videoPath,
+      'audioPath': mixedWav,
+      'outputPath': mixedVideo,
+      'fileName': fileName,
+    });
+
+    // 6. Cleanup temp files
+    try { File(videoPath).deleteSync(); } catch (_) {}
+    try { File(extractedWav).deleteSync(); } catch (_) {}
+    try { File(mixedWav).deleteSync(); } catch (_) {}
+
     return 'Movies/SubtitleAI/$fileName';
+  }
+
+  static Uint8List _generateSfxPcm(SfxType type, int sampleRate) {
+    return switch (type) {
+      SfxType.pop      => AudioSynth.generatePop(sampleRate),
+      SfxType.ding     => AudioSynth.generateDing(sampleRate),
+      SfxType.swoosh   => AudioSynth.generateSwoosh(sampleRate),
+      SfxType.chime    => AudioSynth.generateChime(sampleRate),
+      SfxType.drum     => AudioSynth.generateDrum(sampleRate),
+      SfxType.beep     => AudioSynth.generateBeep(sampleRate),
+      SfxType.bubble   => AudioSynth.generateBubble(sampleRate),
+      SfxType.click    => AudioSynth.generateClick(sampleRate),
+      SfxType.whoosh   => AudioSynth.generateWhoosh(sampleRate),
+      SfxType.tada     => AudioSynth.generateTada(sampleRate),
+      SfxType.bounce   => AudioSynth.generateBounce(sampleRate),
+      SfxType.glitch   => AudioSynth.generateGlitch(sampleRate),
+      SfxType.heart    => AudioSynth.generateHeart(sampleRate),
+      SfxType.fire     => AudioSynth.generateFire(sampleRate),
+      SfxType.wind     => AudioSynth.generateWind(sampleRate),
+      SfxType.laugh    => AudioSynth.generateLaugh(sampleRate),
+      SfxType.sad      => AudioSynth.generateSad(sampleRate),
+      SfxType.magic    => AudioSynth.generateMagic(sampleRate),
+      SfxType.power    => AudioSynth.generatePower(sampleRate),
+      SfxType.surprise => AudioSynth.generateSurprise(sampleRate),
+    };
   }
 
   static String buildSrtContent(List<SubtitleSegment> segments) =>
@@ -297,5 +416,17 @@ class ExportService {
     final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
     final ms = d.inMilliseconds.remainder(1000).toString().padLeft(3, '0');
     return '$h:$m:$s,$ms';
+  }
+
+  static Future<List<int>> detectSpeechRegions(String videoPath) async {
+    try {
+      final List<dynamic>? res = await _channel.invokeMethod<List<dynamic>>('detectSpeechRegions', {
+        'videoPath': videoPath,
+      });
+      return res?.cast<int>() ?? [];
+    } catch (e) {
+      debugPrint('Failed to detect speech regions: $e');
+      return [];
+    }
   }
 }

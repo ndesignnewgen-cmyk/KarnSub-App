@@ -82,7 +82,9 @@ class MainActivity : FlutterActivity() {
                             ?: return@setMethodCallHandler result.error("MISSING", "segments missing", null)
                         val style = call.argument<Map<String, Any>>("style")
                             ?: return@setMethodCallHandler result.error("MISSING", "style missing", null)
-                        burnSubtitles(videoPath, outputPath, fileName, segments, style, result)
+                        val autoCut = call.argument<Boolean>("autoCut") ?: false
+                        val returnTempPath = call.argument<Boolean>("returnTempPath") ?: false
+                        burnSubtitles(videoPath, outputPath, fileName, segments, style, autoCut, returnTempPath, result)
                     }
                     "detectSpeechOnsets" -> {
                         val videoPath = call.argument<String>("videoPath")
@@ -116,6 +118,24 @@ class MainActivity : FlutterActivity() {
                             ?: return@setMethodCallHandler result.error("MISSING", "videoPath missing", null)
                         val thumbPath = call.argument<String>("thumbPath")
                         videoMeta(videoPath, thumbPath, result)
+                    }
+                    "replaceAudioTrack" -> {
+                        val videoPath = call.argument<String>("videoPath")
+                            ?: return@setMethodCallHandler result.error("MISSING", "videoPath missing", null)
+                        val audioPath = call.argument<String>("audioPath")
+                            ?: return@setMethodCallHandler result.error("MISSING", "audioPath missing", null)
+                        val outputPath = call.argument<String>("outputPath")
+                            ?: return@setMethodCallHandler result.error("MISSING", "outputPath missing", null)
+                        val fileName = call.argument<String>("fileName")
+                            ?: return@setMethodCallHandler result.error("MISSING", "fileName missing", null)
+                        replaceAudioTrack(videoPath, audioPath, outputPath, fileName, result)
+                    }
+                    "saveAudioToGallery" -> {
+                        val audioPath = call.argument<String>("audioPath")
+                            ?: return@setMethodCallHandler result.error("MISSING", "audioPath missing", null)
+                        val fileName = call.argument<String>("fileName")
+                            ?: return@setMethodCallHandler result.error("MISSING", "fileName missing", null)
+                        saveAudioToGallery(audioPath, fileName, result)
                     }
                     else -> result.notImplemented()
                 }
@@ -305,6 +325,8 @@ class MainActivity : FlutterActivity() {
         fileName: String,
         segmentsRaw: List<Map<String, Any>>,
         styleMap: Map<String, Any>,
+        autoCut: Boolean,
+        returnTempPath: Boolean,
         result: MethodChannel.Result,
     ) {
         Thread {
@@ -329,27 +351,83 @@ class MainActivity : FlutterActivity() {
                 peek.release()
                 val rotation = readRotation(effectivePath, formatRotation)
 
+                // Compute silence-cut regions if enabled
+                val keptRegions = if (autoCut) {
+                    val energies = decodeEnergies(effectivePath)
+                    val rawRegions = computeRegions(energies, vadFrameMs)
+                    val keptRegionsMs = ArrayList<Pair<Long, Long>>()
+                    if (rawRegions.isNotEmpty()) {
+                        var curStart = rawRegions[0][0].toLong()
+                        var curEnd = rawRegions[0][1].toLong()
+                        for (i in 1 until rawRegions.size) {
+                            val rStart = rawRegions[i][0].toLong()
+                            val rEnd = rawRegions[i][1].toLong()
+                            if (rStart - curEnd <= 300L) {
+                                curEnd = rEnd
+                            } else {
+                                keptRegionsMs.add(Pair(curStart, curEnd))
+                                curStart = rStart
+                                curEnd = rEnd
+                            }
+                        }
+                        keptRegionsMs.add(Pair(curStart, curEnd))
+                    }
+                    keptRegionsMs.map { Pair(it.first * 1000L, it.second * 1000L) }
+                } else {
+                    null
+                }
+
                 // Portrait/rotated videos: the GPU path's SurfaceTexture transform
                 // handles rotation differently across devices, which can clash with
                 // the muxer orientation hint and tilt the output. The CPU pipeline
                 // decodes raw frames + sets the hint deterministically, so it's
                 // reliable for rotation — use it whenever the source is rotated.
                 if (rotation != 0) {
-                    burnSubtitlesCpu(videoPath, outputPath, fileName, segmentsRaw, styleMap, result)
+                    burnSubtitlesCpu(videoPath, outputPath, fileName, segmentsRaw, styleMap, keptRegions, returnTempPath, result)
                     return@Thread
                 }
 
                 val provider = makeSubtitleProvider(segmentsRaw, styleMap, vidW, vidH, rotation)
-                VideoExporterGl().export(effectivePath, outputPath, { p -> emitProgress(p) }, provider)
+                VideoExporterGl().export(effectivePath, outputPath, { p -> emitProgress(p) }, provider, keptRegions)
 
                 emitProgress(0.96)
-                saveVideoToGallery(outputPath, fileName)
+                if (!returnTempPath) {
+                    saveVideoToGallery(outputPath, fileName)
+                }
                 emitProgress(1.0)
-                runOnUiThread { result.success("Movies/SubtitleAI/$fileName") }
+                runOnUiThread { result.success(if (returnTempPath) outputPath else "Movies/SubtitleAI/$fileName") }
             } catch (e: Throwable) {
                 // GPU path unsupported/failed → fall back to CPU pipeline.
                 try { File(outputPath).delete() } catch (_: Exception) {}
-                burnSubtitlesCpu(videoPath, outputPath, fileName, segmentsRaw, styleMap, result)
+                // Re-evaluate path with kept regions
+                val effectivePath = resolveUriToFilePath(videoPath)
+                val keptRegions = if (autoCut) {
+                    try {
+                        val energies = decodeEnergies(effectivePath)
+                        val rawRegions = computeRegions(energies, vadFrameMs)
+                        val keptRegionsMs = ArrayList<Pair<Long, Long>>()
+                        if (rawRegions.isNotEmpty()) {
+                            var curStart = rawRegions[0][0].toLong()
+                            var curEnd = rawRegions[0][1].toLong()
+                            for (i in 1 until rawRegions.size) {
+                                val rStart = rawRegions[i][0].toLong()
+                                val rEnd = rawRegions[i][1].toLong()
+                                if (rStart - curEnd <= 300L) {
+                                    curEnd = rEnd
+                                } else {
+                                    keptRegionsMs.add(Pair(curStart, curEnd))
+                                    curStart = rStart
+                                    curEnd = rEnd
+                                }
+                            }
+                            keptRegionsMs.add(Pair(curStart, curEnd))
+                        }
+                        keptRegionsMs.map { Pair(it.first * 1000L, it.second * 1000L) }
+                    } catch (_: Exception) { null }
+                } else {
+                    null
+                }
+                burnSubtitlesCpu(videoPath, outputPath, fileName, segmentsRaw, styleMap, keptRegions, returnTempPath, result)
             }
         }.start()
     }
@@ -542,6 +620,8 @@ class MainActivity : FlutterActivity() {
         fileName: String,
         segmentsRaw: List<Map<String, Any>>,
         styleMap: Map<String, Any>,
+        keptRegions: List<Pair<Long, Long>>?,
+        returnTempPath: Boolean,
         result: MethodChannel.Result,
     ) {
         val segments = segmentsRaw.map { raw ->
@@ -635,8 +715,12 @@ class MainActivity : FlutterActivity() {
                     videoFormat.getLong(MediaFormat.KEY_DURATION) else 0L
 
                 lastEmittedPct = -1
+                // Output in DISPLAY orientation so all players show it correctly
+                // (no orientation-hint needed — frames are physically rotated).
                 val displayH = if (rotation == 90 || rotation == 270) vidW else vidH
                 val displayW = if (rotation == 90 || rotation == 270) vidH else vidW
+                val outW = displayW
+                val outH = displayH
 
                 val w = fontWeight.coerceIn(100, 900)
                 val fontFile = if (fontPath != null && File(fontPath).exists()) File(fontPath) else null
@@ -698,10 +782,9 @@ class MainActivity : FlutterActivity() {
                     },
                 )
 
-                // Persistent watermark overlay — composited on every frame below.
-                // Rendered upright at display dims, rotated to raw orientation.
-                val watermarkBmp: Bitmap? =
-                    makeWatermarkBitmap(displayW, displayH, style)?.let { orientOverlay(it, rotation) }
+                // Watermark rendered at display (output) dims — no rotation needed
+                // because frames are already physically rotated before compositing.
+                val watermarkBmp: Bitmap? = makeWatermarkBitmap(displayW, displayH, style)
 
                 // ── Decoder ──
                 decoder = MediaCodec.createDecoderByType(videoFormat.getString(MediaFormat.KEY_MIME)!!)
@@ -719,7 +802,8 @@ class MainActivity : FlutterActivity() {
                     encColorFormats.contains(planar)     -> planar
                     else -> MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible
                 }
-                val encFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, vidW, vidH).apply {
+                // Encode at display (output) dimensions — frames are rotated before encoding.
+                val encFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, outW, outH).apply {
                     setInteger(MediaFormat.KEY_COLOR_FORMAT, chosenColor)
                     setInteger(MediaFormat.KEY_BIT_RATE,     bitRate.coerceIn(1_000_000, 12_000_000))
                     setInteger(MediaFormat.KEY_FRAME_RATE,   frameRate)
@@ -730,7 +814,7 @@ class MainActivity : FlutterActivity() {
 
                 // ── MediaMuxer + audio passthrough (no audio re-encode) ──
                 muxer = MediaMuxer(outputPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-                if (rotation != 0) muxer.setOrientationHint(rotation)
+                // No setOrientationHint — frames are physically in display orientation.
                 var audioFormatForMux: MediaFormat? = null
                 if (audioTrackIdx != -1) {
                     try {
@@ -746,7 +830,7 @@ class MainActivity : FlutterActivity() {
                 var muxerVideoTrack = -1
                 var muxerAudioTrack = -1
                 var muxerStarted    = false
-                val frameSize       = vidW * vidH * 3 / 2
+                val frameSize       = outW * outH * 3 / 2
 
                 extractor.selectTrack(videoTrackIdx)
 
@@ -781,14 +865,27 @@ class MainActivity : FlutterActivity() {
                         val presentUs = decInfo.presentationTimeUs
                         val isEos     = decInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
 
-                        if (durationUs > 0L && decInfo.size > 0) {
+                        val keepFrame = keptRegions == null || keptRegions.isEmpty() || keptRegions.any { presentUs >= it.first && presentUs <= it.second }
+
+                        if (durationUs > 0L && decInfo.size > 0 && keepFrame) {
                             val frac = (presentUs.toDouble() / durationUs).coerceIn(0.0, 1.0)
                             emitProgress(0.10 + frac * 0.82) // 10%..92% during encoding
                         }
 
                         if (decInfo.size > 0) {
+                            if (!keepFrame) {
+                                decoder.releaseOutputBuffer(decOutIdx, false)
+                                if (isEos) {
+                                    val encInIdx = encoder.dequeueInputBuffer(10_000L)
+                                    if (encInIdx >= 0) {
+                                        val eosPts = encodedFrameCount * ptsStepUs
+                                        encoder.queueInputBuffer(encInIdx, 0, 0, eosPts, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                                    }
+                                }
+                                continue
+                            }
                             val image = decoder.getOutputImage(decOutIdx)
-                            val frameBmp: Bitmap = when {
+                            val rawBmp: Bitmap = when {
                                 image != null -> { val b = imageToBitmap(image); image.close(); b }
                                 else -> {
                                     val buf = decoder.getOutputBuffer(decOutIdx)
@@ -797,6 +894,13 @@ class MainActivity : FlutterActivity() {
                                 }
                             }
                             decoder.releaseOutputBuffer(decOutIdx, false)
+
+                            // Physically rotate frame to display orientation — works on all players.
+                            val frameBmp: Bitmap = if (rotation != 0) {
+                                val m = android.graphics.Matrix().apply { postRotate(rotation.toFloat()) }
+                                val r = Bitmap.createBitmap(rawBmp, 0, 0, rawBmp.width, rawBmp.height, m, true)
+                                rawBmp.recycle(); r
+                            } else rawBmp
 
                             val activeSeg = segments.firstOrNull { s -> s.startUs <= presentUs && presentUs < s.endUs }
                             if (activeSeg != null) {
@@ -827,7 +931,8 @@ class MainActivity : FlutterActivity() {
                                 if (subKey != prevSubKey) {
                                     cachedSubBmp?.recycle()
                                     val drawStyle = if (exitWin) es.copy(animationType = animOutType) else es
-                                    val upright = if (useKaraoke) {
+                                    // Subtitle rendered in display orientation — no orientOverlay needed.
+                                    cachedSubBmp = if (useKaraoke) {
                                         makeKaraokeBitmap(activeSeg.text, activeSeg.words, activeWordIdx,
                                             activeSeg.translatedText, animT, displayW, displayH, drawStyle, exitWin,
                                             activeSeg.emphasis, sweepOn, activeSeg.emoji)
@@ -835,12 +940,10 @@ class MainActivity : FlutterActivity() {
                                         makeNormalBitmap(appendEmoji(shownText, activeSeg.emoji), activeSeg.translatedText,
                                             animT, displayW, displayH, drawStyle, exitWin)
                                     }
-                                    cachedSubBmp = orientOverlay(upright, rotation)
                                     prevSubKey = subKey
                                 }
                                 cachedSubBmp?.let { Canvas(frameBmp).drawBitmap(it, 0f, 0f, null) }
                             } else {
-                                // No subtitle on this frame — still stamp the watermark.
                                 watermarkBmp?.let { Canvas(frameBmp).drawBitmap(it, 0f, 0f, null) }
                             }
 
@@ -851,14 +954,14 @@ class MainActivity : FlutterActivity() {
                                 val encBuf = encoder.getInputBuffer(encInIdx)!!
                                 encBuf.clear()
                                 val byteCount = when (chosenColor) {
-                                    semiPlanar -> bitmapToYuv(frameBmp, encBuf, vidW, vidH, true)
-                                    planar     -> bitmapToYuv(frameBmp, encBuf, vidW, vidH, false)
+                                    semiPlanar -> bitmapToYuv(frameBmp, encBuf, outW, outH, true)
+                                    planar     -> bitmapToYuv(frameBmp, encBuf, outW, outH, false)
                                     else -> {
                                         val encImg = encoder.getInputImage(encInIdx)
                                         if (encImg != null) {
                                             bitmapToImage(frameBmp, encImg); encImg.close(); frameSize
                                         } else {
-                                            bitmapToYuv(frameBmp, encBuf, vidW, vidH, false)
+                                            bitmapToYuv(frameBmp, encBuf, outW, outH, false)
                                         }
                                     }
                                 }
@@ -918,13 +1021,17 @@ class MainActivity : FlutterActivity() {
                         while (true) {
                             val sz = aExtractor.readSampleData(audioBuf, 0)
                             if (sz < 0) break
-                            audioInfo.offset = 0
-                            audioInfo.size = sz
-                            audioInfo.presentationTimeUs = aExtractor.sampleTime
-                            audioInfo.flags =
-                                if (aExtractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0)
-                                    MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
-                            muxer.writeSampleData(muxerAudioTrack, audioBuf, audioInfo)
+                            val sampleTimeUs = aExtractor.sampleTime
+                            val keepAudio = keptRegions == null || keptRegions.isEmpty() || keptRegions.any { sampleTimeUs >= it.first && sampleTimeUs <= it.second }
+                            if (keepAudio) {
+                                audioInfo.offset = 0
+                                audioInfo.size = sz
+                                audioInfo.presentationTimeUs = mapOriginalToNewPts(sampleTimeUs, keptRegions)
+                                audioInfo.flags =
+                                    if (aExtractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0)
+                                        MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
+                                muxer.writeSampleData(muxerAudioTrack, audioBuf, audioInfo)
+                            }
                             aExtractor.advance()
                         }
                     } catch (_: Exception) {
@@ -942,9 +1049,11 @@ class MainActivity : FlutterActivity() {
                 muxer.release(); muxer = null
 
                 emitProgress(0.98)
-                saveVideoToGallery(outputPath, fileName)
+                if (!returnTempPath) {
+                    saveVideoToGallery(outputPath, fileName)
+                }
                 emitProgress(1.0)
-                runOnUiThread { result.success("Movies/SubtitleAI/$fileName") }
+                runOnUiThread { result.success(if (returnTempPath) outputPath else "Movies/SubtitleAI/$fileName") }
 
             } catch (e: Exception) {
                 try { decoder?.stop();  decoder?.release()  } catch (_: Exception) {}
@@ -956,6 +1065,21 @@ class MainActivity : FlutterActivity() {
                 runOnUiThread { result.error("EXPORT_FAILED", e.message ?: "Unknown", null) }
             }
         }.start()
+    }
+
+    private fun mapOriginalToNewPts(originalPtsUs: Long, keptRegions: List<Pair<Long, Long>>?): Long {
+        if (keptRegions == null || keptRegions.isEmpty()) return originalPtsUs
+        var accumulatedTime = 0L
+        for (region in keptRegions) {
+            if (originalPtsUs < region.first) {
+                return accumulatedTime
+            }
+            if (originalPtsUs <= region.second) {
+                return accumulatedTime + (originalPtsUs - region.first)
+            }
+            accumulatedTime += (region.second - region.first)
+        }
+        return accumulatedTime
     }
 
     // ─── Frame helpers ────────────────────────────────────────────────────────
@@ -1864,5 +1988,206 @@ class MainActivity : FlutterActivity() {
         buf.put("RIFF".toByteArray()); buf.putInt((pcmBytes + 36).toInt()); buf.put("WAVE".toByteArray()); buf.put("fmt ".toByteArray()); buf.putInt(16)
         buf.putShort(1); buf.putShort(channels.toShort()); buf.putInt(sampleRate); buf.putInt(byteRate); buf.putShort((channels * 2).toShort()); buf.putShort(16)
         buf.put("data".toByteArray()); buf.putInt(pcmBytes.toInt()); raf.write(buf.array()); raf.close()
+    }
+
+    private fun replaceAudioTrack(
+        videoPath: String,
+        audioPath: String,
+        outputPath: String,
+        fileName: String,
+        result: MethodChannel.Result
+    ) {
+        Thread {
+            try {
+                val resolvedVideo = resolveUriToFilePath(videoPath)
+                val resolvedAudio = resolveUriToFilePath(audioPath)
+
+                // ── 1. Extract video track ──
+                val videoExtractor = MediaExtractor()
+                videoExtractor.setDataSource(resolvedVideo)
+                var videoTrackIndex = -1
+                var videoFormat: MediaFormat? = null
+                for (i in 0 until videoExtractor.trackCount) {
+                    val format = videoExtractor.getTrackFormat(i)
+                    val mime = format.getString(MediaFormat.KEY_MIME) ?: ""
+                    if (mime.startsWith("video/")) {
+                        videoTrackIndex = i
+                        videoFormat = format
+                        break
+                    }
+                }
+                if (videoTrackIndex == -1) {
+                    videoExtractor.release()
+                    runOnUiThread { result.error("NO_VIDEO", "No video track found", null) }
+                    return@Thread
+                }
+                videoExtractor.selectTrack(videoTrackIndex)
+
+                // ── 2. Parse WAV header to get PCM parameters ──
+                val wavFile = java.io.RandomAccessFile(resolvedAudio, "r")
+                if (wavFile.length() < 44) {
+                    wavFile.close()
+                    videoExtractor.release()
+                    runOnUiThread { result.error("BAD_WAV", "WAV file too small", null) }
+                    return@Thread
+                }
+                val wavHeader = ByteArray(44)
+                wavFile.readFully(wavHeader)
+                val wavData = java.nio.ByteBuffer.wrap(wavHeader).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                val audioChannels = wavData.getShort(22).toInt()
+                val sampleRate = wavData.getInt(24)
+                val bitsPerSample = wavData.getShort(34).toInt()
+                val pcmDataSize = wavData.getInt(40)
+                android.util.Log.d("MuxerPCM", "WAV: ${sampleRate}Hz, ${audioChannels}ch, ${bitsPerSample}bit, PCM=${pcmDataSize}bytes")
+
+                // ── 3. Setup AAC encoder (no decoder needed for raw PCM) ──
+                val aacMime = MediaFormat.MIMETYPE_AUDIO_AAC
+                val encoderFormat = MediaFormat.createAudioFormat(aacMime, sampleRate, audioChannels)
+                encoderFormat.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+                encoderFormat.setInteger(MediaFormat.KEY_BIT_RATE, 128000)
+                encoderFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
+
+                val audioEncoder = MediaCodec.createEncoderByType(aacMime)
+                audioEncoder.configure(encoderFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                audioEncoder.start()
+
+                // ── 4. Setup Muxer ──
+                val muxer = MediaMuxer(outputPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+                val muxedVideoTrackIndex = muxer.addTrack(videoFormat!!)
+                var muxedAudioTrackIndex = -1
+
+                var videoDone = false
+                var audioInputDone = false
+                var audioEncoderDone = false
+                var muxerStarted = false
+                var pcmBytesRead = 0L
+                val bytesPerSampleFrame = audioChannels * (bitsPerSample / 8)
+
+                val videoBuffer = java.nio.ByteBuffer.allocate(2 * 1024 * 1024)
+                val videoBufferInfo = MediaCodec.BufferInfo()
+                val encBufferInfo = MediaCodec.BufferInfo()
+
+                val startTimeMs = System.currentTimeMillis()
+                while (!videoDone || !audioEncoderDone) {
+                    if (System.currentTimeMillis() - startTimeMs > 60000) {
+                        throw Exception("Muxing timed out (60s)")
+                    }
+                    var workDone = false
+
+                    // ── Copy video samples ──
+                    if (muxerStarted && !videoDone) {
+                        videoBufferInfo.offset = 0
+                        videoBufferInfo.size = videoExtractor.readSampleData(videoBuffer, 0)
+                        if (videoBufferInfo.size < 0) {
+                            videoDone = true
+                        } else {
+                            videoBufferInfo.presentationTimeUs = videoExtractor.sampleTime
+                            videoBufferInfo.flags = videoExtractor.sampleFlags
+                            muxer.writeSampleData(muxedVideoTrackIndex, videoBuffer, videoBufferInfo)
+                            videoExtractor.advance()
+                            workDone = true
+                        }
+                    }
+
+                    // ── Feed raw PCM directly into encoder input (skip decoder entirely) ──
+                    if (!audioInputDone) {
+                        val inIdx = audioEncoder.dequeueInputBuffer(5000)
+                        if (inIdx >= 0) {
+                            val inBuf = audioEncoder.getInputBuffer(inIdx)!!
+                            inBuf.clear()
+                            val readSize = minOf(inBuf.remaining().toLong(), (pcmDataSize - pcmBytesRead)).toInt()
+                            if (readSize <= 0) {
+                                audioEncoder.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                                audioInputDone = true
+                            } else {
+                                val pcmChunk = ByteArray(readSize)
+                                wavFile.readFully(pcmChunk)
+                                inBuf.put(pcmChunk)
+                                val presentationTimeUs = (pcmBytesRead * 1000000L) / (sampleRate.toLong() * bytesPerSampleFrame)
+                                audioEncoder.queueInputBuffer(inIdx, 0, readSize, presentationTimeUs, 0)
+                                pcmBytesRead += readSize
+                            }
+                            workDone = true
+                        }
+                    }
+
+                    // ── Drain encoder output → muxer ──
+                    if (!audioEncoderDone) {
+                        val outIdx = audioEncoder.dequeueOutputBuffer(encBufferInfo, 5000)
+                        if (outIdx >= 0) {
+                            val outBuf = audioEncoder.getOutputBuffer(outIdx)!!
+                            if (muxedAudioTrackIndex != -1 && muxerStarted && encBufferInfo.size > 0) {
+                                muxer.writeSampleData(muxedAudioTrackIndex, outBuf, encBufferInfo)
+                            }
+                            if ((encBufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                                audioEncoderDone = true
+                            }
+                            audioEncoder.releaseOutputBuffer(outIdx, false)
+                            workDone = true
+                        } else if (outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                            val newFormat = audioEncoder.outputFormat
+                            muxedAudioTrackIndex = muxer.addTrack(newFormat)
+                            muxer.start()
+                            muxerStarted = true
+                            workDone = true
+                        }
+                    }
+
+                    if (!workDone) {
+                        try { Thread.sleep(5) } catch (_: Exception) {}
+                    }
+                }
+
+                try { wavFile.close() } catch (_: Exception) {}
+                try { videoExtractor.release() } catch (_: Exception) {}
+                try { audioEncoder.stop(); audioEncoder.release() } catch (_: Exception) {}
+                try { muxer.stop(); muxer.release() } catch (_: Exception) {}
+
+                saveVideoToGallery(outputPath, fileName)
+                runOnUiThread { result.success("Movies/SubtitleAI/$fileName") }
+            } catch (e: Exception) {
+                android.util.Log.e("MuxerPCM", "replaceAudioTrack failed", e)
+                runOnUiThread { result.error("FAILED", e.message ?: "Unknown", null) }
+            }
+        }.start()
+    }
+
+    private fun saveAudioToGallery(audioPath: String, fileName: String, result: MethodChannel.Result) {
+        Thread {
+            try {
+                val sourceFile = File(audioPath)
+                if (!sourceFile.exists() || sourceFile.length() == 0L) {
+                    runOnUiThread { result.error("FILE_ERROR", "Audio file not found or empty", null) }
+                    return@Thread
+                }
+                val destFileName = if (fileName.endsWith(".wav")) fileName else "$fileName.wav"
+                
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val values = ContentValues().apply {
+                        put(MediaStore.Audio.Media.DISPLAY_NAME, destFileName)
+                        put(MediaStore.Audio.Media.MIME_TYPE, "audio/wav")
+                        put(MediaStore.Audio.Media.RELATIVE_PATH, "Music/SubtitleAI")
+                        put(MediaStore.Audio.Media.IS_PENDING, 1)
+                    }
+                    val uri = contentResolver.insert(MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values)
+                        ?: throw Exception("MediaStore insert returned null")
+                    contentResolver.openOutputStream(uri)?.use { out -> sourceFile.inputStream().use { it.copyTo(out) } }
+                        ?: throw Exception("Cannot open MediaStore output stream")
+                    values.clear()
+                    values.put(MediaStore.Audio.Media.IS_PENDING, 0)
+                    contentResolver.update(uri, values, null, null)
+                } else {
+                    @Suppress("DEPRECATION")
+                    val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC), "SubtitleAI")
+                    dir.mkdirs()
+                    val dest = File(dir, destFileName)
+                    sourceFile.copyTo(dest, overwrite = true)
+                    MediaScannerConnection.scanFile(applicationContext, arrayOf(dest.absolutePath), arrayOf("audio/wav"), null)
+                }
+                runOnUiThread { result.success("Music/SubtitleAI/$destFileName") }
+            } catch (e: Exception) {
+                runOnUiThread { result.error("FAILED", e.message ?: "Unknown", null) }
+            }
+        }.start()
     }
 }

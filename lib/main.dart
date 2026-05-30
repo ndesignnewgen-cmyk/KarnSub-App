@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -8,20 +10,32 @@ import 'services/custom_font_service.dart';
 import 'services/firebase_service.dart';
 import 'services/subscription_service.dart';
 
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  // Bring up Firebase (no-op / local-only if not configured yet).
-  await FirebaseService.init();
-  // If a user is already signed in, refresh their PRO status from the cloud.
-  await SubscriptionService.syncOnLaunch();
-  // Register user-imported fonts so they're ready for the editor preview.
-  await CustomFontService.init();
-  SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
-  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
-    statusBarColor: Colors.transparent,
-    statusBarIconBrightness: Brightness.light,
-  ));
-  runApp(const SubtitleApp());
+void main() {
+  runZonedGuarded(() async {
+    WidgetsFlutterBinding.ensureInitialized();
+
+    FlutterError.onError = (details) {
+      FlutterError.presentError(details);
+    };
+    PlatformDispatcher.instance.onError = (error, stack) {
+      return true; // prevent crash, keep app alive
+    };
+
+    // Bring up Firebase (no-op / local-only if not configured yet).
+    await FirebaseService.init();
+    // If a user is already signed in, refresh their PRO status from the cloud.
+    await SubscriptionService.syncOnLaunch();
+    // Register user-imported fonts so they're ready for the editor preview.
+    await CustomFontService.init();
+    SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+    SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
+      statusBarColor: Colors.transparent,
+      statusBarIconBrightness: Brightness.light,
+    ));
+    runApp(const SubtitleApp());
+  }, (error, stack) {
+    // Catch any unhandled async error — keeps the app from showing a black screen.
+  });
 }
 
 class SubtitleApp extends StatelessWidget {
@@ -66,14 +80,21 @@ class _AppLoaderState extends State<AppLoader> {
   // Keep the logo splash on screen for at least this long so it doesn't just
   // flash by — like other apps that briefly show their logo on launch.
   bool _minElapsed = false;
+  Timer? _timer;
 
   @override
   void initState() {
     super.initState();
     _load();
-    Future.delayed(const Duration(milliseconds: 600), () {
+    _timer = Timer(const Duration(milliseconds: 600), () {
       if (mounted) setState(() => _minElapsed = true);
     });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
   }
 
   Future<void> _load() async {

@@ -36,6 +36,7 @@ class StorageService {
         'translateMode': p.translateMode.index,
         'createdAt': p.createdAt.millisecondsSinceEpoch,
         'language': p.language,
+        'sourceLanguage': p.sourceLanguage,
         'fontSize': p.fontSize,
         'fontWeight': p.fontWeight,
         'subtitlePositionY': p.subtitlePositionY,
@@ -50,7 +51,10 @@ class StorageService {
         'subtitleAnimation': p.subtitleAnimation.index,
         'exitAnimation': p.exitAnimation.index,
         'animationSpeed': p.animationSpeed.index,
+        'isAutoCut': p.isAutoCut,
+        'isAutoSyncSfx': p.isAutoSyncSfx,
         'segments': p.segments.map(_segmentToJson).toList(),
+        'sfxBlocks': p.sfxBlocks.map(_sfxBlockToJson).toList(),
       };
 
   static SubtitleProject _projectFromJson(Map<String, dynamic> j) {
@@ -69,6 +73,7 @@ class StorageService {
       translateMode: TranslateMode.values[j['translateMode'] ?? 0],
       createdAt: DateTime.fromMillisecondsSinceEpoch(j['createdAt'] ?? 0),
       language: j['language'] as String? ?? 'lo',
+      sourceLanguage: j['sourceLanguage'] as String? ?? 'th',
       fontSize: (j['fontSize'] as num?)?.toDouble() ?? 18.0,
       fontWeight: (j['fontWeight'] as int?) ?? 600,
       subtitlePositionY: (j['subtitlePositionY'] as num?)?.toDouble() ?? 0.85,
@@ -83,11 +88,29 @@ class StorageService {
       subtitleAnimation: SubtitleAnimation.values[(j['subtitleAnimation'] as int? ?? 0).clamp(0, SubtitleAnimation.values.length - 1)],
       exitAnimation: SubtitleAnimation.values[(j['exitAnimation'] as int? ?? 0).clamp(0, SubtitleAnimation.values.length - 1)],
       animationSpeed: AnimationSpeed.values[(j['animationSpeed'] as int? ?? 1).clamp(0, AnimationSpeed.values.length - 1)],
+      isAutoCut: j['isAutoCut'] as bool? ?? false,
+      isAutoSyncSfx: j['isAutoSyncSfx'] as bool? ?? false,
       segments: (j['segments'] as List<dynamic>)
           .map((s) => _segmentFromJson(s))
           .toList(),
+      sfxBlocks: (j['sfxBlocks'] as List<dynamic>?)
+              ?.map((s) => _sfxBlockFromJson(s))
+              .toList() ??
+          [],
     );
   }
+
+  static Map<String, dynamic> _sfxBlockToJson(SfxBlock s) => {
+        'id': s.id,
+        'type': s.type.index,
+        'startMs': s.startTime.inMilliseconds,
+      };
+
+  static SfxBlock _sfxBlockFromJson(Map<String, dynamic> j) => SfxBlock(
+        id: j['id'],
+        type: SfxType.values[(j['type'] as int?)?.clamp(0, SfxType.values.length - 1) ?? 0],
+        startTime: Duration(milliseconds: j['startMs'] as int? ?? 0),
+      );
 
   static Map<String, dynamic> _segmentToJson(SubtitleSegment s) => {
         'id': s.id,

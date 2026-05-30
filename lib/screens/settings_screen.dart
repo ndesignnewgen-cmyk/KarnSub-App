@@ -21,10 +21,16 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   final _apiKeyCtrl = TextEditingController();
   final _groqKeyCtrl = TextEditingController();
+  final _openAiKeyCtrl = TextEditingController();
+  final _elevenLabsKeyCtrl = TextEditingController();
   bool _obscure = true;
   bool _groqObscure = true;
+  bool _openAiObscure = true;
+  bool _elevenLabsObscure = true;
   bool _groqSaved = false;
   bool _isSaved = false;
+  bool _openAiSaved = false;
+  bool _elevenLabsSaved = false;
   bool _isLoading = true;
   bool _isPro = false;
   DateTime? _proExpiry;
@@ -43,6 +49,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _loadAll() async {
     final key = await ApiConfig.getApiKey();
     final groqKey = await ApiConfig.getGroqKey();
+    final openAiKey = await ApiConfig.getOpenAiKey();
+    final elevenLabsKey = await ApiConfig.getElevenLabsKey();
     // If signed in, pull the latest PRO state from the cloud first.
     if (AuthService.currentUser != null) {
       await SubscriptionService.refresh();
@@ -52,6 +60,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (!mounted) return;
     if (key != null) _apiKeyCtrl.text = key;
     if (groqKey != null) _groqKeyCtrl.text = groqKey;
+    if (openAiKey != null) _openAiKeyCtrl.text = openAiKey;
+    if (elevenLabsKey != null) _elevenLabsKeyCtrl.text = elevenLabsKey;
     setState(() {
       _user = AuthService.currentUser;
       _isPro = pro;
@@ -139,6 +149,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() {});
   }
 
+  Future<void> _saveOpenAi() async {
+    final key = _openAiKeyCtrl.text.trim();
+    if (key.isEmpty) {
+      await ApiConfig.clearOpenAiKey();
+    } else {
+      await ApiConfig.saveOpenAiKey(key);
+    }
+    setState(() => _openAiSaved = true);
+    Future.delayed(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _openAiSaved = false);
+    });
+  }
+
+  Future<void> _clearOpenAi() async {
+    await ApiConfig.clearOpenAiKey();
+    _openAiKeyCtrl.clear();
+    setState(() {});
+  }
+
   Future<void> _saveGroq() async {
     final key = _groqKeyCtrl.text.trim();
     if (key.isEmpty) {
@@ -150,6 +179,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
     Future.delayed(const Duration(seconds: 2), () {
       if (mounted) setState(() => _groqSaved = false);
     });
+  }
+
+  Future<void> _saveElevenLabs() async {
+    final key = _elevenLabsKeyCtrl.text.trim();
+    if (key.isEmpty) {
+      await ApiConfig.clearElevenLabsKey();
+    } else {
+      await ApiConfig.saveElevenLabsKey(key);
+    }
+    setState(() => _elevenLabsSaved = true);
+    Future.delayed(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _elevenLabsSaved = false);
+    });
+  }
+
+  Future<void> _clearElevenLabs() async {
+    await ApiConfig.clearElevenLabsKey();
+    _elevenLabsKeyCtrl.clear();
+    setState(() {});
   }
 
   // PRO pricing + seller contact.
@@ -199,6 +247,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void dispose() {
     _apiKeyCtrl.dispose();
     _groqKeyCtrl.dispose();
+    _openAiKeyCtrl.dispose();
+    _elevenLabsKeyCtrl.dispose();
     super.dispose();
   }
 
@@ -223,6 +273,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ],
                   const SizedBox(height: 24),
                   _buildApiKeySection(),
+                  const SizedBox(height: 24),
+                  _buildOpenAiKeySection(),
+                  const SizedBox(height: 24),
+                  _buildElevenLabsKeySection(),
                   const SizedBox(height: 24),
                   _buildGroqKeySection(),
                   const SizedBox(height: 24),
@@ -1182,6 +1236,151 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  // ── OpenAI API Key Section ───────────────────────────────────────────────
+
+  Widget _buildOpenAiKeySection() {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  color: AppColors.primary.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(
+                  Icons.key,
+                  color: AppColors.primary,
+                  size: 20,
+                ),
+              ),
+              const SizedBox(width: 12),
+              const Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'OpenAI API Key',
+                    style: TextStyle(
+                      color: AppColors.textPrimary,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 15,
+                    ),
+                  ),
+                  Text(
+                    'ຈາກ platform.openai.com',
+                    style: TextStyle(
+                      color: AppColors.textSecondary,
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _openAiKeyCtrl,
+            obscureText: _openAiObscure,
+            style: const TextStyle(
+              color: AppColors.textPrimary,
+              fontFamily: 'monospace',
+              fontSize: 13,
+            ),
+            decoration: InputDecoration(
+              hintText: 'sk-proj-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+              hintStyle: const TextStyle(color: AppColors.textHint),
+              filled: true,
+              fillColor: AppColors.surfaceLight,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: const BorderSide(color: AppColors.border),
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: const BorderSide(color: AppColors.border),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: const BorderSide(
+                  color: AppColors.primary,
+                  width: 1.5,
+                ),
+              ),
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 14,
+                vertical: 14,
+              ),
+              suffixIcon: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    icon: Icon(
+                      _openAiObscure ? Icons.visibility_off : Icons.visibility,
+                      color: AppColors.textHint,
+                      size: 20,
+                    ),
+                    onPressed: () => setState(() => _openAiObscure = !_openAiObscure),
+                  ),
+                  IconButton(
+                    icon: const Icon(
+                      Icons.copy,
+                      color: AppColors.textHint,
+                      size: 18,
+                    ),
+                    onPressed: () {
+                      Clipboard.setData(ClipboardData(text: _openAiKeyCtrl.text));
+                      ScaffoldMessenger.of(context).showSnackBar(
+                         const SnackBar(
+                           content: Text('ຄັດລອກແລ້ວ'),
+                           duration: Duration(seconds: 1),
+                         ),
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: GradientButton(
+                  label: _openAiSaved ? 'ບັນທຶກແລ້ວ!' : 'ບັນທຶກ',
+                  icon: _openAiSaved ? Icons.check : Icons.save_outlined,
+                  height: 48,
+                  solidColor: _openAiSaved ? AppColors.success : null,
+                  onTap: _saveOpenAi,
+                ),
+              ),
+              const SizedBox(width: 10),
+              OutlinedButton(
+                onPressed: _clearOpenAi,
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppColors.accent,
+                  side: const BorderSide(color: AppColors.accent),
+                  minimumSize: const Size(0, 48),
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                ),
+                child: const Text('ລຶບ'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildHowToGetKey() {
     return Container(
       padding: const EdgeInsets.all(18),
@@ -1264,6 +1463,164 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 color: AppColors.textSecondary,
                 fontSize: 13,
               ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── ElevenLabs TTS (Premium Online) Key Section ───────────────────────
+
+  Widget _buildElevenLabsKeySection() {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  color: AppColors.primary.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(
+                  Icons.record_voice_over,
+                  color: AppColors.primary,
+                  size: 20,
+                ),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'ElevenLabs API Key',
+                      style: TextStyle(
+                        color: AppColors.textPrimary,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 15,
+                      ),
+                    ),
+                    Text(
+                      'ສຽງພາກລະດັບ Premium (elevenlabs.io)',
+                      style: TextStyle(
+                        color: AppColors.textSecondary,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _elevenLabsKeyCtrl,
+            obscureText: _elevenLabsObscure,
+            style: const TextStyle(
+              color: AppColors.textPrimary,
+              fontFamily: 'monospace',
+              fontSize: 13,
+            ),
+            decoration: InputDecoration(
+              hintText: 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+              hintStyle: const TextStyle(color: AppColors.textHint),
+              filled: true,
+              fillColor: AppColors.surfaceLight,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: const BorderSide(color: AppColors.border),
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: const BorderSide(color: AppColors.border),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: const BorderSide(
+                  color: AppColors.primary,
+                  width: 1.5,
+                ),
+              ),
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 14,
+                vertical: 14,
+              ),
+              suffixIcon: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    icon: Icon(
+                      _elevenLabsObscure ? Icons.visibility_off : Icons.visibility,
+                      color: AppColors.textHint,
+                      size: 20,
+                    ),
+                    onPressed: () => setState(() => _elevenLabsObscure = !_elevenLabsObscure),
+                  ),
+                  IconButton(
+                    icon: const Icon(
+                      Icons.copy,
+                      color: AppColors.textHint,
+                      size: 18,
+                    ),
+                    onPressed: () {
+                      Clipboard.setData(ClipboardData(text: _elevenLabsKeyCtrl.text));
+                      ScaffoldMessenger.of(context).showSnackBar(
+                         const SnackBar(
+                           content: Text('ຄັດລອກແລ້ວ'),
+                           duration: Duration(seconds: 1),
+                         ),
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: GradientButton(
+                  label: _elevenLabsSaved ? '...ບັນທຶກແລ້ວ!' : 'ບັນທຶກ',
+                  icon: _elevenLabsSaved ? Icons.check : Icons.save_outlined,
+                  height: 48,
+                  solidColor: _elevenLabsSaved ? AppColors.success : null,
+                  onTap: _saveElevenLabs,
+                ),
+              ),
+              const SizedBox(width: 10),
+              OutlinedButton(
+                onPressed: _clearElevenLabs,
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppColors.accent,
+                  side: const BorderSide(color: AppColors.accent),
+                  minimumSize: const Size(0, 48),
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                ),
+                child: const Text('ລຶບ'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          const Text(
+            '💡 ວິທີຂໍ Key: ໄປທີ່ elevenlabs.io → ລ໋ອກອິນບັນຊີຂອງທ່ານ '
+            '→ ກົດທີ່ໂປຣໄຟລ໌ (Profile) ດ້ານຂວາລຸ່ມ → ເລືອກ My Account → '
+            'ຄັດລອກ API Key ແລ້ວນຳມາວາງໃສ່ບ່ອນນີ້.',
+            style: TextStyle(
+              color: AppColors.textHint,
+              fontSize: 11,
+              height: 1.5,
             ),
           ),
         ],

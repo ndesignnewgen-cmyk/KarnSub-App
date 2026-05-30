@@ -15,7 +15,7 @@ class GeminiService {
   static const _uploadBase =
       'https://generativelanguage.googleapis.com/upload/v1beta/files';
   static const _generateBase =
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent';
 
   final String apiKey;
   final _uuid = const Uuid();
@@ -167,16 +167,42 @@ class GeminiService {
       },
     });
 
-    final res = await http
-        .post(
-          Uri.parse('$_generateBase?key=$apiKey'),
-          headers: {'Content-Type': 'application/json'},
-          body: body,
-        )
-        .timeout(const Duration(minutes: 5));
+    const maxAttempts = 5;
+    http.Response? res;
 
-    if (res.statusCode != 200) {
-      _throwApiError(res.body, 'Generate');
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        res = await http
+            .post(
+              Uri.parse('$_generateBase?key=$apiKey'),
+              headers: {'Content-Type': 'application/json'},
+              body: body,
+            )
+            .timeout(const Duration(minutes: 5));
+
+        if (res.statusCode == 200) {
+          break;
+        }
+
+        final isRetryable = res.statusCode == 429 || res.statusCode == 503 || res.statusCode == 500;
+        if (isRetryable && attempt < maxAttempts) {
+          // Wait longer on each attempt (e.g. 5s, 10s, 15s, 20s)
+          final delaySecs = 5 * attempt;
+          await Future.delayed(Duration(seconds: delaySecs));
+          continue;
+        } else {
+          _throwApiError(res.body, 'Generate');
+        }
+      } catch (e) {
+        if (attempt >= maxAttempts) {
+          rethrow;
+        }
+        await Future.delayed(Duration(seconds: 5 * attempt));
+      }
+    }
+
+    if (res == null || res.statusCode != 200) {
+      throw GeminiException('ບໍ່ສາມາດເຊື່ອມຕໍ່ກັບ Gemini ໄດ້ໃນຂະນະນີ້ (ເກີດຂໍ້ຜິດພາດເຄືອຂ່າຍ)');
     }
 
     final data = jsonDecode(res.body);

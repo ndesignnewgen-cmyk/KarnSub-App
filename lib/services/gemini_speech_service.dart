@@ -1,7 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
+
 import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 import '../models/subtitle_style_model.dart';
@@ -17,12 +18,12 @@ class GeminiSpeechException implements Exception {
 class GeminiSpeechService {
   static const _channel = MethodChannel('com.anniekaydee.subtitle_app/audio');
   static const _endpoint =
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent';
 
   // Long audio is split into chunks of ~this length so Gemini's timestamps stay
   // accurate (its drift grows with duration). Each chunk is cut at a silence and
   // its words are offset by the chunk's exact start time.
-  static const int _chunkTargetMs = 75000;
+  static const int _chunkTargetMs = 15000;
 
   final String apiKey;
   final _uuid = const Uuid();
@@ -95,18 +96,32 @@ class GeminiSpeechService {
     }
 
     final allWords = <({int startMs, int endMs, String text})>[];
-    for (int ci = 0; ci < chunks.length; ci++) {
-      final cs = chunks[ci][0];
-      final ce = chunks[ci][1];
-      if (ce - cs < 50) continue;
-      onProgress?.call(chunks.length > 1
-          ? 'Gemini ກໍາລັງຖອດສຽງ (${ci + 1}/${chunks.length})...'
-          : 'Gemini ກໍາລັງຖອດສຽງລາວ...');
-      final chunkWav = _sliceWav(wavBytes, cs, ce, bytesPerMs);
-      final data = await _callGemini(chunkWav, prompt, onProgress);
-      for (final w in _parseWordEntries(data)) {
-        allWords.add(
-            (startMs: w.startMs + cs, endMs: w.endMs + cs, text: w.text));
+    
+    // Process in parallel batches of 2 to avoid overwhelming free tier rate limits
+    final batchSize = 2;
+    for (int i = 0; i < chunks.length; i += batchSize) {
+      final batch = chunks.sublist(i, (i + batchSize < chunks.length) ? i + batchSize : chunks.length);
+      
+      onProgress?.call('Gemini ກຳລັງຖອດສຽງຂະໜານ (${i + 1}-${i + batch.length}/${chunks.length})...');
+      
+      final futures = batch.map((chunk) async {
+        final cs = chunk[0];
+        final ce = chunk[1];
+        if (ce - cs < 50) return <({int startMs, int endMs, String text})>[];
+        
+        final chunkWav = _sliceWav(wavBytes, cs, ce, bytesPerMs);
+        final data = await _callGemini(chunkWav, prompt, onProgress);
+        
+        final words = <({int startMs, int endMs, String text})>[];
+        for (final w in _parseWordEntries(data)) {
+          words.add((startMs: w.startMs + cs, endMs: w.endMs + cs, text: w.text));
+        }
+        return words;
+      });
+      
+      final results = await Future.wait(futures);
+      for (final res in results) {
+        allWords.addAll(res);
       }
     }
 
@@ -291,27 +306,37 @@ class GeminiSpeechService {
       'generationConfig': {'temperature': 0.1},
     });
 
-    final uri = Uri.parse('$_endpoint?key=$apiKey');
-    const maxAttempts = 4;
+    final flash35Endpoint = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent';
+
+    const maxAttempts = 5; // Increased to 5 to handle rate limit retries robustly
     String responseBody = '';
     int statusCode = 0;
     for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+      final activeEndpoint = flash35Endpoint;
+      final uri = Uri.parse('$activeEndpoint?key=$apiKey');
+      
+      if (attempt >= 2) {
+        onProgress?.call('Gemini 3.5 Flash ບໍ່ຫວ່າງ, ກຳລັງລອງໃໝ່ ($attempt/$maxAttempts)...');
+      }
+
       try {
         final httpClient = HttpClient();
+        httpClient.connectionTimeout = const Duration(seconds: 15);
         final request = await httpClient.postUrl(uri);
         request.headers.contentType = ContentType.json;
         request.write(body);
         final response =
-            await request.close().timeout(const Duration(minutes: 5));
+            await request.close().timeout(const Duration(seconds: 45));
         responseBody = await response.transform(utf8.decoder).join();
         statusCode = response.statusCode;
         httpClient.close();
       } catch (e) {
         if (attempt >= maxAttempts) {
           throw GeminiSpeechException(
-              'ເຊື່ອມຕໍ່ Gemini ບໍ່ໄດ້ — ກວດເນັດ ຫຼື ລອງໃໝ່ (${e.runtimeType})');
+              'ເຊື່ອມຕໍ່ Gemini ບໍ່ໄດ້ (ອາດເນັດຊ້າ ຫຼື ເຊີເວີລົ່ມ) — ລອງໃໝ່ອີກຄັ້ງ');
         }
-        await Future.delayed(Duration(seconds: 1 << attempt));
+        onProgress?.call('ເນັດຊ້າກຳລັງລອງໃໝ່ ($attempt/$maxAttempts)...');
+        await Future.delayed(Duration(seconds: 4 * attempt));
         continue;
       }
 
@@ -322,9 +347,15 @@ class GeminiSpeechService {
       final retryable =
           statusCode == 503 || statusCode == 429 || statusCode == 500;
       if (retryable && attempt < maxAttempts) {
-        onProgress
-            ?.call('Gemini ຄົນໃຊ້ຫຼາຍ — ລອງໃໝ່ ($attempt/$maxAttempts)...');
-        await Future.delayed(Duration(seconds: 1 << attempt)); // 2s,4s,8s
+        final delaySecs = 4 * attempt;
+        if (statusCode == 429) {
+          onProgress
+              ?.call('Gemini ຂໍ້ຈຳກັດໂຄຕາ (429) — ລໍຖ້າ $delaySecs ວິນາທີ ($attempt/$maxAttempts)...');
+        } else {
+          onProgress
+              ?.call('Gemini ຄົນໃຊ້ຫຼາຍ (503) — ລໍຖ້າ $delaySecs ວິນາທີ ($attempt/$maxAttempts)...');
+        }
+        await Future.delayed(Duration(seconds: delaySecs));
         continue;
       }
 
@@ -455,6 +486,9 @@ class GeminiSpeechService {
   Future<void> autoEmojiHighlight(List<SubtitleSegment> segs) async {
     if (segs.isEmpty) return;
     const chunkSize = 80;
+    bool hasAnySuccess = false;
+    String lastErrorMessage = '';
+
     for (int start = 0; start < segs.length; start += chunkSize) {
       final end = (start + chunkSize).clamp(0, segs.length);
       final slice = segs.sublist(start, end);
@@ -462,18 +496,21 @@ class GeminiSpeechService {
       // Build input: each line's word units (so Gemini returns a valid index).
       final input = <Map<String, dynamic>>[];
       for (int k = 0; k < slice.length; k++) {
-        final words = (slice[k].words != null && slice[k].words!.isNotEmpty)
+        var words = (slice[k].words != null && slice[k].words!.isNotEmpty)
             ? slice[k].words!.where((w) => w.trim().isNotEmpty).toList()
-            : [slice[k].text];
+            : splitLaoHighlightUnits(slice[k].text).where((w) => w.trim().isNotEmpty).toList();
+        if (words.isEmpty) {
+          words = [slice[k].text];
+        }
         input.add({'i': k, 'words': words});
       }
 
       final prompt =
           'ສຳລັບແຕ່ລະ subtitle (ພາສາລາວ) ຂ້າງລຸ່ມ ໃຫ້ເລືອກ:\n'
           '1. "emoji" = emoji 1 ໂຕ ທີ່ເໝາະກັບຄວາມໝາຍຂອງປະໂຫຍກ (ຖ້າບໍ່ມີທີ່ເໝາະ ໃຫ້ "")\n'
-          '2. "keyword" = index (ເລີ່ມ 0) ຂອງ "ຄຳເด็ด/ສຳคัญທີ່ສຸດ" 1 ຄຳ ໃນ words ເພື່ອเน้น '
-          '(ຖ້າບໍ່ມີຄຳເด็ด ໃຫ້ -1)\n'
-          'ສົ່ງ JSON array ລຽงตาม index "i" ເທົ່ານັ້ນ ບໍ່ໃສ່ text ອື່ນ:\n'
+          '2. "keyword" = index (ເລີ່ມ 0) ຂອງ "ຄຳເດັດ/ສຳคัญທີ່ສຸດ" 1 ຄຳ ໃນ words ເພື່ອເນັ້ນ '
+          '(ຖ້າບໍ່ມີຄຳເດັດ ໃຫ້ -1)\n'
+          'ສົ່ງ JSON array ລຽງຕາມ index "i" ເທົ່ານັ້ນ ບໍ່ໃສ່ text ອື່ນ:\n'
           '[{"i":0,"emoji":"💰","keyword":2}, ...]\n\n'
           'Input:\n${jsonEncode(input)}';
 
@@ -485,30 +522,40 @@ class GeminiSpeechService {
             ]
           }
         ],
-        'generationConfig': {'temperature': 0.4},
+        'generationConfig': {
+          'temperature': 0.4,
+          'responseMimeType': 'application/json'
+        },
       });
 
       try {
         final uri = Uri.parse('$_endpoint?key=$apiKey');
-        final httpClient = HttpClient();
-        final request = await httpClient.postUrl(uri);
-        request.headers.contentType = ContentType.json;
-        request.write(body);
-        final response =
-            await request.close().timeout(const Duration(minutes: 2));
-        final respBody = await response.transform(utf8.decoder).join();
-        httpClient.close();
-        if (response.statusCode != 200) continue;
+        final response = await http.post(
+          uri,
+          headers: {'Content-Type': 'application/json'},
+          body: body,
+        ).timeout(const Duration(minutes: 2));
 
-        final data = jsonDecode(respBody) as Map<String, dynamic>;
+        if (response.statusCode != 200) {
+          lastErrorMessage = 'API error status ${response.statusCode}: ${response.body}';
+          continue;
+        }
+
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
         final parts = (data['candidates']?[0]?['content']
             as Map<String, dynamic>?)?['parts'] as List<dynamic>?;
-        if (parts == null || parts.isEmpty) continue;
+        if (parts == null || parts.isEmpty) {
+          lastErrorMessage = 'Invalid API response candidates/parts';
+          continue;
+        }
         var raw = (parts[0]['text'] as String? ?? '').trim();
         raw = raw.replaceAll('```json', '').replaceAll('```', '').trim();
         final s = raw.indexOf('[');
         final e = raw.lastIndexOf(']');
-        if (s == -1 || e == -1) continue;
+        if (s == -1 || e == -1) {
+          lastErrorMessage = 'Could not parse JSON array from response';
+          continue;
+        }
         final list = jsonDecode(raw.substring(s, e + 1)) as List<dynamic>;
 
         for (final item in list) {
@@ -522,9 +569,19 @@ class GeminiSpeechService {
           seg.emoji = emoji.isEmpty ? null : emoji;
           seg.emphasis = (kw >= 0 && kw < wordCount) ? [kw] : null;
         }
-      } catch (_) {
+        hasAnySuccess = true;
+      } catch (e) {
+        lastErrorMessage = e.toString();
         // best-effort; skip this chunk on error
       }
+    }
+
+    if (!hasAnySuccess && segs.isNotEmpty) {
+      throw GeminiSpeechException(
+        lastErrorMessage.isNotEmpty 
+          ? 'Auto ✨ ບໍ່ສຳເລັດ: $lastErrorMessage' 
+          : 'Auto ✨ ບໍ່ສຳເລັດ — ລອງໃໝ່'
+      );
     }
   }
 
@@ -560,18 +617,20 @@ class GeminiSpeechService {
 
     try {
       final uri = Uri.parse('$_endpoint?key=$apiKey');
-      final httpClient = HttpClient();
-      final request = await httpClient.postUrl(uri);
-      request.headers.contentType = ContentType.json;
-      request.write(body);
-      final response =
-          await request.close().timeout(const Duration(minutes: 2));
-      final respBody = await response.transform(utf8.decoder).join();
-      httpClient.close();
+      http.Response response;
+      try {
+        response = await http.post(
+          uri,
+          headers: {'Content-Type': 'application/json'},
+          body: body,
+        ).timeout(const Duration(minutes: 2));
+      } catch (_) {
+        return (caption: '', hashtags: <String>[]);
+      }
       if (response.statusCode != 200) {
         return (caption: '', hashtags: <String>[]);
       }
-      final data = jsonDecode(respBody) as Map<String, dynamic>;
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
       final parts = (data['candidates']?[0]?['content']
           as Map<String, dynamic>?)?['parts'] as List<dynamic>?;
       if (parts == null || parts.isEmpty) {
@@ -665,6 +724,331 @@ class GeminiSpeechService {
       return list.map((e) => e.toString()).toList();
     } catch (_) {
       return texts;
+    }
+  }
+
+  /// Translate a list of segments from Thai to Lao using Gemini.
+  /// Keeps exactly the same number of segments so timestamps remain intact.
+  Future<void> translateSegmentsToLao(
+      List<SubtitleSegment> segments, void Function(String)? onProgress) async {
+    if (segments.isEmpty) return;
+
+    onProgress?.call('Gemini ກຳລັງແປພາສາໄທເປັນລາວ...');
+    
+    // Process in chunks to avoid overwhelming the model or prompt limits
+    const chunkSize = 40;
+    for (int i = 0; i < segments.length; i += chunkSize) {
+      final end = (i + chunkSize > segments.length) ? segments.length : i + chunkSize;
+      final batch = segments.sublist(i, end);
+      final texts = batch.map((s) => s.text).toList();
+      
+      onProgress?.call('Gemini ກຳລັງແປ (${i + 1}-$end/${segments.length})...');
+
+      final prompt =
+          'You are an expert Thai-to-Lao translator for social media video subtitles.\n\n'
+          'Task: Translate this JSON array of Thai subtitle segments into NATURAL Lao.\n\n'
+          'CRITICAL: Thai and Lao are DIFFERENT languages. Do NOT just swap Thai characters to Lao. Write proper Lao.\n\n'
+          'COMMON MISTAKES TO AVOID (TRANSLATE not transliterate):\n'
+          '- à¹€à¸›à¹‡à¸™à¸¢à¸±à¸‡à¹„à¸‡à¸šà¹‰à¸²à¸‡ must become à»€àº›àº±àº™à»àº™àº§à»ƒàº”à»àº”à»ˆ (NOT à»€àº›àº±àº™àºàº±àº‡à»„àº‡àºšà»‰àº²àº‡)\n'
+          '- à¸—à¸³à¹„à¸¡ must become à»€àº›àº±àº™àº«àºàº±àº‡ or àºà»‰àº­àº™àº«àºàº±àº‡ (NOT àº—àº³à»„àº¡)\n'
+          '- à¸ˆà¸£à¸´à¸‡à¹† must become à»àº—à»‰à»† (NOT àºˆàº´àº‡à»†)\n'
+          '- à¸ªà¸§à¸±à¸ªà¸”à¸µ must become àºªàº°àºšàº²àºàº”àºµ (NOT àºªàº°àº§àº±àº”àº”àºµ)\n'
+          '- à¸‚à¸­à¸šà¸„à¸¸à¸“ must become àº‚àº­àºšà»ƒàºˆ (NOT àº‚àº­àºšàº„àº¸àº™)\n'
+          '- à¸¡à¸²à¸ must become àº«àº¼àº²àº (NOT àº¡àº²àº)\n'
+          '- à¸ªà¸™à¸¸à¸ must become àº¡à»ˆàº§àº™ (NOT àºªàº°àº™àº¸àº)\n'
+          '- à¸­à¸£à¹ˆà¸­à¸¢ must become à»àºŠàºš (NOT àº­àº°àº«àº¼à»ˆàº­àº)\n'
+          '- à¸ªà¸§à¸¢ must become àº‡àº²àº¡ (NOT àºªàº§àº)\n'
+          '- à¸„à¸£à¸±à¸š/à¸„à¹ˆà¸° must become à»€àº”àºµà»‰/à»€àº”\n'
+          '- à¹€à¸¥à¸¢ must become à»€àº¥àºµàº\n'
+          '- à¹€à¸žà¸·à¹ˆà¸­à¸™ must become à»àº¹à»ˆ or à»€àºžàº·à»ˆàº­àº™\n'
+          '- à¸à¹‡à¸„à¸·à¸­ must become àºà»àº„àº·\n\n'
+          'RULES:\n'
+          '1. TRANSLATE to natural spoken Lao. Do NOT transliterate Thai characters.\n'
+          '2. Use REAL Lao words that Lao people actually say.\n'
+          '3. Ensure 100% correct Lao vowels and consonants.\n'
+          '4. Keep brand names, numbers, English words as-is.\n'
+          '5. Maintain EXACTLY ${texts.length} items. Do NOT combine, split, or skip.\n'
+          '6. Return ONLY a valid JSON array of strings.\n\n'
+          'Input: ${jsonEncode(texts)}';
+
+
+      final body = jsonEncode({
+        'contents': [
+          {
+            'parts': [
+              {'text': prompt}
+            ]
+          }
+        ],
+        'generationConfig': {'temperature': 0.1}, // Low temp for accurate translation
+      });
+
+      final flash35Endpoint = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent';
+
+      try {
+        http.Response? response;
+        const maxAttempts = 4;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+          final activeEndpoint = flash35Endpoint;
+          final uri = Uri.parse('$activeEndpoint?key=$apiKey');
+          
+          if (attempt >= 2) {
+            onProgress?.call('Gemini 3.5 Flash ບໍ່ຫວ່າງ, ກຳລັງລອງໃໝ່ ($attempt/$maxAttempts)...');
+          }
+
+          try {
+            response = await http.post(
+              uri,
+              headers: {'Content-Type': 'application/json'},
+              body: body,
+            ).timeout(const Duration(seconds: 45));
+          } catch (_) {
+            if (attempt >= maxAttempts) break;
+            await Future.delayed(Duration(seconds: 4 * attempt));
+            continue;
+          }
+          
+          if (response.statusCode == 200) {
+            break;
+          }
+          
+          final retryable = response.statusCode == 429 || response.statusCode == 503 || response.statusCode == 500;
+          if (retryable && attempt < maxAttempts) {
+            final delaySecs = 4 * attempt;
+            onProgress?.call('Gemini ຂໍ້ຈຳກັດໂຄຕາ (${response.statusCode}) — ລໍຖ້າ $delaySecs ວິນາທີ ($attempt/$maxAttempts)...');
+            await Future.delayed(Duration(seconds: delaySecs));
+            continue;
+          } else {
+            break;
+          }
+        }
+        
+        if (response == null || response.statusCode != 200) continue; 
+
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        final parts = (data['candidates']?[0]?['content'] as Map<String, dynamic>?)?['parts'] as List<dynamic>?;
+        if (parts == null || parts.isEmpty) continue;
+
+        var raw = (parts[0]['text'] as String? ?? '').trim();
+        raw = raw.replaceAll('```json', '').replaceAll('```', '').trim();
+        final s = raw.indexOf('[');
+        final e = raw.lastIndexOf(']');
+        if (s == -1 || e == -1) continue;
+
+        final list = jsonDecode(raw.substring(s, e + 1)) as List<dynamic>;
+        
+        // Safety check: only apply if the array length matches exactly!
+        if (list.length == batch.length) {
+          for (int j = 0; j < batch.length; j++) {
+            batch[j].text = list[j].toString().trim();
+            batch[j].words = null; // Clear Thai words so LaoWordService regenerates Lao words
+            batch[j].wordTimings = null;
+          }
+        }
+      } catch (_) {
+        // Continue to next batch on error
+      }
+    }
+  }
+
+  /// General translate segments method that translates segments from source to target language
+  Future<void> translateSegments({
+    required List<SubtitleSegment> segments,
+    required String sourceLang,
+    required String targetLang,
+    required void Function(String)? onProgress,
+    bool keepOriginalAsBilingual = false,
+  }) async {
+    if (segments.isEmpty) return;
+
+    final sourceName = switch (sourceLang) {
+      'lo' => 'Lao (ພາສາລາວ)',
+      'th' => 'Thai (ພາສາໄທ)',
+      'en' => 'English',
+      _ => 'Thai (ພາສາໄທ)',
+    };
+
+    final targetName = switch (targetLang) {
+      'lo' => 'Lao (ພາສາລາວ)',
+      'th' => 'Thai (ພາສາໄທ)',
+      'en' => 'English',
+      _ => 'Lao (ພາສາລາວ)',
+    };
+
+    onProgress?.call('Gemini ກຳລັງແປພາສາ...');
+    
+    final flash35Endpoint = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent';
+
+    const chunkSize = 40;
+    for (int i = 0; i < segments.length; i += chunkSize) {
+      final end = (i + chunkSize > segments.length) ? segments.length : i + chunkSize;
+      final batch = segments.sublist(i, end);
+      final texts = batch.map((s) => s.text).toList();
+      
+      onProgress?.call('Gemini ກຳລັງແປ (${i + 1}-$end/${segments.length})...');
+
+      final String prompt;
+      if (targetLang == 'lo') {
+        // Deep Lao-specific prompt with spelling rules and examples
+        prompt =
+            'You are an expert Thai-to-Lao translator specializing in subtitle translation for social media videos (TikTok/Reels/Shorts).\n\n'
+            'Task: Translate this JSON array of Thai subtitle segments into NATURAL Lao (ພາສາລາວ).\n\n'
+            '⚠️ CRITICAL LAO SPELLING & VOCABULARY RULES (ກົດສະກົດພາສາລາວ):\n'
+            'Thai and Lao are DIFFERENT languages with DIFFERENT spelling systems. You must NOT just swap Thai characters to Lao. You must write proper Lao.\n\n'
+            'KEY DIFFERENCES:\n'
+            '- Thai ไ◌ (sara ai maimalai) → Lao ໄ◌\n'
+            '- Thai ใ◌ (sara ai maimuan) → Lao ໃ◌ (only 20 specific words use ໃ: ໃຊ້, ໃຫ້, ໃຫຍ່, ໃກ້, ໃຈ, ໃໝ່, ໃບ, ໃດ, ໃຕ້, ໃນ, ໃສ, ໃສ່, ໃຜ, ໃຝ່, ໃຍ, ໃຫວ້, ໃຫ້ only these)\n'
+            '- Thai ็ (mai taikhu) → Lao ັ (mai kan)\n'
+            '- Thai ์ (gaaran) → Lao ໌ (gaaran lao)\n'
+            '- Thai ๆ → Lao ໆ\n'
+            '- Thai ฯ → not used in Lao\n'
+            '- Lao does NOT use Thai characters like: ฎ ฏ ฐ ฑ ฒ ณ ฤ ฦ ศ ษ ฬ ฮ (different set)\n'
+            '- Thai ร → Lao ຣ or ລ depending on the word\n'
+            '- Thai มี → Lao ມີ, Thai ไม่ → Lao ບໍ່\n\n'
+            'COMMON TRANSLATION EXAMPLES (ຕ້ອງແປ ບໍ່ແມ່ນແປງຕົວອັກສອນ):\n'
+            '- "เป็นยังไงบ้าง" → "ເປັນແນວໃດແດ່" or "ເປັນຈັ່ງໃດແດ່" (NOT "ເປັນຍັງໄງບ້າງ")\n'
+            '- "ทำไม" → "ເປັນຫຍັງ" or "ຍ້ອນຫຍັງ" (NOT "ທຳໄມ")\n'
+            '- "อย่างไร" → "ແນວໃດ" or "ຈັ່ງໃດ" (NOT "ຢ່າງໄຣ")\n'
+            '- "อย่างแรกเลย" → "ຢ່າງທຳອິດເລີຍ" or "ກ່ອນອື່ນໝົດ"\n'
+            '- "ก็คือ" → "ກໍຄື"\n'
+            '- "ต้อง" → "ຕ້ອງ"\n'
+            '- "ได้" → "ໄດ້"\n'
+            '- "ไม่ได้" → "ບໍ່ໄດ້"\n'
+            '- "จริงๆ" → "ແທ້ໆ" (NOT "ຈິງໆ")\n'
+            '- "แล้ว" → "ແລ້ວ"\n'
+            '- "ครับ/ค่ะ" → "ເດີ້/ເດ"\n'
+            '- "สวัสดี" → "ສະບາຍດີ" (NOT "ສະວັດດີ")\n'
+            '- "ขอบคุณ" → "ຂອບໃຈ" (NOT "ຂອບຄຸນ")\n'
+            '- "ถ้า" → "ຖ້າ" or "ຖ້າວ່າ"\n'
+            '- "เรื่อง" → "ເລື່ອງ"\n'
+            '- "มาก" → "ຫຼາຍ" (NOT "ມາກ")\n'
+            '- "เลย" → "ເລີຍ"\n'
+            '- "ดี" → "ດີ"\n'
+            '- "สนุก" → "ມ່ວນ" (NOT "ສະນຸກ")\n'
+            '- "อร่อย" → "ແຊບ" (NOT "ອະຫຼ່ອຍ")\n'
+            '- "สวย" → "ງາມ" (NOT "ສວຍ")\n'
+            '- "เก่ง" → "ເກັ່ງ" or "ຈັກ"\n'
+            '- "ไป" → "ໄປ"\n'
+            '- "กิน" → "ກິນ"\n'
+            '- "พูด" → "เວົ້າ" or "ເວົ້າ"\n'
+            '- "บอก" → "ບອກ"\n'
+            '- "เงิน" → "ເງິນ"\n'
+            '- "เพื่อน" → "ໝູ່" or "ເພື່ອນ"\n'
+            '- "ที่" → "ທີ່"\n\n'
+            'RULES:\n'
+            '1. TRANSLATE to natural spoken Lao — do NOT transliterate Thai characters to Lao equivalents.\n'
+            '2. Use REAL Lao words and expressions that Lao people actually say in daily life.\n'
+            '3. Ensure 100% correct Lao spelling with proper vowels (ສະຫຼະ) and consonants (ພະຍັນຊະນະ).\n'
+            '4. Keep brand names, technical terms, numbers, and English words as-is.\n'
+            '5. Each subtitle must be short, concise, and natural for video subtitles.\n'
+            '6. Maintain EXACTLY ${texts.length} items in the output array. Do NOT combine, split, or skip any.\n'
+            '7. Return ONLY a valid JSON array of strings. No markdown, no explanations.\n\n'
+            'Input: ${jsonEncode(texts)}';
+      } else if (targetLang == 'th' && sourceLang == 'lo') {
+        prompt =
+            'You are an expert Lao-to-Thai translator for social media subtitle videos.\n\n'
+            'Task: Translate this JSON array of Lao subtitle segments into natural, modern spoken Thai (ภาษาไทย).\n\n'
+            'RULES:\n'
+            '1. Use natural conversational Thai, as spoken on Thai social media.\n'
+            '2. Ensure 100% correct Thai spelling and grammar.\n'
+            '3. Keep brand names, technical terms, numbers, and English words as-is.\n'
+            '4. Maintain EXACTLY ${texts.length} items. Do NOT combine, split, or skip any.\n'
+            '5. Return ONLY a valid JSON array of strings.\n\n'
+            'Input: ${jsonEncode(texts)}';
+      } else {
+        prompt =
+            'You are an expert bilingual subtitle translator specializing in translating spoken $sourceName to natural, modern, conversational $targetName for social media videos.\n\n'
+            'Task: Translate this JSON array of subtitle segments into $targetName.\n\n'
+            'CRITICAL RULES:\n'
+            '1. Speak like a native speaker of $targetName. Use natural, conversational, modern spoken words. Avoid literal word-for-word transliterations that sound unnatural.\n'
+            '2. Ensure 100% correct grammar, vocabulary, and spelling.\n'
+            '3. Keep specific technical terms, brand/people names, numbers, or English words exactly as they are in the original.\n'
+            '4. Strictly maintain the exact same array length. Translate each element individually. Do not combine, split, or omit any sentences. Input has ${texts.length} items, so you MUST output exactly ${texts.length} items.\n'
+            '5. Return ONLY a valid JSON array of strings. Do not include markdown formatting or any extra explanations.\n\n'
+            'Input: ${jsonEncode(texts)}';
+      }
+
+      final body = jsonEncode({
+        'contents': [
+          {
+            'parts': [
+              {'text': prompt}
+            ]
+          }
+        ],
+        'generationConfig': {'temperature': 0.1},
+      });
+
+      try {
+        http.Response? response;
+        const maxAttempts = 4;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+          final activeEndpoint = flash35Endpoint;
+          final uri = Uri.parse('$activeEndpoint?key=$apiKey');
+          
+          if (attempt >= 2) {
+            onProgress?.call('Gemini 3.5 Flash ບໍ່ຫວ່າງ, ກຳລັງລອງໃໝ່ ($attempt/$maxAttempts)...');
+          }
+
+          try {
+            response = await http.post(
+              uri,
+              headers: {'Content-Type': 'application/json'},
+              body: body,
+            ).timeout(const Duration(seconds: 45));
+          } catch (_) {
+            if (attempt >= maxAttempts) break;
+            await Future.delayed(Duration(seconds: 4 * attempt));
+            continue;
+          }
+          
+          if (response.statusCode == 200) {
+            break;
+          }
+          
+          final retryable = response.statusCode == 429 || response.statusCode == 503 || response.statusCode == 500;
+          if (retryable && attempt < maxAttempts) {
+            final delaySecs = 4 * attempt;
+            onProgress?.call('Gemini ຂໍ້ຈຳກັດໂຄຕາ (${response.statusCode}) — ລໍຖ້າ $delaySecs ວິນາທີ ($attempt/$maxAttempts)...');
+            await Future.delayed(Duration(seconds: delaySecs));
+            continue;
+          } else {
+            break;
+          }
+        }
+        
+        if (response == null || response.statusCode != 200) continue; 
+
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        final parts = (data['candidates']?[0]?['content'] as Map<String, dynamic>?)?['parts'] as List<dynamic>?;
+        if (parts == null || parts.isEmpty) continue;
+
+        var raw = (parts[0]['text'] as String? ?? '').trim();
+        raw = raw.replaceAll('```json', '').replaceAll('```', '').trim();
+        final s = raw.indexOf('[');
+        final e = raw.lastIndexOf(']');
+        if (s == -1 || e == -1) continue;
+
+        final list = jsonDecode(raw.substring(s, e + 1)) as List<dynamic>;
+        
+        if (list.length == batch.length) {
+          for (int j = 0; j < batch.length; j++) {
+            final originalText = batch[j].text;
+            final translatedText = list[j].toString().trim();
+            if (keepOriginalAsBilingual) {
+              batch[j].text = translatedText;
+              batch[j].translatedText = originalText;
+            } else {
+              batch[j].text = translatedText;
+              batch[j].translatedText = null;
+            }
+            batch[j].words = null; 
+            batch[j].wordTimings = null;
+          }
+        }
+      } catch (_) {
+        // Continue to next batch on error
+      }
     }
   }
 }

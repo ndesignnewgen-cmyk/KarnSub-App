@@ -604,6 +604,48 @@ class SubtitleSegment {
       );
 }
 
+enum SfxType {
+  pop,
+  ding,
+  swoosh,
+  chime,
+  drum,
+  beep,
+  bubble,
+  click,
+  whoosh,
+  tada,
+  bounce,
+  glitch,
+  // ── ໃໝ່ ──
+  heart,    // ❤️ romantic/love
+  fire,     // 🔥 intense/hot
+  wind,     // 🌬️ gentle breeze
+  laugh,    // 😂 funny giggle
+  sad,      // 😢 descending sad tone
+  magic,    // 🪄 sparkle wand
+  power,    // 💪 heavy impact
+  surprise, // 😮 gasp/reveal
+}
+
+class SfxBlock {
+  final String id;
+  SfxType type;
+  Duration startTime;
+
+  SfxBlock({
+    required this.id,
+    required this.type,
+    required this.startTime,
+  });
+
+  SfxBlock copy() => SfxBlock(
+        id: id,
+        type: type,
+        startTime: startTime,
+      );
+}
+
 class SubtitleProject {
   final String id;
   String name;
@@ -614,9 +656,11 @@ class SubtitleProject {
   WordSplit wordSplit;
   TranslateMode translateMode;
   List<SubtitleSegment> segments;
+  List<SfxBlock> sfxBlocks;
   Duration? videoDuration;
   DateTime createdAt;
   String language;
+  String sourceLanguage;
   double fontSize;
   int fontWeight; // 100..900 (overrides the preset weight)
   double subtitlePositionY; // 0.0 = top, 1.0 = bottom
@@ -632,6 +676,8 @@ class SubtitleProject {
   SubtitleAnimation subtitleAnimation;
   SubtitleAnimation exitAnimation; // animation when the subtitle leaves
   AnimationSpeed animationSpeed; // in/out + typewriter speed
+  bool isAutoCut;
+  bool isAutoSyncSfx;
 
   SubtitleProject({
     required this.id,
@@ -643,9 +689,11 @@ class SubtitleProject {
     this.wordSplit = WordSplit.none,
     this.translateMode = TranslateMode.none,
     List<SubtitleSegment>? segments,
+    List<SfxBlock>? sfxBlocks,
     this.videoDuration,
     DateTime? createdAt,
     this.language = 'lo',
+    this.sourceLanguage = 'th',
     this.fontSize = 18.0,
     this.fontWeight = 600,
     this.subtitlePositionY = 0.85,
@@ -660,6 +708,9 @@ class SubtitleProject {
     this.subtitleAnimation = SubtitleAnimation.none,
     this.exitAnimation = SubtitleAnimation.none,
     this.animationSpeed = AnimationSpeed.normal,
+    this.isAutoCut = false,
+    this.isAutoSyncSfx = false,
   })  : segments = segments ?? [],
+        sfxBlocks = sfxBlocks ?? [],
         createdAt = createdAt ?? DateTime.now();
 }

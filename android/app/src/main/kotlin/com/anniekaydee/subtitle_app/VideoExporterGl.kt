@@ -60,6 +60,7 @@ class VideoExporterGl {
         outputPath: String,
         onProgress: (Double) -> Unit,
         subtitleProvider: (Long) -> Bitmap?,
+        keptRegions: List<Pair<Long, Long>>? = null,
     ) {
         var extractor: MediaExtractor? = null
         var audioExtractor: MediaExtractor? = null
@@ -179,21 +180,29 @@ class VideoExporterGl {
                     val st = decoder.dequeueOutputBuffer(decInfo, 5_000L)
                     if (st >= 0) {
                         val eos = decInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
-                        val render = decInfo.size != 0 && !eos
-                        decoder.releaseOutputBuffer(st, render)
-                        if (render) {
-                            awaitNewImage()
-                            surfaceTexture.getTransformMatrix(stMatrix)
-                            drawFrame(stMatrix, subtitleProvider(decInfo.presentationTimeUs))
-                            val pts = maxOf(decInfo.presentationTimeUs, lastPtsUs + 1)
-                            lastPtsUs = pts
-                            EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, pts * 1000L)
-                            EGL14.eglSwapBuffers(eglDisplay, eglSurface)
-                            if (durationUs > 0L) {
-                                val pct = ((pts.toDouble() / durationUs) * 100).toInt()
-                                if (pct != lastPct) {
-                                    lastPct = pct
-                                    onProgress(0.10 + (pts.toDouble() / durationUs).coerceIn(0.0, 1.0) * 0.82)
+                        val presentUs = decInfo.presentationTimeUs
+                        val keepFrame = keptRegions == null || keptRegions.isEmpty() || keptRegions.any { presentUs >= it.first && presentUs <= it.second }
+                        val render = decInfo.size != 0 && !eos && keepFrame
+
+                        if (decInfo.size != 0 && !eos && !keepFrame) {
+                            decoder.releaseOutputBuffer(st, false)
+                        } else {
+                            decoder.releaseOutputBuffer(st, render)
+                            if (render) {
+                                awaitNewImage()
+                                surfaceTexture.getTransformMatrix(stMatrix)
+                                drawFrame(stMatrix, subtitleProvider(presentUs))
+                                val newPts = mapOriginalToNewPts(presentUs, keptRegions)
+                                val pts = maxOf(newPts, lastPtsUs + 1)
+                                lastPtsUs = pts
+                                EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, pts * 1000L)
+                                EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+                                if (durationUs > 0L) {
+                                    val pct = ((presentUs.toDouble() / durationUs) * 100).toInt()
+                                    if (pct != lastPct) {
+                                        lastPct = pct
+                                        onProgress(0.10 + (presentUs.toDouble() / durationUs).coerceIn(0.0, 1.0) * 0.82)
+                                    }
                                 }
                             }
                         }
@@ -239,12 +248,16 @@ class VideoExporterGl {
                     while (true) {
                         val sz = aEx.readSampleData(abuf, 0)
                         if (sz < 0) break
-                        aInfo.offset = 0
-                        aInfo.size = sz
-                        aInfo.presentationTimeUs = aEx.sampleTime
-                        aInfo.flags = if (aEx.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0)
-                            MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
-                        muxer.writeSampleData(muxAudio, abuf, aInfo)
+                        val sampleTimeUs = aEx.sampleTime
+                        val keepAudio = keptRegions == null || keptRegions.isEmpty() || keptRegions.any { sampleTimeUs >= it.first && sampleTimeUs <= it.second }
+                        if (keepAudio) {
+                            aInfo.offset = 0
+                            aInfo.size = sz
+                            aInfo.presentationTimeUs = mapOriginalToNewPts(sampleTimeUs, keptRegions)
+                            aInfo.flags = if (aEx.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0)
+                                MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
+                            muxer.writeSampleData(muxAudio, abuf, aInfo)
+                        }
                         aEx.advance()
                     }
                 } catch (_: Exception) {
@@ -264,6 +277,21 @@ class VideoExporterGl {
             try { muxer?.release() } catch (_: Exception) {}
             releaseGl()
         }
+    }
+
+    private fun mapOriginalToNewPts(originalPtsUs: Long, keptRegions: List<Pair<Long, Long>>?): Long {
+        if (keptRegions == null || keptRegions.isEmpty()) return originalPtsUs
+        var accumulatedTime = 0L
+        for (region in keptRegions) {
+            if (originalPtsUs < region.first) {
+                return accumulatedTime
+            }
+            if (originalPtsUs <= region.second) {
+                return accumulatedTime + (originalPtsUs - region.first)
+            }
+            accumulatedTime += (region.second - region.first)
+        }
+        return accumulatedTime
     }
 
     // ─── EGL ─────────────────────────────────────────────────────────────────

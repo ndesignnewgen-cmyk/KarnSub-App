@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:provider/provider.dart';
 import 'package:video_player/video_player.dart';
+import 'package:uuid/uuid.dart';
 import 'dart:async';
 import 'dart:io';
 import '../theme/app_theme.dart';
@@ -11,15 +12,21 @@ import '../models/subtitle_style_model.dart';
 import '../providers/project_provider.dart';
 import '../services/gemini_speech_service.dart';
 import '../services/groq_speech_service.dart';
+import '../services/openai_whisper_service.dart';
 import '../services/audio_sync_service.dart';
+import '../services/export_service.dart';
 import '../services/lao_font_service.dart';
 import '../services/custom_font_service.dart';
 import '../services/lao_word_service.dart';
 import '../services/thumbnail_service.dart';
 import '../services/api_config.dart';
 import '../services/free_quota_service.dart';
+import '../services/tts_service.dart';
+import '../services/sfx_player_service.dart';
+import '../utils/sfx_mapper.dart';
 import '../widgets/style_preview_card.dart';
 import 'export_screen.dart';
+import 'settings_screen.dart';
 
 // Available Lao-compatible fonts
 const _laoFonts = [
@@ -73,10 +80,11 @@ class _EditorScreenState extends State<EditorScreen>
   Duration _duration = Duration.zero;
   int _syncOffsetMs = 0; // cumulative sync shift applied this session
   bool _autoSyncing = false;
+  bool _analyzingAudio = false;
+  List<List<int>> _keptRegions = [];
   // Timeline (CapCut-style) state
   final ScrollController _timelineScroll = ScrollController();
   List<int> _timelineOnsets = const [];
-  bool _onsetsLoaded = false;
   int? _dragIndex; // segment being dragged on the timeline
   bool _rippleMode = false; // drag a block → all blocks after it move too
   bool _timelineProgrammatic = false; // guard against scroll/seek feedback loop
@@ -85,6 +93,7 @@ class _EditorScreenState extends State<EditorScreen>
   Timer? _scrubDebounce;
   double _pxPerSec = 120.0; // timeline horizontal scale (zoomable)
   int? _selectedIndex; // selected timeline block (shows action toolbar)
+  String? _selectedSfxId; // selected SFX block ID
   List<double> _waveform = const []; // normalised amplitude per 20ms
   List<({int ms, String path})> _thumbs = const []; // filmstrip frames
   // Pinch-to-zoom (two-finger) state for the timeline.
@@ -99,6 +108,8 @@ class _EditorScreenState extends State<EditorScreen>
   static const double _deg2rad = 3.141592653589793 / 180.0;
   bool _importingFont = false; // true while the font picker / copy is running
   bool _isPro = false;
+  final TtsService _ttsService = TtsService();
+  int _lastSfxTickMs = -1;
 
   @override
   void initState() {
@@ -126,6 +137,7 @@ class _EditorScreenState extends State<EditorScreen>
     _loadPreviewFonts();
     _loadProStatus();
     _ensureKaraokeWordUnits();
+    SfxPlayerService().init();
   }
 
   /// When karaoke is on, make sure every segment carries real ICU word-level
@@ -152,12 +164,94 @@ class _EditorScreenState extends State<EditorScreen>
   Future<void> _initVideo() async {
     final project = context.read<ProjectProvider>().currentProject;
     if (project?.videoPath == null) return;
-    _videoController = VideoPlayerController.file(File(project!.videoPath!));
+    _videoController = VideoPlayerController.file(
+      File(project!.videoPath!),
+      videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
+    );
     await _videoController!.initialize();
     setState(() {
       _duration = _videoController!.value.duration;
     });
+    if (project.isAutoCut) {
+      await _initKeptRegions();
+    }
     _videoController!.addListener(_onVideoUpdate);
+  }
+
+  Future<void> _initKeptRegions() async {
+    final project = context.read<ProjectProvider>().currentProject;
+    if (project == null || project.videoPath == null) return;
+    try {
+      final flatList = await ExportService.detectSpeechRegions(project.videoPath!);
+      final durMs = _duration.inMilliseconds > 0 ? _duration.inMilliseconds : 10000;
+      _keptRegions = computeKeptRegions(flatList, durMs);
+    } catch (e) {
+      debugPrint('Failed to load kept regions: $e');
+    }
+  }
+
+  List<List<int>> computeKeptRegions(List<int> speechFlatList, int totalDurationMs) {
+    if (speechFlatList.isEmpty) return [];
+    final List<List<int>> rawRegions = [];
+    for (int i = 0; i < speechFlatList.length; i += 2) {
+      if (i + 1 < speechFlatList.length) {
+        rawRegions.add([speechFlatList[i], speechFlatList[i + 1]]);
+      }
+    }
+    if (rawRegions.isEmpty) return [];
+
+    // Merge regions separated by <= 300ms
+    final List<List<int>> merged = [];
+    var curStart = rawRegions[0][0];
+    var curEnd = rawRegions[0][1];
+    for (int i = 1; i < rawRegions.length; i++) {
+      final rStart = rawRegions[i][0];
+      final rEnd = rawRegions[i][1];
+      if (rStart - curEnd <= 300) {
+        curEnd = rEnd;
+      } else {
+        merged.add([curStart, curEnd]);
+        curStart = rStart;
+        curEnd = rEnd;
+      }
+    }
+    merged.add([curStart, curEnd]);
+    return merged;
+  }
+
+  Future<void> _toggleAutoCut(ProjectProvider provider) async {
+    final project = provider.currentProject;
+    if (project == null) return;
+    
+    if (project.isAutoCut) {
+      project.isAutoCut = false;
+      provider.updateProject(project);
+      _toast('ປິດ AI Auto-Cut ແລ້ວ');
+      setState(() {});
+      return;
+    }
+    
+    if (_keptRegions.isEmpty) {
+      setState(() => _analyzingAudio = true);
+      try {
+        final flatList = await ExportService.detectSpeechRegions(project.videoPath!);
+        final durMs = _duration.inMilliseconds > 0 ? _duration.inMilliseconds : 10000;
+        _keptRegions = computeKeptRegions(flatList, durMs);
+      } catch (e) {
+        _toast('ການວິເຄາະສຽງຫຼົ້ມເຫຼວ: ${e.toString()}');
+      } finally {
+        setState(() => _analyzingAudio = false);
+      }
+    }
+    
+    if (_keptRegions.isNotEmpty) {
+      project.isAutoCut = true;
+      provider.updateProject(project);
+      _toast('ເປີດ AI Auto-Cut ⚡ ຕັດຊ່ວງງຽບແລ້ວ!');
+      setState(() {});
+    } else {
+      _toast('ບໍ່ພົບຊ່ວງສຽງເວົ້າໃນວິດີໂອ');
+    }
   }
 
   void _onVideoUpdate() {
@@ -168,8 +262,35 @@ class _EditorScreenState extends State<EditorScreen>
     _position = pos; // cheap field update (no rebuild) for scroll math
     if (!playing) _scrollTicker?.stop();
 
-    // Which subtitle is under the playhead now?
+    // AI Auto-Cut dynamic preview seek listener
     final project = context.read<ProjectProvider>().currentProject;
+    if (project != null && project.isAutoCut && _keptRegions.isNotEmpty) {
+      final posMs = pos.inMilliseconds;
+      bool inKept = false;
+      int? nextStartMs;
+      for (final region in _keptRegions) {
+        if (posMs >= region[0] && posMs <= region[1]) {
+          inKept = true;
+          break;
+        }
+        if (region[0] > posMs) {
+          if (nextStartMs == null || region[0] < nextStartMs) {
+            nextStartMs = region[0];
+          }
+        }
+      }
+      if (!inKept) {
+        if (nextStartMs != null) {
+          _videoController!.seekTo(Duration(milliseconds: nextStartMs));
+          return;
+        } else {
+          _videoController!.seekTo(_duration);
+          return;
+        }
+      }
+    }
+
+    // Which subtitle is under the playhead now?
     int? newActive;
     if (project != null) {
       for (int i = 0; i < project.segments.length; i++) {
@@ -278,7 +399,6 @@ class _EditorScreenState extends State<EditorScreen>
       setState(() {
         _timelineOnsets = onsets;
         _waveform = wave;
-        _onsetsLoaded = true;
       });
     }
     // Filmstrip thumbnails (slower) load in the background; timeline shows the
@@ -297,6 +417,7 @@ class _EditorScreenState extends State<EditorScreen>
       c.pause();
       _scrollTicker?.stop();
       _scrollTimelineToPosition(); // settle exactly on the current position
+      _lastSfxTickMs = -1;
     } else {
       // If we're at (or past) the end, restart from the beginning.
       if (_duration > Duration.zero &&
@@ -306,6 +427,7 @@ class _EditorScreenState extends State<EditorScreen>
       c.play();
       _anchorPosMs = c.value.position.inMilliseconds;
       _anchorWallMs = DateTime.now().millisecondsSinceEpoch;
+      _lastSfxTickMs = _anchorPosMs - 1;
       _scrollTicker?.start(); // drives scroll + smooth subtitle animation
     }
   }
@@ -315,6 +437,7 @@ class _EditorScreenState extends State<EditorScreen>
     if (_isPlaying) {
       _videoController?.pause();
       _scrollTicker?.stop();
+      _lastSfxTickMs = -1;
     }
   }
 
@@ -324,6 +447,7 @@ class _EditorScreenState extends State<EditorScreen>
       _videoController?.pause();
       _scrollTicker?.stop();
       _isPlaying = false;
+      _lastSfxTickMs = -1;
     }
     _videoController?.seekTo(pos);
     setState(() => _position = pos);
@@ -359,58 +483,52 @@ class _EditorScreenState extends State<EditorScreen>
     );
     return Container(
       color: AppColors.surface,
-      padding: const EdgeInsets.fromLTRB(10, 1, 10, 0),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
+      padding: const EdgeInsets.fromLTRB(10, 4, 10, 4), // Reduced vertical padding
+      child: Row(
         children: [
-          Row(
-            children: [
-              SizedBox(
-                width: 40,
-                child: Text(
-                  _formatDuration(_position),
-                  style: const TextStyle(
-                    color: AppColors.textPrimary,
-                    fontSize: 11,
-                  ),
-                ),
+          SizedBox(
+            width: 40,
+            child: Text(
+              _formatDuration(_position),
+              style: const TextStyle(
+                color: AppColors.textPrimary,
+                fontSize: 11,
               ),
-              const Spacer(),
-              iconBtn(
-                Icons.fast_rewind,
-                20,
-                AppColors.textSecondary,
-                () => _jumpSegment(provider, -1),
-              ),
-              iconBtn(
-                _isPlaying
-                    ? Icons.pause_circle_filled
-                    : Icons.play_circle_filled,
-                34,
-                AppColors.primary,
-                _togglePlay,
-              ),
-              iconBtn(
-                Icons.fast_forward,
-                20,
-                AppColors.textSecondary,
-                () => _jumpSegment(provider, 1),
-              ),
-              const Spacer(),
-              SizedBox(
-                width: 40,
-                child: Text(
-                  _formatDuration(_duration),
-                  textAlign: TextAlign.right,
-                  style: const TextStyle(
-                    color: AppColors.textHint,
-                    fontSize: 11,
-                  ),
-                ),
-              ),
-            ],
+            ),
           ),
-          _buildTimeRuler(),
+          const Spacer(),
+          iconBtn(
+            Icons.fast_rewind,
+            18, // Reduced from 20
+            AppColors.textSecondary,
+            () => _jumpSegment(provider, -1),
+          ),
+          iconBtn(
+            _isPlaying
+                ? Icons.pause_circle_filled
+                : Icons.play_circle_filled,
+            28, // Reduced from 34
+            AppColors.primary,
+            _togglePlay,
+          ),
+          iconBtn(
+            Icons.fast_forward,
+            18, // Reduced from 20
+            AppColors.textSecondary,
+            () => _jumpSegment(provider, 1),
+          ),
+          const Spacer(),
+          SizedBox(
+            width: 40,
+            child: Text(
+              _formatDuration(_duration),
+              textAlign: TextAlign.right,
+              style: const TextStyle(
+                color: AppColors.textHint,
+                fontSize: 11,
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -455,19 +573,72 @@ class _EditorScreenState extends State<EditorScreen>
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.background,
-      body: SafeArea(
-        child: Column(
-          children: [
-            _buildTopBar(),
-            _buildVideoPreview(),
-            // Play + scrub controls as a dedicated bar BELOW the preview (CapCut
-            // style) — not overlaid on the video, and the play button is kept
-            // clear of the scrub slider so tapping play never jumps the playhead.
-            _buildPlayBar(),
-            _buildTabBar(),
-            Expanded(child: _buildTabContent()),
-          ],
-        ),
+      body: Stack(
+        children: [
+          SafeArea(
+            child: Column(
+              children: [
+                _buildTopBar(),
+                _buildVideoPreview(),
+                // Play + scrub controls as a dedicated bar BELOW the preview (CapCut
+                // style) — not overlaid on the video, and the play button is kept
+                // clear of the scrub slider so tapping play never jumps the playhead.
+                _buildPlayBar(),
+                _buildTabBar(),
+                Expanded(child: _buildTabContent()),
+              ],
+            ),
+          ),
+          if (_analyzingAudio)
+            Container(
+              color: Colors.black.withOpacity(0.65),
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.all(24),
+                  margin: const EdgeInsets.symmetric(horizontal: 40),
+                  decoration: BoxDecoration(
+                    color: AppColors.surface,
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: AppColors.border),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.3),
+                        blurRadius: 15,
+                        offset: const Offset(0, 8),
+                      ),
+                    ],
+                  ),
+                  child: const Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      CircularProgressIndicator(
+                        strokeWidth: 3.5,
+                        valueColor: AlwaysStoppedAnimation<Color>(AppColors.primary),
+                      ),
+                      SizedBox(height: 16),
+                      Text(
+                        'ກຳລັງກວດສອບຄື້ນສຽງ... ⚡',
+                        style: TextStyle(
+                          color: AppColors.textPrimary,
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      SizedBox(height: 8),
+                      Text(
+                        'ກຳລັງວິເຄາະຫາຊ່ວງງຽບ (Dead Air) ຂອງວິດີໂອ',
+                        style: TextStyle(
+                          color: AppColors.textHint,
+                          fontSize: 11.5,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -490,17 +661,7 @@ class _EditorScreenState extends State<EditorScreen>
                 onPressed: () => Navigator.pop(context),
               ),
               const SizedBox(width: 4),
-              const Expanded(
-                child: Text(
-                  'Editor',
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: AppColors.textPrimary,
-                    fontWeight: FontWeight.w600,
-                    fontSize: 17,
-                  ),
-                ),
-              ),
+
               const SizedBox(width: 4),
               // Undo
               IconButton(
@@ -532,7 +693,14 @@ class _EditorScreenState extends State<EditorScreen>
                 onPressed: provider.canRedo ? provider.redo : null,
               ),
               const SizedBox(width: 6),
-              // Translate (icon-only to save space)
+              Expanded(
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  reverse: true,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      // Translate (icon-only to save space)
               if (_isTranslating)
                 const SizedBox(
                   width: 20,
@@ -601,6 +769,32 @@ class _EditorScreenState extends State<EditorScreen>
                     Icons.subtitles_outlined,
                     color: AppColors.textSecondary,
                     size: 16,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              // AI Dubbing (icon-only to save header width)
+              GestureDetector(
+                onTap: () => _showDubbingDialog(provider),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 7,
+                  ),
+                  decoration: BoxDecoration(
+                    color: AppColors.surface,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: AppColors.border),
+                  ),
+                  child: const Icon(
+                    Icons.record_voice_over_outlined,
+                    color: AppColors.textSecondary,
+                    size: 16,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+                    ],
                   ),
                 ),
               ),
@@ -1626,95 +1820,73 @@ class _EditorScreenState extends State<EditorScreen>
     );
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 2),
-      child: Column(
+      padding: const EdgeInsets.fromLTRB(16, 5, 16, 5),
+      child: Row(
         children: [
-          SliderTheme(
-            data: SliderThemeData(
-              trackHeight: 3,
-              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
-              overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
-              activeTrackColor: AppColors.primary,
-              inactiveTrackColor: AppColors.surfaceLight,
-              thumbColor: Colors.white,
-              overlayColor: AppColors.primary.withOpacity(0.2),
-            ),
-            child: Slider(
-              value: totalMs > 0 ? currentMs.clamp(0, totalMs) : 0,
-              max: totalMs > 0 ? totalMs : 1,
-              onChanged: totalMs > 0
-                  ? (v) => _seekTo(Duration(milliseconds: v.toInt()))
-                  : null,
+          SizedBox(
+            width: 46,
+            child: Text(
+              _formatDuration(_position),
+              style: const TextStyle(
+                color: AppColors.textSecondary,
+                fontSize: 11.5,
+                fontFeatures: [FontFeature.tabularFigures()],
+              ),
             ),
           ),
-          Row(
-            children: [
-              SizedBox(
-                width: 46,
-                child: Text(
-                  _formatDuration(_position),
-                  style: const TextStyle(
-                    color: AppColors.textSecondary,
-                    fontSize: 11.5,
-                    fontFeatures: [FontFeature.tabularFigures()],
-                  ),
-                ),
-              ),
-              Expanded(
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    sideBtn(Icons.replay_5_rounded, () {
-                      final t = _position - const Duration(seconds: 5);
-                      _seekTo(t < Duration.zero ? Duration.zero : t);
-                    }),
-                    const SizedBox(width: 22),
-                    GestureDetector(
-                      onTap: _togglePlay,
-                      child: Container(
-                        width: 48,
-                        height: 48,
-                        decoration: BoxDecoration(
-                          gradient: AppGradients.primary,
-                          shape: BoxShape.circle,
-                          boxShadow: [
-                            BoxShadow(
-                              color: AppColors.primary.withOpacity(0.4),
-                              blurRadius: 12,
-                              offset: const Offset(0, 4),
-                            ),
-                          ],
+          Expanded(
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                sideBtn(Icons.replay_5_rounded, () {
+                  final t = _position - const Duration(seconds: 5);
+                  _seekTo(t < Duration.zero ? Duration.zero : t);
+                }),
+                const SizedBox(width: 22),
+                GestureDetector(
+                  onTap: _togglePlay,
+                  child: Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      gradient: AppGradients.primary,
+                      shape: BoxShape.circle,
+                      boxShadow: [
+                        BoxShadow(
+                          color: AppColors.primary.withOpacity(0.4),
+                          blurRadius: 10,
+                          offset: const Offset(0, 3),
                         ),
-                        child: Icon(
-                          _isPlaying
-                              ? Icons.pause_rounded
-                              : Icons.play_arrow_rounded,
-                          color: Colors.white,
-                          size: 28,
-                        ),
-                      ),
+                      ],
                     ),
-                    const SizedBox(width: 22),
-                    sideBtn(Icons.forward_5_rounded, () {
-                      final t = _position + const Duration(seconds: 5);
-                      _seekTo(t > _duration ? _duration : t);
-                    }),
-                  ],
-                ),
-              ),
-              SizedBox(
-                width: 46,
-                child: Text(
-                  _formatDuration(_duration),
-                  textAlign: TextAlign.right,
-                  style: const TextStyle(
-                    color: AppColors.textSecondary,
-                    fontSize: 11.5,
-                    fontFeatures: [FontFeature.tabularFigures()],
+                    child: Icon(
+                      _isPlaying
+                          ? Icons.pause_rounded
+                          : Icons.play_arrow_rounded,
+                      color: Colors.white,
+                      size: 24,
+                    ),
                   ),
                 ),
+                const SizedBox(width: 22),
+                sideBtn(Icons.forward_5_rounded, () {
+                  final t = _position + const Duration(seconds: 5);
+                  _seekTo(t > _duration ? _duration : t);
+                }),
+              ],
+            ),
+          ),
+          SizedBox(
+            width: 46,
+            child: Text(
+              _formatDuration(_duration),
+              textAlign: TextAlign.right,
+              style: const TextStyle(
+                color: AppColors.textSecondary,
+                fontSize: 11.5,
+                fontFeatures: [FontFeature.tabularFigures()],
               ),
-            ],
+            ),
           ),
         ],
       ),
@@ -1947,6 +2119,18 @@ class _EditorScreenState extends State<EditorScreen>
     // keeps in/out/typewriter buttery without rebuilding the tree all the time.
     final project = context.read<ProjectProvider>().currentProject;
     if (project == null) return;
+    
+    // SFX playback
+    if (_lastSfxTickMs >= -1 && estMs > _lastSfxTickMs && project.sfxBlocks.isNotEmpty) {
+      for (final block in project.sfxBlocks) {
+        final sTime = block.startTime.inMilliseconds;
+        if (sTime > _lastSfxTickMs && sTime <= estMs) {
+          SfxPlayerService().playSfx(block.type);
+        }
+      }
+    }
+    _lastSfxTickMs = estMs;
+
     if (project.subtitleAnimation == SubtitleAnimation.none &&
         project.exitAnimation == SubtitleAnimation.none) {
       return;
@@ -2195,8 +2379,9 @@ class _EditorScreenState extends State<EditorScreen>
     List<SubtitleSegment> segments,
   ) {
     if (segments.isEmpty) return const SizedBox.shrink();
-    // Always-on toolbar. Target = tapped block → sentence under the playhead →
-    // last active segment (so there is always a valid target to act on).
+    final project = provider.currentProject;
+    if (project == null) return const SizedBox.shrink();
+
     int target = (_selectedIndex != null && _selectedIndex! < segments.length)
         ? _selectedIndex!
         : -1;
@@ -2212,32 +2397,41 @@ class _EditorScreenState extends State<EditorScreen>
     if (target < 0) target = _activeSegmentIndex.clamp(0, segments.length - 1);
     final i = target;
 
-    // One tab-bar-style item: icon on top, label below, evenly distributed.
+    final isSfxSelected = _selectedSfxId != null;
+
+    // One tab-bar-style item: icon on top, label below.
     Widget item(
       IconData icon,
       String label,
       VoidCallback onTap, {
       bool danger = false,
       bool highlight = false,
+      Color? customColor,
+      Widget? customIcon,
     }) {
-      final col = danger
+      final col = customColor ?? (danger
           ? AppColors.accent
-          : (highlight ? const Color(0xFFFFD700) : AppColors.textSecondary);
-      return Expanded(
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: onTap,
+          : (highlight ? const Color(0xFFFFD700) : AppColors.textSecondary));
+      return GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: Container(
+          width: 72,
+          padding: const EdgeInsets.symmetric(vertical: 4),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(icon, size: 19, color: col),
-              const SizedBox(height: 3),
+              customIcon ?? Icon(icon, size: 20, color: col),
+              const SizedBox(height: 4),
               Text(
                 label,
+                textAlign: TextAlign.center,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   color: col,
-                  fontSize: 10.5,
-                  fontWeight: FontWeight.w500,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
             ],
@@ -2248,41 +2442,294 @@ class _EditorScreenState extends State<EditorScreen>
 
     return Container(
       margin: const EdgeInsets.fromLTRB(12, 2, 12, 8),
-      padding: const EdgeInsets.symmetric(vertical: 7),
+      padding: const EdgeInsets.symmetric(vertical: 8),
       decoration: BoxDecoration(
         color: AppColors.surface,
         borderRadius: BorderRadius.circular(14),
         border: Border.all(color: AppColors.border),
       ),
-      child: Row(
-        children: [
-          item(Icons.content_cut, 'ຕັດ', () => _splitAtPlayhead(provider, i)),
-          item(Icons.merge, 'ລວມ', () => _mergeWithNext(provider, i)),
-          item(
-            Icons.copy_all_outlined,
-            'ສຳເນົາ',
-            () => _duplicateSegment(provider, i),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        physics: const BouncingScrollPhysics(),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (isSfxSelected) ...[
+                // SFX Toolbar
+                item(
+                  Icons.delete_outline,
+                  'ລຶບ SFX',
+                  () => _deleteSfx(provider, _selectedSfxId!),
+                  danger: true,
+                ),
+              ] else ...[
+                // 1. Auto Sync Button
+              item(
+                Icons.auto_fix_high,
+                'Auto Sync',
+                _autoSyncing ? () {} : () => _aiSync(provider),
+                customColor: _autoSyncing ? AppColors.textHint : AppColors.primary,
+                customIcon: _autoSyncing
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          valueColor: AlwaysStoppedAnimation<Color>(AppColors.primary),
+                        ),
+                      )
+                    : null,
+              ),
+              
+              // 2. Auto ✨ Button
+              item(
+                Icons.auto_awesome,
+                'Auto ✨',
+                _autoSyncing ? () {} : () => _autoEmoji(provider),
+                customColor: const Color(0xFFFFB703),
+              ),
+
+              // 3. Auto-Cut ✂️ Button
+              item(
+                Icons.cut_rounded,
+                'Auto-Cut',
+                _autoSyncing ? () {} : () => _toggleAutoCut(provider),
+                customColor: project.isAutoCut ? const Color(0xFFE040FB) : AppColors.textSecondary,
+                highlight: project.isAutoCut,
+              ),
+
+              // Divider line between global AI tools and segment tools
+              Container(
+                width: 1,
+                height: 24,
+                margin: const EdgeInsets.symmetric(horizontal: 6),
+                color: AppColors.border,
+              ),
+
+              // 4. Split Button
+              item(Icons.content_cut, 'ຕັດ', () => _splitAtPlayhead(provider, i)),
+              
+              // 5. Merge Button
+              item(Icons.merge, 'ລວມ', () => _mergeWithNext(provider, i)),
+              
+              // 6. Copy Button
+              item(
+                Icons.copy_all_outlined,
+                'ສຳເນົາ',
+                () => _duplicateSegment(provider, i),
+              ),
+              
+              // 7. Edit Button
+              item(
+                Icons.edit_outlined,
+                'ແກ້',
+                () => _editSegment(segments[i], i, provider),
+              ),
+              
+              // 8. Style Button
+              item(
+                Icons.palette_outlined,
+                'ສໄຕລ໌',
+                () => _showSegmentStyleSheet(segments[i], i, provider),
+                highlight: segments[i].hasStyleOverride,
+              ),
+              
+              // 9. Delete Button
+              item(
+                Icons.delete_outline,
+                'ລຶບ',
+                () => _deleteSegment(provider, i),
+                danger: true,
+              ),
+              ],
+            ],
           ),
-          item(
-            Icons.edit_outlined,
-            'ແກ້',
-            () => _editSegment(segments[i], i, provider),
-          ),
-          item(
-            Icons.palette_outlined,
-            'ສໄຕລ໌',
-            () => _showSegmentStyleSheet(segments[i], i, provider),
-            highlight: segments[i].hasStyleOverride,
-          ),
-          item(
-            Icons.delete_outline,
-            'ລຶບ',
-            () => _deleteSegment(provider, i),
-            danger: true,
-          ),
-        ],
+        ),
       ),
     );
+  }
+
+  /// Builds interactive drag blocks for the SFX track
+  List<Widget> _buildInteractiveSfxBlocks(
+    List<SfxBlock> blocks,
+    ProjectProvider provider,
+    double leftPad,
+    int totalMs,
+    double sfxTop,
+    double sfxH,
+  ) {
+    return blocks.map((block) {
+      final left = (block.startTime.inMilliseconds / 1000.0) * _pxPerSec + leftPad;
+      double dur;
+      String label;
+      Color color;
+
+      switch (block.type) {
+        case SfxType.pop:
+          dur = 0.06;
+          label = '🌟 Pop';
+          color = Colors.amberAccent;
+          break;
+        case SfxType.ding:
+          dur = 0.35;
+          label = '🔔 Ding';
+          color = Colors.cyanAccent;
+          break;
+        case SfxType.swoosh:
+          dur = 0.40;
+          label = '💨 Swoosh';
+          color = Colors.lightBlueAccent;
+          break;
+        case SfxType.chime:
+          dur = 0.50;
+          label = '✨ Chime';
+          color = Colors.purpleAccent;
+          break;
+        case SfxType.drum:
+          dur = 0.25;
+          label = '🥁 Drum';
+          color = Colors.orangeAccent;
+          break;
+        case SfxType.beep:
+          dur = 0.20;
+          label = '🤖 Beep';
+          color = Colors.greenAccent;
+          break;
+        case SfxType.bubble:
+          dur = 0.15;
+          label = '💧 Bubble';
+          color = Colors.lightBlue;
+          break;
+        case SfxType.click:
+          dur = 0.05;
+          label = '👆 Click';
+          color = Colors.grey;
+          break;
+        case SfxType.whoosh:
+          dur = 0.60;
+          label = '🚀 Whoosh';
+          color = Colors.indigoAccent;
+          break;
+        case SfxType.tada:
+          dur = 1.00;
+          label = '🎉 Tada';
+          color = Colors.pinkAccent;
+          break;
+        case SfxType.bounce:
+          dur = 0.30;
+          label = '🦘 Bounce';
+          color = Colors.limeAccent;
+          break;
+        case SfxType.glitch:
+          dur = 0.25;
+          label = '⚠️ Glitch';
+          color = Colors.redAccent;
+          break;
+        case SfxType.heart:
+          dur = 0.50;
+          label = '❤️ Heart';
+          color = Colors.pinkAccent;
+          break;
+        case SfxType.fire:
+          dur = 0.35;
+          label = '🔥 Fire';
+          color = Colors.deepOrangeAccent;
+          break;
+        case SfxType.wind:
+          dur = 0.70;
+          label = '🌬️ Wind';
+          color = Colors.tealAccent;
+          break;
+        case SfxType.laugh:
+          dur = 0.55;
+          label = '😂 Laugh';
+          color = Colors.yellowAccent;
+          break;
+        case SfxType.sad:
+          dur = 0.60;
+          label = '😢 Sad';
+          color = Colors.blueAccent;
+          break;
+        case SfxType.magic:
+          dur = 0.55;
+          label = '🪄 Magic';
+          color = Colors.deepPurpleAccent;
+          break;
+        case SfxType.power:
+          dur = 0.30;
+          label = '💪 Power';
+          color = Colors.orange;
+          break;
+        case SfxType.surprise:
+          dur = 0.45;
+          label = '😮 Surprise';
+          color = Colors.lime;
+          break;
+      }
+
+      final w = (dur * _pxPerSec).clamp(32.0, 150.0);
+      final selected = _selectedSfxId == block.id;
+
+      return Positioned(
+        top: sfxTop,
+        left: left,
+        width: w,
+        height: sfxH,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () {
+            _pauseForEdit();
+            _seekTo(block.startTime);
+            setState(() {
+              _selectedIndex = null; // deselect subtitle
+              _selectedSfxId = block.id;
+            });
+            _scrollTimelineToPosition();
+          },
+          onHorizontalDragStart: (_) {
+            _pauseForEdit();
+            provider.pushHistory();
+            _dragIndex = -1; // arbitrary non-null to disable scroll
+          },
+          onHorizontalDragUpdate: (d) {
+            final deltaMs = (d.delta.dx / _pxPerSec * 1000).round();
+            block.startTime = Duration(
+              milliseconds: (block.startTime.inMilliseconds + deltaMs)
+                  .clamp(0, totalMs),
+            );
+            provider.liveUpdate();
+            setState(() {});
+          },
+          onHorizontalDragEnd: (_) {
+            provider.commit();
+            setState(() => _dragIndex = null);
+          },
+          child: Container(
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.9),
+              borderRadius: BorderRadius.circular(4),
+              border: Border.all(
+                color: selected ? Colors.white : Colors.transparent,
+                width: selected ? 2.0 : 0.0,
+              ),
+            ),
+            child: Center(
+              child: Text(
+                label,
+                style: const TextStyle(
+                  color: Colors.black87,
+                  fontSize: 8,
+                  fontWeight: FontWeight.bold,
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ),
+        ),
+      );
+    }).toList();
   }
 
   Widget _buildTimelineTab() {
@@ -2309,83 +2756,12 @@ class _EditorScreenState extends State<EditorScreen>
               padding: const EdgeInsets.fromLTRB(12, 5, 12, 3),
               child: Row(
                 children: [
-                  GestureDetector(
-                    onTap: _autoSyncing ? null : () => _aiSync(provider),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 6,
-                      ),
-                      decoration: BoxDecoration(
-                        gradient: const LinearGradient(
-                          colors: [AppColors.primaryDark, AppColors.primary],
-                        ),
-                        borderRadius: BorderRadius.circular(9),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          if (_autoSyncing)
-                            const SizedBox(
-                              width: 14,
-                              height: 14,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Colors.white,
-                              ),
-                            )
-                          else
-                            const Icon(
-                              Icons.auto_fix_high,
-                              color: Colors.white,
-                              size: 15,
-                            ),
-                          const SizedBox(width: 6),
-                          Text(
-                            _autoSyncing ? 'ກຳລັງ Sync...' : 'Auto Sync',
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 12.5,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  GestureDetector(
-                    onTap: _autoSyncing ? null : () => _autoEmoji(provider),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 6,
-                      ),
-                      decoration: BoxDecoration(
-                        gradient: const LinearGradient(
-                          colors: [Color(0xFFFF8A00), Color(0xFFFFC107)],
-                        ),
-                        borderRadius: BorderRadius.circular(9),
-                      ),
-                      child: const Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            Icons.auto_awesome,
-                            color: Colors.white,
-                            size: 15,
-                          ),
-                          SizedBox(width: 6),
-                          Text(
-                            'Auto ✨',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 12.5,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ],
-                      ),
+                  const Text(
+                    'Timeline 🎬',
+                    style: TextStyle(
+                      color: AppColors.textPrimary,
+                      fontSize: 13,
+                      fontWeight: FontWeight.bold,
                     ),
                   ),
                   const Spacer(),
@@ -2403,6 +2779,16 @@ class _EditorScreenState extends State<EditorScreen>
                   _miniIcon(Icons.zoom_out, () => _zoomTimeline(0.7)),
                   const SizedBox(width: 4),
                   _miniIcon(Icons.zoom_in, () => _zoomTimeline(1.4)),
+                  const SizedBox(width: 4),
+                  _miniIcon(
+                    Icons.music_note,
+                    () => _showAddSfxSheet(provider),
+                  ),
+                  const SizedBox(width: 4),
+                  _miniIcon(
+                    Icons.auto_awesome,
+                    () => _applyAutoSfx(provider),
+                  ),
                   const SizedBox(width: 4),
                   _miniIcon(
                     Icons.add,
@@ -2426,11 +2812,13 @@ class _EditorScreenState extends State<EditorScreen>
                   const filmH = 44.0; // slim video filmstrip
                   const waveH = 26.0; // slim audio track
                   const capH = 38.0; // slim caption-block track
+                  const sfxH = 18.0; // slim SFX track
                   final filmTop = rulerH + gap;
                   final waveTop = filmTop + (hasFilm ? filmH + gap : 0);
                   final capTop = waveTop + waveH + gap;
                   final blockTop = capTop;
                   final blockH = capH;
+                  final sfxTop = blockTop + blockH + gap;
                   return Listener(
                     onPointerDown: (e) {
                       _ptrs[e.pointer] = e.position;
@@ -2495,8 +2883,11 @@ class _EditorScreenState extends State<EditorScreen>
                                                 .clamp(0, totalMs);
                                         _seekTo(Duration(milliseconds: ms));
                                         _scrollTimelineToPosition();
-                                        if (_selectedIndex != null) {
-                                          setState(() => _selectedIndex = null);
+                                        if (_selectedIndex != null || _selectedSfxId != null) {
+                                          setState(() {
+                                            _selectedIndex = null;
+                                            _selectedSfxId = null;
+                                          });
                                         }
                                       },
                                     ),
@@ -2562,6 +2953,8 @@ class _EditorScreenState extends State<EditorScreen>
                                       blockH,
                                     ),
                                   ),
+                                  if (project.sfxBlocks.isNotEmpty)
+                                    ..._buildInteractiveSfxBlocks(project.sfxBlocks, provider, leftPad, totalMs, sfxTop, sfxH),
                                 ],
                               ),
                             ),
@@ -2778,27 +3171,72 @@ class _EditorScreenState extends State<EditorScreen>
     setState(() => _autoSyncing = true);
     try {
       final segs = project.segments.map((s) => s.copy()).toList();
-      // Prefer region-based alignment: fit each subtitle's START and END to the
-      // real spoken phrase (front + back). Fall back to onset-only snapping.
-      final regions = await AudioSyncService.detectSpeechRegions(
-        project.videoPath!,
-      );
-      int changed;
-      if (regions.length >= 2) {
-        changed = AudioSyncService.alignToRegions(segs, regions);
-      } else {
-        final onsets = await AudioSyncService.detectSpeechOnsets(
-          project.videoPath!,
-        );
-        if (onsets.length < 2) {
-          _toast('ກວດຫາສຽງເວົ້າບໍ່ພໍ — ລອງປັບດ້ວຍມື');
-          return;
+      
+      // Re-segment Lao/Thai syllables into dictionary units to ensure timing is always precise (e.g. if edited)
+      await LaoWordService.ensureWordUnits(segs, locale: project.language);
+      
+      final groqKey = await ApiConfig.getGroqKey();
+      final openAiKey = await ApiConfig.getOpenAiKey();
+      final hasGroq = groqKey != null && groqKey.isNotEmpty;
+      final hasOpenAi = openAiKey != null && openAiKey.isNotEmpty;
+
+      bool whisperSuccess = false;
+      if (hasGroq || hasOpenAi) {
+        try {
+          final lang = project.language == 'lo' ? 'th' : project.language;
+          final wt = hasGroq
+              ? await GroqSpeechService(apiKey: groqKey)
+                  .fetchWordTimings(project.videoPath!, language: lang)
+              : await OpenAIWhisperService(apiKey: openAiKey!)
+                  .fetchWordTimings(project.videoPath!, language: lang);
+                  
+          if (project.wordSplit == WordSplit.none && wt.startsMs.length >= 3) {
+            // Absolute precise alignment that maps word timings but keeps your custom subtitle grouping exactly as edited!
+            AudioSyncService.forcedAlignToWhisper(segs, wt.startsMs, wt.endMs);
+            whisperSuccess = true;
+          } else if (wt.regions.length >= 2) {
+            final maxWords = switch (project.wordSplit) {
+              WordSplit.one => 1,
+              WordSplit.two => 2,
+              WordSplit.three => 3,
+              WordSplit.four => 4,
+              WordSplit.six => 6,
+              WordSplit.eight => 8,
+              WordSplit.none => 6,
+            };
+            final newSegs = AudioSyncService.resegmentByRegions(segs, wt.regions, maxWords: maxWords);
+            segs.clear();
+            segs.addAll(newSegs);
+            whisperSuccess = true;
+          } else if (wt.startsMs.length >= 3) {
+            AudioSyncService.forcedAlignToWhisper(segs, wt.startsMs, wt.endMs);
+            whisperSuccess = true;
+          }
+        } catch (e) {
+          debugPrint('Whisper sync failed: $e');
         }
-        changed = AudioSyncService.alignToOnsets(segs, onsets);
       }
+
+      int changed = 0;
+      if (!whisperSuccess) {
+        // Fallback to local VAD Region/Onset alignment
+        final regions = await AudioSyncService.detectSpeechRegions(project.videoPath!);
+        if (regions.length >= 2) {
+          changed = AudioSyncService.alignToRegions(segs, regions);
+        } else {
+          final onsets = await AudioSyncService.detectSpeechOnsets(project.videoPath!);
+          if (onsets.length < 2) {
+            _toast('ກວດຫາສຽງເວົ້າບໍ່ພໍ — ລອງປັບດ້ວຍມື');
+            if (mounted) setState(() => _autoSyncing = false);
+            return;
+          }
+          changed = AudioSyncService.alignToOnsets(segs, onsets);
+        }
+      }
+
       provider.updateSegments(segs); // single undo step
       setState(() => _syncOffsetMs = 0);
-      _toast('ຊິງອັດຕະໂນມັດສຳເລັດ (ປັບ $changed ປ່ອນ)');
+      _toast(whisperSuccess ? '⚡️ ຊິງດ້ວຍ Whisper ສຳເລັດ 100%' : 'ຊິງອັດຕະໂນມັດສຳເລັດ (ປັບ $changed ປ່ອນ)');
     } catch (_) {
       _toast('ຊິງບໍ່ສຳເລັດ');
     } finally {
@@ -2814,7 +3252,7 @@ class _EditorScreenState extends State<EditorScreen>
     final project = provider.currentProject;
     if (project == null || project.segments.isEmpty) return;
     if (!_isPro) {
-      _showProFeatureDialog('Auto ✨ (Emoji + ໄຮໄລ້ຄຳເด็ด)');
+      _showProFeatureDialog('Auto ✨ (Emoji + ໄຮໄລ້ຄຳເດັດ)');
       return;
     }
     final apiKey = await ApiConfig.getApiKey();
@@ -2827,9 +3265,32 @@ class _EditorScreenState extends State<EditorScreen>
       final segs = project.segments.map((s) => s.copy()).toList();
       await GeminiSpeechService(apiKey: apiKey).autoEmojiHighlight(segs);
       provider.updateSegments(segs);
-      _toast('Auto ✨ ສຳເລັດ — ໃສ່ emoji + ໄຮໄລ້ຄຳເด็ด');
-    } catch (_) {
-      _toast('Auto ✨ ບໍ່ສຳເລັດ — ລອງໃໝ່');
+
+      // Auto-add SFX blocks that match the assigned emojis
+      final sfxAdded = <SfxBlock>[];
+      for (final seg in segs) {
+        final emoji = seg.emoji;
+        if (emoji == null || emoji.isEmpty) continue;
+        final sfxType = SfxMapper.getSfxForEmoji(emoji);
+        if (sfxType == null) continue;
+        // Avoid duplicate SFX at the same timestamp
+        final already = project.sfxBlocks.any(
+          (b) => (b.startTime - seg.startTime).abs() < const Duration(milliseconds: 200),
+        );
+        if (!already) {
+          sfxAdded.add(SfxBlock(id: const Uuid().v4(), type: sfxType, startTime: seg.startTime));
+        }
+      }
+      for (final b in sfxAdded) {
+        provider.addSfxBlock(b);
+      }
+
+      _toast(sfxAdded.isNotEmpty
+          ? 'Auto ✨ ສຳເລັດ — emoji + ໄຮໄລ້ + SFX ${sfxAdded.length} ຈຸດ'
+          : 'Auto ✨ ສຳເລັດ — ໃສ່ emoji + ໄຮໄລ້ຄຳເດັດ');
+    } catch (e) {
+      final msg = e.toString().replaceAll('Exception: ', '').replaceAll('GeminiSpeechException: ', '');
+      _toast(msg.contains('Auto ✨') ? msg : 'Auto ✨ ບໍ່ສຳເລັດ — ລອງໃໝ່');
     } finally {
       if (mounted) setState(() => _autoSyncing = false);
     }
@@ -3245,6 +3706,392 @@ class _EditorScreenState extends State<EditorScreen>
     provider.updateSegments(segs);
     setState(() => _selectedIndex = null);
   }
+
+  void _deleteSfx(ProjectProvider provider, String id) {
+    provider.removeSfxBlock(id);
+    setState(() => _selectedSfxId = null);
+    _toast('ລຶບ SFX ແລ້ວ');
+  }
+
+  void _showAddSfxSheet(ProjectProvider provider) {
+    _pauseForEdit();
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppColors.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (_) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'ເພີ່ມສຽງ Effect ໃສ່ Timeline',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 20),
+                Flexible(
+                  child: SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        ListTile(
+                          leading: const Text('🌟', style: TextStyle(fontSize: 24)),
+                          title: const Text('ສຽງ Pop', style: TextStyle(color: Colors.white)),
+                          subtitle: const Text('ສຽງປ໋ອບສັ້ນໆ', style: TextStyle(color: Colors.white54)),
+                          onTap: () {
+                            Navigator.pop(context);
+                            SfxPlayerService().playSfx(SfxType.pop);
+                            provider.addSfxBlock(SfxBlock(
+                              id: const Uuid().v4(),
+                              type: SfxType.pop,
+                              startTime: _position,
+                            ));
+                          },
+                        ),
+                        ListTile(
+                          leading: const Text('🔔', style: TextStyle(fontSize: 24)),
+                          title: const Text('ສຽງ Ding', style: TextStyle(color: Colors.white)),
+                          subtitle: const Text('ສຽງກິ້ງໃສໆ', style: TextStyle(color: Colors.white54)),
+                          onTap: () {
+                            Navigator.pop(context);
+                            SfxPlayerService().playSfx(SfxType.ding);
+                            provider.addSfxBlock(SfxBlock(
+                              id: const Uuid().v4(),
+                              type: SfxType.ding,
+                              startTime: _position,
+                            ));
+                          },
+                        ),
+                        ListTile(
+                          leading: const Text('💨', style: TextStyle(fontSize: 24)),
+                          title: const Text('ສຽງ Swoosh', style: TextStyle(color: Colors.white)),
+                          subtitle: const Text('ສຽງຜ່ານໄວໆ (Transition)', style: TextStyle(color: Colors.white54)),
+                          onTap: () {
+                            Navigator.pop(context);
+                            SfxPlayerService().playSfx(SfxType.swoosh);
+                            provider.addSfxBlock(SfxBlock(
+                              id: const Uuid().v4(),
+                              type: SfxType.swoosh,
+                              startTime: _position,
+                            ));
+                          },
+                        ),
+                        ListTile(
+                          leading: const Text('✨', style: TextStyle(fontSize: 24)),
+                          title: const Text('ສຽງ Chime', style: TextStyle(color: Colors.white)),
+                          subtitle: const Text('ສຽງວິ້ງເວດມົນ', style: TextStyle(color: Colors.white54)),
+                          onTap: () {
+                            Navigator.pop(context);
+                            SfxPlayerService().playSfx(SfxType.chime);
+                            provider.addSfxBlock(SfxBlock(
+                              id: const Uuid().v4(),
+                              type: SfxType.chime,
+                              startTime: _position,
+                            ));
+                          },
+                        ),
+                        ListTile(
+                          leading: const Text('🥁', style: TextStyle(fontSize: 24)),
+                          title: const Text('ສຽງ Drum', style: TextStyle(color: Colors.white)),
+                          subtitle: const Text('ສຽງຕຸບໜັກໆ (Punchy)', style: TextStyle(color: Colors.white54)),
+                          onTap: () {
+                            Navigator.pop(context);
+                            SfxPlayerService().playSfx(SfxType.drum);
+                            provider.addSfxBlock(SfxBlock(
+                              id: const Uuid().v4(),
+                              type: SfxType.drum,
+                              startTime: _position,
+                            ));
+                          },
+                        ),
+                        ListTile(
+                          leading: const Text('🤖', style: TextStyle(fontSize: 24)),
+                          title: const Text('ສຽງ Beep', style: TextStyle(color: Colors.white)),
+                          subtitle: const Text('ສຽງບິບ (ເຊັນເຊີ / ເອເລັກໂຕຣນິກ)', style: TextStyle(color: Colors.white54)),
+                          onTap: () {
+                            Navigator.pop(context);
+                            SfxPlayerService().playSfx(SfxType.beep);
+                            provider.addSfxBlock(SfxBlock(
+                              id: const Uuid().v4(),
+                              type: SfxType.beep,
+                              startTime: _position,
+                            ));
+                          },
+                        ),
+                        ListTile(
+                          leading: const Text('💧', style: TextStyle(fontSize: 24)),
+                          title: const Text('ສຽງ Bubble', style: TextStyle(color: Colors.white)),
+                          subtitle: const Text('ສຽງຟອງນ້ຳແຕກ (ໜ້າຮັກ/ຕະຫຼົກ)', style: TextStyle(color: Colors.white54)),
+                          onTap: () {
+                            Navigator.pop(context);
+                            SfxPlayerService().playSfx(SfxType.bubble);
+                            provider.addSfxBlock(SfxBlock(
+                              id: const Uuid().v4(),
+                              type: SfxType.bubble,
+                              startTime: _position,
+                            ));
+                          },
+                        ),
+                        ListTile(
+                          leading: const Text('👆', style: TextStyle(fontSize: 24)),
+                          title: const Text('ສຽງ Click', style: TextStyle(color: Colors.white)),
+                          subtitle: const Text('ສຽງຄລິກເມົາສ໌ (UI/ທົ່ວໄປ)', style: TextStyle(color: Colors.white54)),
+                          onTap: () {
+                            Navigator.pop(context);
+                            SfxPlayerService().playSfx(SfxType.click);
+                            provider.addSfxBlock(SfxBlock(
+                              id: const Uuid().v4(),
+                              type: SfxType.click,
+                              startTime: _position,
+                            ));
+                          },
+                        ),
+                        ListTile(
+                          leading: const Text('🚀', style: TextStyle(fontSize: 24)),
+                          title: const Text('ສຽງ Whoosh', style: TextStyle(color: Colors.white)),
+                          subtitle: const Text('ສຽງລົມພັດລາກຍາວ (ສະລໍ້/ໃຫຍ່)', style: TextStyle(color: Colors.white54)),
+                          onTap: () {
+                            Navigator.pop(context);
+                            SfxPlayerService().playSfx(SfxType.whoosh);
+                            provider.addSfxBlock(SfxBlock(
+                              id: const Uuid().v4(),
+                              type: SfxType.whoosh,
+                              startTime: _position,
+                            ));
+                          },
+                        ),
+                        ListTile(
+                          leading: const Text('🎉', style: TextStyle(fontSize: 24)),
+                          title: const Text('ສຽງ Tada', style: TextStyle(color: Colors.white)),
+                          subtitle: const Text('ສຽງສະເຫຼີມສະຫຼອງ (ສຳເລັດ)', style: TextStyle(color: Colors.white54)),
+                          onTap: () {
+                            Navigator.pop(context);
+                            SfxPlayerService().playSfx(SfxType.tada);
+                            provider.addSfxBlock(SfxBlock(
+                              id: const Uuid().v4(),
+                              type: SfxType.tada,
+                              startTime: _position,
+                            ));
+                          },
+                        ),
+                        ListTile(
+                          leading: const Text('🦘', style: TextStyle(fontSize: 24)),
+                          title: const Text('ສຽງ Bounce', style: TextStyle(color: Colors.white)),
+                          subtitle: const Text('ສຽງກະໂດດ (ຕື່ນເຕັ້ນ/ມ່ວນ)', style: TextStyle(color: Colors.white54)),
+                          onTap: () {
+                            Navigator.pop(context);
+                            SfxPlayerService().playSfx(SfxType.bounce);
+                            provider.addSfxBlock(SfxBlock(
+                              id: const Uuid().v4(),
+                              type: SfxType.bounce,
+                              startTime: _position,
+                            ));
+                          },
+                        ),
+                        ListTile(
+                          leading: const Text('⚠️', style: TextStyle(fontSize: 24)),
+                          title: const Text('ສຽງ Glitch', style: TextStyle(color: Colors.white)),
+                          subtitle: const Text('ສຽງຊັອດ (ຜິດພາດ/ຫັກມຸມ)', style: TextStyle(color: Colors.white54)),
+                          onTap: () {
+                            Navigator.pop(context);
+                            SfxPlayerService().playSfx(SfxType.glitch);
+                            provider.addSfxBlock(SfxBlock(id: const Uuid().v4(), type: SfxType.glitch, startTime: _position));
+                          },
+                        ),
+                        const Divider(color: Colors.white12, height: 1),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                          child: Text('ສຽງໃໝ່ ✨', style: TextStyle(color: AppColors.primary, fontWeight: FontWeight.bold, fontSize: 12)),
+                        ),
+                        ListTile(
+                          leading: const Text('❤️', style: TextStyle(fontSize: 24)),
+                          title: const Text('ສຽງ Heart', style: TextStyle(color: Colors.white)),
+                          subtitle: const Text('ສຽງຫົວໃຈ (ຮັກ/ໂຣແມນຕິກ)', style: TextStyle(color: Colors.white54)),
+                          onTap: () {
+                            Navigator.pop(context);
+                            SfxPlayerService().playSfx(SfxType.heart);
+                            provider.addSfxBlock(SfxBlock(id: const Uuid().v4(), type: SfxType.heart, startTime: _position));
+                          },
+                        ),
+                        ListTile(
+                          leading: const Text('🔥', style: TextStyle(fontSize: 24)),
+                          title: const Text('ສຽງ Fire', style: TextStyle(color: Colors.white)),
+                          subtitle: const Text('ສຽງໄຟ (ຮ້ອນ/ດຸ/ສຸດຍອດ)', style: TextStyle(color: Colors.white54)),
+                          onTap: () {
+                            Navigator.pop(context);
+                            SfxPlayerService().playSfx(SfxType.fire);
+                            provider.addSfxBlock(SfxBlock(id: const Uuid().v4(), type: SfxType.fire, startTime: _position));
+                          },
+                        ),
+                        ListTile(
+                          leading: const Text('🌬️', style: TextStyle(fontSize: 24)),
+                          title: const Text('ສຽງ Wind', style: TextStyle(color: Colors.white)),
+                          subtitle: const Text('ສຽງລົມ (ສະຫງົບ/ທຳມະຊາດ)', style: TextStyle(color: Colors.white54)),
+                          onTap: () {
+                            Navigator.pop(context);
+                            SfxPlayerService().playSfx(SfxType.wind);
+                            provider.addSfxBlock(SfxBlock(id: const Uuid().v4(), type: SfxType.wind, startTime: _position));
+                          },
+                        ),
+                        ListTile(
+                          leading: const Text('😂', style: TextStyle(fontSize: 24)),
+                          title: const Text('ສຽງ Laugh', style: TextStyle(color: Colors.white)),
+                          subtitle: const Text('ສຽງຫົວ (ຕະຫຼົກ/ມ່ວນ)', style: TextStyle(color: Colors.white54)),
+                          onTap: () {
+                            Navigator.pop(context);
+                            SfxPlayerService().playSfx(SfxType.laugh);
+                            provider.addSfxBlock(SfxBlock(id: const Uuid().v4(), type: SfxType.laugh, startTime: _position));
+                          },
+                        ),
+                        ListTile(
+                          leading: const Text('😢', style: TextStyle(fontSize: 24)),
+                          title: const Text('ສຽງ Sad', style: TextStyle(color: Colors.white)),
+                          subtitle: const Text('ສຽງເສົ້າ (ຊ້ອນໃຈ/ອ່ອນໃຈ)', style: TextStyle(color: Colors.white54)),
+                          onTap: () {
+                            Navigator.pop(context);
+                            SfxPlayerService().playSfx(SfxType.sad);
+                            provider.addSfxBlock(SfxBlock(id: const Uuid().v4(), type: SfxType.sad, startTime: _position));
+                          },
+                        ),
+                        ListTile(
+                          leading: const Text('🪄', style: TextStyle(fontSize: 24)),
+                          title: const Text('ສຽງ Magic', style: TextStyle(color: Colors.white)),
+                          subtitle: const Text('ສຽງເວດມົນ (ຕື່ນໃຈ/ການປ່ຽນ)', style: TextStyle(color: Colors.white54)),
+                          onTap: () {
+                            Navigator.pop(context);
+                            SfxPlayerService().playSfx(SfxType.magic);
+                            provider.addSfxBlock(SfxBlock(id: const Uuid().v4(), type: SfxType.magic, startTime: _position));
+                          },
+                        ),
+                        ListTile(
+                          leading: const Text('💪', style: TextStyle(fontSize: 24)),
+                          title: const Text('ສຽງ Power', style: TextStyle(color: Colors.white)),
+                          subtitle: const Text('ສຽງຕຸ້ມໜັກ (ແຮງ/ຊ໊ອກ)', style: TextStyle(color: Colors.white54)),
+                          onTap: () {
+                            Navigator.pop(context);
+                            SfxPlayerService().playSfx(SfxType.power);
+                            provider.addSfxBlock(SfxBlock(id: const Uuid().v4(), type: SfxType.power, startTime: _position));
+                          },
+                        ),
+                        ListTile(
+                          leading: const Text('😮', style: TextStyle(fontSize: 24)),
+                          title: const Text('ສຽງ Surprise', style: TextStyle(color: Colors.white)),
+                          subtitle: const Text('ສຽງຕົກໃຈ (Reveal/ເຊີ້)', style: TextStyle(color: Colors.white54)),
+                          onTap: () {
+                            Navigator.pop(context);
+                            SfxPlayerService().playSfx(SfxType.surprise);
+                            provider.addSfxBlock(SfxBlock(id: const Uuid().v4(), type: SfxType.surprise, startTime: _position));
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _applyAutoSfx(ProjectProvider provider) {
+    final project = provider.currentProject;
+    if (project == null) return;
+
+    _pauseForEdit();
+    
+    // Auto-generate SFX blocks
+    final newBlocks = <SfxBlock>[];
+    for (final seg in project.segments) {
+      // Prioritize word timings if available
+      if (seg.words != null && seg.wordTimings != null) {
+        var currentMs = seg.startTime.inMilliseconds;
+        for (int i = 0; i < seg.words!.length; i++) {
+          final word = seg.words![i];
+          final sfx = SfxMapper.getSfxForWord(word);
+          if (sfx != null) {
+            newBlocks.add(SfxBlock(
+              id: const Uuid().v4(),
+              type: sfx,
+              startTime: Duration(milliseconds: currentMs),
+            ));
+          }
+          if (i < seg.wordTimings!.length) {
+            currentMs += seg.wordTimings![i].inMilliseconds;
+          }
+        }
+      } else {
+        // Fallback to checking the entire text
+        final words = seg.text.split(RegExp(r'\s+'));
+        for (final word in words) {
+          final sfx = SfxMapper.getSfxForWord(word);
+          if (sfx != null) {
+            newBlocks.add(SfxBlock(
+              id: const Uuid().v4(),
+              type: sfx,
+              startTime: seg.startTime,
+            ));
+            break; // Only one SFX per segment if we don't have word timings to avoid overlapping too much
+          }
+        }
+      }
+    }
+
+    if (newBlocks.isEmpty) {
+      _toast('ບໍ່ພົບຄຳສັບທີ່ກົງກັບ SFX ອັດຕະໂນມັດໃນວິດີໂອນີ້');
+      return;
+    }
+
+    // Confirm dialog
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        title: const Text('ໃສ່ SFX ອັດຕະໂນມັດ ✨', style: TextStyle(color: Colors.white)),
+        content: Text('ພົບຕຳແໜ່ງທີ່ເໝາະສົມ ${newBlocks.length} ຈຸດ.\nທ່ານຕ້ອງການລຶບ SFX ເກົ່າອອກກ່ອນ ຫຼື ວາງທັບໃສ່ເລີຍ?', style: const TextStyle(color: Colors.white70)),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              provider.pushHistory();
+              // Keep old blocks, add new
+              for (final b in newBlocks) {
+                provider.addSfxBlock(b);
+              }
+              _toast('ເພີ່ມ ${newBlocks.length} SFX ແລ້ວ');
+            },
+            child: const Text('ລວມກັບຂອງເກົ່າ', style: TextStyle(color: Colors.white54)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary),
+            onPressed: () {
+              Navigator.pop(ctx);
+              provider.pushHistory();
+              // Remove old blocks
+              for (final old in List.from(project.sfxBlocks)) {
+                provider.removeSfxBlock(old.id);
+              }
+              for (final b in newBlocks) {
+                provider.addSfxBlock(b);
+              }
+              _toast('ວາງ ${newBlocks.length} SFX ອັດຕະໂນມັດແລ້ວ');
+            },
+            child: const Text('ແທນທີ່ໃໝ່ໝົດ', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+  }
+
 
   void _duplicateSegment(ProjectProvider provider, int index) {
     final segs = provider.currentProject!.segments
@@ -4005,7 +4852,7 @@ class _EditorScreenState extends State<EditorScreen>
     for (final s in segs) {
       final segWords = (s.words != null && s.words!.isNotEmpty)
           ? s.words!
-          : s.text.split(' ').where((w) => w.isNotEmpty).toList();
+          : splitLaoHighlightUnits(s.text).where((w) => w.trim().isNotEmpty).toList();
       if (segWords.isEmpty) continue;
       final hasTimings =
           s.wordTimings != null && s.wordTimings!.length == segWords.length;
@@ -5969,6 +6816,698 @@ class _EditorScreenState extends State<EditorScreen>
     final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
     final ms = d.inMilliseconds.remainder(1000).toString().padLeft(3, '0');
     return '$h:$m:$s,$ms';
+  }
+
+  void _showDubbingDialog(ProjectProvider provider) async {
+    final project = provider.currentProject;
+    if (project == null) return;
+
+    final hasApiKey = await ApiConfig.hasElevenLabsKey();
+
+    String ttsLang = project.language.isEmpty ? 'lo' : project.language;
+    if (ttsLang == 'Auto') ttsLang = 'lo';
+
+    String selectedVoice = '';
+    double speechRate = 0.5;
+    bool useTranslation = project.showBilingual;
+    bool saveAudioOnly = false;
+    List<Map<String, String>> availableVoices = [];
+    bool loadingVoices = true;
+
+    if (!mounted) return;
+
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setDlgState) {
+            // Load voices if not loaded yet
+            if (loadingVoices && hasApiKey) {
+              loadingVoices = false;
+              _ttsService.getVoicesForLanguage(ttsLang).then((voices) {
+                if (ctx.mounted) {
+                  setDlgState(() {
+                    availableVoices = voices;
+                    if (voices.isNotEmpty) {
+                      // Try to find a common voice like Rachel or Adam, or select first
+                      final defaultVoice = voices.firstWhere(
+                        (v) => v['name']!.toLowerCase().contains('rachel') || v['name']!.toLowerCase().contains('adam'),
+                        orElse: () => voices.first,
+                      );
+                      selectedVoice = defaultVoice['name'] ?? '';
+                    } else {
+                      selectedVoice = '';
+                    }
+                  });
+                }
+              });
+            }
+
+            return AlertDialog(
+              backgroundColor: AppColors.surface,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              title: const Row(
+                children: [
+                  Icon(Icons.record_voice_over, color: AppColors.primary, size: 22),
+                  SizedBox(width: 10),
+                  Text(
+                    'ພາກສຽງ AI (AI Dubbing)',
+                    style: TextStyle(
+                      color: AppColors.textPrimary,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                    ),
+                  ),
+                ],
+              ),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (!hasApiKey) ...[
+                      Container(
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color: AppColors.accent.withOpacity(0.08),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: AppColors.accent.withOpacity(0.25)),
+                        ),
+                        child: const Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Icon(Icons.warning_amber_rounded, color: AppColors.accent, size: 20),
+                                SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    'ຍັງບໍ່ໄດ້ຕັ້ງຄ່າ ElevenLabs API Key',
+                                    style: TextStyle(
+                                      color: AppColors.textPrimary,
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 13,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            SizedBox(height: 8),
+                            Text(
+                              'ກາລຸນາຕັ້ງຄ່າ ElevenLabs API Key ໃນໜ້າຕັ້ງຄ່າກ່ອນ ເພື່ອພາກສຽງດ້ວຍສຽງພາກລະດັບ Premium ທີ່ມີຄວາມເປັນທຳມະຊາດສູງສຸດ.',
+                              style: TextStyle(color: AppColors.textSecondary, fontSize: 11.5, height: 1.4),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                    ] else ...[
+                      const Text(
+                        'ເລືອກພາສາ ແລະ ໂທນສຽງພາກ:',
+                        style: TextStyle(color: AppColors.textSecondary, fontSize: 13),
+                      ),
+                      const SizedBox(height: 12),
+                    ],
+                    // Language selection
+                    const Text('ພາສາສຽງພາກ:', style: TextStyle(color: AppColors.textHint, fontSize: 11)),
+                    DropdownButton<String>(
+                      value: ttsLang,
+                      isExpanded: true,
+                      dropdownColor: AppColors.surface,
+                      style: const TextStyle(color: AppColors.textPrimary),
+                      items: const [
+                        DropdownMenuItem(value: 'lo', child: Text('ພາສາລາວ (Lao)')),
+                        DropdownMenuItem(value: 'th', child: Text('ພາສາໄທ (Thai)')),
+                        DropdownMenuItem(value: 'en', child: Text('ພາສາອັງກິດ (English)')),
+                      ],
+                      onChanged: !hasApiKey ? null : (val) {
+                        if (val != null) {
+                          setDlgState(() {
+                            ttsLang = val;
+                            loadingVoices = true; // trigger reloading voices
+                          });
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    if (hasApiKey) ...[
+                      // Voice selection
+                      const Text('ໂທນສຽງພາກ (ElevenLabs Voices):', style: TextStyle(color: AppColors.textHint, fontSize: 11)),
+                      if (availableVoices.isEmpty)
+                        const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 8.0),
+                          child: Text(
+                            'ກຳລັງໂຫລດລາຍຊື່ສຽງພາກ...',
+                            style: TextStyle(color: AppColors.textHint, fontSize: 12, fontStyle: FontStyle.italic),
+                          ),
+                        )
+                      else
+                        DropdownButton<String>(
+                          value: selectedVoice.isEmpty ? null : selectedVoice,
+                          isExpanded: true,
+                          dropdownColor: AppColors.surface,
+                          style: const TextStyle(color: AppColors.textPrimary),
+                          items: availableVoices.map((v) {
+                            final gender = v['gender'] == 'male' ? ' (ຊາຍ)' : (v['gender'] == 'female' ? ' (ຍິງ)' : '');
+                            return DropdownMenuItem(
+                              value: v['name'],
+                              child: Text('${v['name']}$gender'),
+                            );
+                          }).toList(),
+                          onChanged: (val) {
+                            if (val != null) {
+                              setDlgState(() => selectedVoice = val);
+                            }
+                          },
+                        ),
+                      const SizedBox(height: 12),
+                      // Speech rate
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text('ຄວາມໄວສຽງພາກ:', style: TextStyle(color: AppColors.textHint, fontSize: 11)),
+                          Text('${(speechRate * 2).toStringAsFixed(1)}x', style: const TextStyle(color: AppColors.primary, fontSize: 12, fontWeight: FontWeight.bold)),
+                        ],
+                      ),
+                      Slider(
+                        value: speechRate,
+                        min: 0.1,
+                        max: 1.0,
+                        activeColor: AppColors.primary,
+                        inactiveColor: AppColors.border,
+                        onChanged: (val) {
+                          setDlgState(() => speechRate = val);
+                        },
+                      ),
+                      const SizedBox(height: 6),
+                      // Use translation toggle
+                      if (project.showBilingual) ...[
+                        CheckboxListTile(
+                          title: const Text(
+                            'ພາກສຽງໂດຍໃຊ້ຂໍ້ຄວາມແປ (Translation)',
+                            style: TextStyle(color: AppColors.textPrimary, fontSize: 12),
+                          ),
+                          value: useTranslation,
+                          activeColor: AppColors.primary,
+                          checkColor: Colors.white,
+                          contentPadding: EdgeInsets.zero,
+                          onChanged: (val) {
+                            if (val != null) {
+                              setDlgState(() => useTranslation = val);
+                            }
+                          },
+                        ),
+                      ],
+                      CheckboxListTile(
+                        title: const Text(
+                          'ໃສ່ເອັບເຟັກສຽງອັດສະລິຍະ 💥 (SFX Auto-Sync)',
+                          style: TextStyle(color: AppColors.textPrimary, fontSize: 12, fontWeight: FontWeight.bold),
+                        ),
+                        subtitle: const Text(
+                          'ໃສ່ສຽງ Pop/Ding ໃຫ້ຕົງກັບ Emoji ແລະ ຄຳໄຮໄລຣ໌ອັດຕະໂນມັດ',
+                          style: TextStyle(color: AppColors.textHint, fontSize: 10),
+                        ),
+                        value: project.isAutoSyncSfx,
+                        activeColor: AppColors.primary,
+                        checkColor: Colors.white,
+                        contentPadding: EdgeInsets.zero,
+                        onChanged: (val) {
+                          if (val != null) {
+                            setDlgState(() {
+                              project.isAutoSyncSfx = val;
+                              provider.updateProject(project);
+                            });
+                          }
+                        },
+                      ),
+                      const SizedBox(height: 12),
+                      const Text('ຮູບແບບການບັນທຶກ (Export Format):', style: TextStyle(color: AppColors.textHint, fontSize: 11)),
+                      const SizedBox(height: 6),
+                      Container(
+                        decoration: BoxDecoration(
+                          color: AppColors.surfaceLight,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: AppColors.border, width: 0.5),
+                        ),
+                        child: Column(
+                          children: [
+                            RadioListTile<bool>(
+                              title: const Text('ພາກສຽງໃສ່ວິດີໂອ (Mux Video)', style: TextStyle(color: AppColors.textPrimary, fontSize: 12.5, fontWeight: FontWeight.bold)),
+                              subtitle: const Text('ລວມສຽງພາກ ແລະ ວິດີໂອເຂົ້າກັນ', style: TextStyle(color: AppColors.textSecondary, fontSize: 11)),
+                              value: false,
+                              groupValue: saveAudioOnly,
+                              activeColor: AppColors.primary,
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+                              onChanged: (val) {
+                                if (val != null) {
+                                  setDlgState(() => saveAudioOnly = val);
+                                }
+                              },
+                            ),
+                            const Divider(height: 1, color: AppColors.border),
+                            RadioListTile<bool>(
+                              title: const Text('ບັນທຶກແຍກສະເພາະໄຟລ໌ສຽງ (Audio Only)', style: TextStyle(color: AppColors.textPrimary, fontSize: 12.5, fontWeight: FontWeight.bold)),
+                              subtitle: const Text('ບັນທຶກເປັນໄຟລ໌ .wav ໄວ້ໃນເຄື່ອງ ເພື່ອໄປຕັດຕໍ່ເອງ', style: TextStyle(color: AppColors.textSecondary, fontSize: 11)),
+                              value: true,
+                              groupValue: saveAudioOnly,
+                              activeColor: AppColors.primary,
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+                              onChanged: (val) {
+                                if (val != null) {
+                                  setDlgState(() => saveAudioOnly = val);
+                                }
+                              },
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('ປິດ', style: TextStyle(color: AppColors.textSecondary)),
+                ),
+                if (!hasApiKey)
+                  ElevatedButton.icon(
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(builder: (_) => const SettingsScreen()),
+                      );
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppColors.primary,
+                      foregroundColor: Colors.white,
+                    ),
+                    icon: const Icon(Icons.settings, size: 16),
+                    label: const Text('ໄປທີ່ໜ້າຕັ້ງຄ່າ', style: TextStyle(fontWeight: FontWeight.bold)),
+                  )
+                else
+                  ElevatedButton.icon(
+                    onPressed: selectedVoice.isEmpty
+                        ? null
+                        : () {
+                            Navigator.pop(ctx);
+                            _runDubbingPipeline(
+                              provider: provider,
+                              language: ttsLang,
+                              voiceName: selectedVoice,
+                              speechRate: speechRate,
+                              useTranslation: useTranslation,
+                              saveAudioOnly: saveAudioOnly,
+                            );
+                          },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppColors.primary,
+                      foregroundColor: Colors.white,
+                      disabledBackgroundColor: AppColors.surfaceLight,
+                    ),
+                    icon: const Icon(Icons.record_voice_over, size: 16),
+                    label: const Text('ເລີ່ມພາກສຽງ', style: TextStyle(fontWeight: FontWeight.bold)),
+                  ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  void _runDubbingPipeline({
+    required ProjectProvider provider,
+    required String language,
+    required String voiceName,
+    required double speechRate,
+    required bool useTranslation,
+    bool saveAudioOnly = false,
+  }) async {
+    final project = provider.currentProject;
+    if (project == null || project.videoPath == null) return;
+
+
+    // Show persistent progress overlay
+    String progressText = 'ກຳລັງກຽມລະບົບ...';
+    double progressPct = 0.0;
+    
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setProgState) {
+            // Hook synthesis callback to dynamically update progress screen
+            if (progressPct == 0.0) {
+              progressPct = 0.05;
+              final tempDir = Directory.systemTemp;
+              final outputWav = '${tempDir.path}/tts_stitched_${DateTime.now().millisecondsSinceEpoch}.wav';
+              final outputSfxWav = '${tempDir.path}/sfx_only_${DateTime.now().millisecondsSinceEpoch}.wav';
+              final outputMp4 = '${tempDir.path}/dubbed_${DateTime.now().millisecondsSinceEpoch}.mp4';
+              final fileName = 'dubbed_${DateTime.now().millisecondsSinceEpoch}.mp4';
+
+              _ttsService.synthesizeAndStitch(
+                segments: project.segments,
+                languageCode: language,
+                voiceName: voiceName,
+                speechRate: speechRate,
+                useTranslation: useTranslation,
+                outputWavPath: outputWav,
+                outputSfxWavPath: project.sfxBlocks.isNotEmpty ? outputSfxWav : null,
+                autoSyncSfx: project.sfxBlocks.isNotEmpty, // Generate SFX track if blocks exist
+                sfxBlocks: project.sfxBlocks,
+                onProgress: (status) {
+                  if (ctx.mounted) {
+                    setProgState(() {
+                      progressText = status;
+                      if (status.contains('ສັງເຄາະສຽງປະໂຫຍກ')) {
+                        progressPct = 0.15 + (0.65 * chunksProgressFraction(status));
+                      } else if (status.contains('ຈັດຊ່ວງເວລາ')) {
+                        progressPct = 0.85;
+                      }
+                    });
+                  }
+                },
+              ).then((errorMsg) async {
+                if (errorMsg != null) {
+                  if (ctx.mounted) Navigator.pop(ctx);
+                  _showErrorBanner(errorMsg);
+                  return;
+                }
+
+                if (saveAudioOnly) {
+                  if (ctx.mounted) {
+                    setProgState(() {
+                      progressText = 'ກຳລັງບັນທຶກໄຟລ໌ສຽງ...';
+                      progressPct = 0.95;
+                    });
+                  }
+                  try {
+                    const channel = MethodChannel('com.anniekaydee.subtitle_app/audio');
+                    final newPath = await channel.invokeMethod<String>('saveAudioToGallery', {
+                      'audioPath': outputWav,
+                      'fileName': 'dubbed_audio_${DateTime.now().millisecondsSinceEpoch}.wav',
+                    });
+
+                    if (newPath != null) {
+                      if (project.sfxBlocks.isNotEmpty) {
+                        await channel.invokeMethod<String>('saveAudioToGallery', {
+                          'audioPath': outputSfxWav,
+                          'fileName': 'sfx_only_${DateTime.now().millisecondsSinceEpoch}.wav',
+                        });
+                      }
+                      if (ctx.mounted) Navigator.pop(ctx);
+                      _showAudioSuccessDialog(newPath);
+                    } else {
+                      throw Exception('Failed to save audio to gallery');
+                    }
+                  } catch (e) {
+                    if (ctx.mounted) Navigator.pop(ctx);
+                    _showErrorBanner('Terminated. ການບັນທຶກໄຟລ໌ສຽງຫຼົ້ມເຫຼວ: ${e.toString()}');
+                  }
+                  return;
+                }
+
+                if (ctx.mounted) {
+                  setProgState(() {
+                    progressText = 'ກຳລັງປະສົມສຽງໃສ່ວິດີໂອ (Muxing)...';
+                    progressPct = 0.95;
+                  });
+                }
+
+                try {
+                  const channel = MethodChannel('com.anniekaydee.subtitle_app/audio');
+                  final newPath = await channel.invokeMethod<String>('replaceAudioTrack', {
+                    'videoPath': project.videoPath,
+                    'audioPath': outputWav,
+                    'outputPath': outputMp4,
+                    'fileName': fileName,
+                  });
+
+                  if (newPath != null && File(newPath).existsSync()) {
+                    // Update project video path and refresh player!
+                    provider.pushHistory();
+                    project.videoPath = newPath;
+                    provider.liveUpdate();
+                    provider.commit();
+
+                    await _initVideo();
+
+                    if (project.sfxBlocks.isNotEmpty) {
+                      await channel.invokeMethod<String>('saveAudioToGallery', {
+                        'audioPath': outputSfxWav,
+                        'fileName': 'sfx_only_${DateTime.now().millisecondsSinceEpoch}.wav',
+                      });
+                    }
+                    if (ctx.mounted) Navigator.pop(ctx);
+                    _showSuccessDialog(fileName);
+                  } else {
+                    throw Exception('Muxer returned null or file not found');
+                  }
+                } catch (e) {
+                  // ---- FALLBACK: Muxing failed → save as Audio Only instead ----
+                  debugPrint('⚠️ Muxing failed, falling back to Audio Only: $e');
+                  if (ctx.mounted) {
+                    setProgState(() {
+                      progressText = 'Mux ບໍ່ສຳເລັດ → ກຳລັງບັນທຶກເປັນໄຟລ໌ສຽງແທນ...';
+                      progressPct = 0.97;
+                    });
+                  }
+                  try {
+                    const fallbackChannel = MethodChannel('com.anniekaydee.subtitle_app/audio');
+                    final audioPath = await fallbackChannel.invokeMethod<String>('saveAudioToGallery', {
+                      'audioPath': outputWav,
+                      'fileName': 'dubbed_audio_${DateTime.now().millisecondsSinceEpoch}.wav',
+                    });
+                    if (audioPath != null) {
+                      if (project.sfxBlocks.isNotEmpty) {
+                        await fallbackChannel.invokeMethod<String>('saveAudioToGallery', {
+                          'audioPath': outputSfxWav,
+                          'fileName': 'sfx_only_${DateTime.now().millisecondsSinceEpoch}.wav',
+                        });
+                      }
+                      if (ctx.mounted) Navigator.pop(ctx);
+                      _showAudioFallbackDialog(audioPath);
+                    } else {
+                      throw Exception('Audio fallback also failed');
+                    }
+                  } catch (e2) {
+                    if (ctx.mounted) Navigator.pop(ctx);
+                    _showErrorBanner('ການບັນທຶກສຽງຫຼົ້ມເຫຼວ: ${e2.toString()}');
+                  }
+                }
+              });
+            }
+
+            return PopScope(
+              canPop: false,
+              child: AlertDialog(
+                backgroundColor: AppColors.surface,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                content: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 16.0),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const SizedBox(
+                        width: 48,
+                        height: 48,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 3,
+                          color: AppColors.primary,
+                        ),
+                      ),
+                      const SizedBox(height: 24),
+                      Text(
+                        progressText,
+                        style: const TextStyle(
+                          color: AppColors.textPrimary,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        '${(progressPct * 100).toInt()}%',
+                        style: const TextStyle(
+                          color: AppColors.textHint,
+                          fontSize: 11,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  double chunksProgressFraction(String status) {
+    try {
+      final match = RegExp(r'(\d+)/(\d+)').firstMatch(status);
+      if (match != null) {
+        final current = double.parse(match.group(1)!);
+        final total = double.parse(match.group(2)!);
+        return current / total;
+      }
+    } catch (_) {}
+    return 0.5;
+  }
+
+  void _showErrorBanner(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        backgroundColor: AppColors.accent,
+      ),
+    );
+  }
+
+  void _showSuccessDialog(String fileName) {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Row(
+          children: [
+            Icon(Icons.check_circle, color: AppColors.success, size: 24),
+            SizedBox(width: 10),
+            Text(
+              'ພາກສຽງສຳເລັດແລ້ວ! ✅',
+              style: TextStyle(
+                color: AppColors.textPrimary,
+                fontWeight: FontWeight.bold,
+                fontSize: 16,
+              ),
+            ),
+          ],
+        ),
+        content: Text(
+          'ສຽງພາກ AI ໄດ້ຖືກລວມເຂົ້າກັບວິດີໂອຮຽບຮ້ອຍແລ້ວ!\nໄຟລ໌ວິດີໂອຖືກບັນທຶກໄວ້ໃນຄັງຮູບເປັນຊື່:\n\n$fileName',
+          style: const TextStyle(color: AppColors.textSecondary, fontSize: 13),
+        ),
+        actions: [
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.success,
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('ຕົກລົງ', style: TextStyle(fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showAudioSuccessDialog(String savedPath) {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Row(
+          children: [
+            Icon(Icons.check_circle, color: AppColors.success, size: 24),
+            SizedBox(width: 10),
+            Text(
+              'ບັນທຶກສຽງພາກສຳເລັດ! 🎙️',
+              style: TextStyle(
+                color: AppColors.textPrimary,
+                fontWeight: FontWeight.bold,
+                fontSize: 16,
+              ),
+            ),
+          ],
+        ),
+        content: Text(
+          'ໄຟລ໌ສຽງພາກ AI ໄດ້ຖືກບັນທຶກສະເພາະແຍກໄວ້ໃນເຄື່ອງຮຽບຮ້ອຍແລ້ວ!\n\nໄຟລ໌ຖືກບັນທຶກໄວ້ໃນໂຟນເດີ Music/SubtitleAI ຂອງເຄື່ອງ:\n\n${savedPath.split('/').last}',
+          style: const TextStyle(color: AppColors.textSecondary, fontSize: 13, height: 1.4),
+        ),
+        actions: [
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.success,
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('ຕົກລົງ', style: TextStyle(fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Shown when Muxing fails but audio was saved as a fallback layer file
+  void _showAudioFallbackDialog(String savedPath) {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Row(
+          children: [
+            Icon(Icons.info_outline, color: Colors.amber, size: 24),
+            SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'ບັນທຶກເປັນ Audio Layer ແທນ 🎵',
+                style: TextStyle(
+                  color: AppColors.textPrimary,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 15,
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'ການປະສົມສຽງໃສ່ວິດີໂອໂດຍກົງບໍ່ສຳເລັດ, ແຕ່ໄຟລ໌ສຽງພາກໄດ້ຖືກບັນທຶກແຍກສຳເລັດແລ້ວ! ✅',
+              style: TextStyle(color: AppColors.textSecondary, fontSize: 13, height: 1.4),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: AppColors.surfaceLight,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: AppColors.border),
+              ),
+              child: Text(
+                '📂 Music/SubtitleAI/${savedPath.split('/').last}',
+                style: const TextStyle(color: AppColors.primary, fontSize: 12, fontWeight: FontWeight.w600),
+              ),
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              '💡 ວິທີໃຊ້: ນຳເຂົ້າໄຟລ໌ສຽງນີ້ເປັນ Audio Layer ແຍກໃນ CapCut ຫຼື TikTok ແລ້ວວາງທັບວິດີໂອໄດ້ເລີຍ!',
+              style: TextStyle(color: AppColors.textHint, fontSize: 11.5, height: 1.4),
+            ),
+          ],
+        ),
+        actions: [
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.primary,
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('ເຂົ້າໃຈແລ້ວ 👍', style: TextStyle(fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
   }
 }
 

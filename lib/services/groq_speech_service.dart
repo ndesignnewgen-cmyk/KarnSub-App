@@ -1,10 +1,11 @@
-﻿import 'dart:convert';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 import '../models/subtitle_style_model.dart';
+import 'wav_chunker.dart';
 
 class GroqSpeechException implements Exception {
   final String message;
@@ -47,56 +48,74 @@ class GroqSpeechService {
       throw GroqSpeechException('ໄຟລ໌ audio ສ້າງບໍ່ສໍາເລັດ');
     }
 
-    final fileSize = await wavFile.length();
-    if (fileSize > 25 * 1024 * 1024) {
-      wavFile.deleteSync();
-      throw GroqSpeechException(
-          'ໄຟລ໌ audio ໃຫຍ່ເກີນ 25MB — ກາລຸນາໃຊ້ວິດີໂອສັ້ນກວ່ານີ້');
+    onProgress?.call('ກໍາລັງແບ່ງທ່ອນສຽງ...');
+    final chunks = await WavChunker.splitWav(wavPath, chunkDurationSeconds: 15.0);
+    final allSegments = <SubtitleSegment>[];
+
+    // Process in batches of 5 to stay within rate limits but fast
+    final batchSize = 5;
+    for (int i = 0; i < chunks.length; i += batchSize) {
+      final batch = chunks.sublist(i, (i + batchSize < chunks.length) ? i + batchSize : chunks.length);
+      onProgress?.call('Groq ກຳລັງຖອດສຽງຂະໜານ (${i + 1}-${i + batch.length}/${chunks.length})...');
+
+      final futures = batch.map((chunk) async {
+        final request = http.MultipartRequest('POST', Uri.parse(_endpoint));
+        request.headers['Authorization'] = 'Bearer $apiKey';
+        request.fields['model'] = 'whisper-large-v3';
+        request.fields['response_format'] = 'verbose_json';
+        request.fields['timestamp_granularities[]'] = 'segment';
+        if (language == 'lo' || language == 'th') {
+          request.fields['language'] = 'th'; // Force Thai for both 'th' and 'lo' to get perfect timestamps
+        } else {
+          request.fields['language'] = language;
+        }
+        request.files.add(await http.MultipartFile.fromPath(
+            'file', chunk.path,
+            filename: 'audio.wav'));
+
+        http.Response response;
+        try {
+          final streamedResponse = await request.send().timeout(const Duration(seconds: 45));
+          response = await http.Response.fromStream(streamedResponse).timeout(const Duration(seconds: 45));
+        } catch (e) {
+          throw GroqSpeechException('ເຄືອຂ່າຍມີບັນຫາ ຫຼື Timeout: $e');
+        }
+
+        try { File(chunk.path).deleteSync(); } catch (_) {}
+
+        if (response.statusCode == 401) throw GroqSpeechException('API Key ບໍ່ຖືກຕ້ອງ');
+        if (response.statusCode == 429) throw GroqSpeechException('ເກີນ rate limit — ລໍຖ້າສັກຄູ່ແລ້ວລອງໃໝ່');
+        if (response.statusCode != 200) {
+          final err = jsonDecode(response.body);
+          throw GroqSpeechException('Groq error: ${err['error']?['message'] ?? response.statusCode}');
+        }
+
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        final segments = _parseResponse(data);
+
+        for (final s in segments) {
+          final offsetMs = (chunk.startTime * 1000).toInt();
+          s.startTime += Duration(milliseconds: offsetMs);
+          s.endTime += Duration(milliseconds: offsetMs);
+          if (s.wordTimings != null) {
+            s.wordTimings = s.wordTimings!.map((t) => t + Duration(milliseconds: offsetMs)).toList();
+          }
+        }
+        return segments;
+      });
+
+      final results = await Future.wait(futures);
+      for (final res in results) {
+        allSegments.addAll(res);
+      }
     }
 
-    onProgress?.call('ກໍາລັງ Upload ສຽງ...');
-
-    final request = http.MultipartRequest('POST', Uri.parse(_endpoint));
-    request.headers['Authorization'] = 'Bearer $apiKey';
-    request.fields['model'] = 'whisper-large-v3';
-    request.fields['response_format'] = 'verbose_json';
-    request.fields['timestamp_granularities[]'] = 'segment';
-
-    if (language == 'lo') {
-      request.fields['prompt'] =
-          'ພາສາລາວ. ສາທາລະນະລັດ ປະຊາທິປະໄຕ ປະຊາຊົນລາວ. ກຸງວຽງຈັນ. ຂໍຂອບໃຈ.';
-    } else {
-      request.fields['language'] = language;
-    }
-
-    request.files.add(await http.MultipartFile.fromPath(
-        'file', wavPath,
-        filename: 'audio.wav'));
-
-    onProgress?.call('Groq ກໍາລັງຖອດສຽງ...');
-
-    final streamedRes =
-        await request.send().timeout(const Duration(minutes: 5));
-    final body = await streamedRes.stream.bytesToString();
-
-    wavFile.deleteSync();
-
-    if (streamedRes.statusCode == 401) {
-      throw GroqSpeechException('API Key ບໍ່ຖືກຕ້ອງ');
-    }
-    if (streamedRes.statusCode == 429) {
-      throw GroqSpeechException('ເກີນ rate limit — ລໍຖ້າສັກຄູ່ແລ້ວລອງໃໝ່');
-    }
-    if (streamedRes.statusCode != 200) {
-      final err = jsonDecode(body);
-      throw GroqSpeechException(
-          'Groq error: ${err['error']?['message'] ?? streamedRes.statusCode}');
-    }
-
+    try { wavFile.deleteSync(); } catch (_) {}
+    
     onProgress?.call('ກໍາລັງສ້າງ Subtitle...');
-
-    final data = jsonDecode(body) as Map<String, dynamic>;
-    var segments = _parseResponse(data);
+    allSegments.sort((a, b) => a.startTime.compareTo(b.startTime));
+    
+    var segments = allSegments;
 
     if (wordSplit != WordSplit.none) {
       segments = _splitByWords(segments, wordSplit);
@@ -237,31 +256,7 @@ class GroqSpeechService {
     return result;
   }
 
-  List<SubtitleSegment> _buildFromWords(List<dynamic> words) {
-    final segments = <SubtitleSegment>[];
-    final chunk = <Map<String, dynamic>>[];
-    int prevEndMs = 0;
 
-    for (final w in words) {
-      final startMs = ((w['start'] as num? ?? 0) * 1000).toInt();
-      final endMs = ((w['end'] as num? ?? 0) * 1000).toInt();
-      final wordText = (w['word'] as String? ?? '').trim();
-      if (wordText.isEmpty) continue;
-
-      final gap = startMs - prevEndMs;
-
-      if (chunk.isNotEmpty && (gap > 500 || chunk.length >= 5)) {
-        segments.add(_makeSegment(chunk));
-        chunk.clear();
-      }
-
-      chunk.add({'text': wordText, 'start': startMs, 'end': endMs});
-      prevEndMs = endMs;
-    }
-
-    if (chunk.isNotEmpty) segments.add(_makeSegment(chunk));
-    return segments;
-  }
 
   static const _thaiLaoMap = {
     'ก': 'ກ', 'ข': 'ຂ', 'ฃ': 'ຂ', 'ค': 'ຄ', 'ฅ': 'ຄ', 'ฆ': 'ຄ',
@@ -286,16 +281,7 @@ class GroqSpeechService {
   String _thaiToLao(String text) =>
       text.split('').map((c) => _thaiLaoMap[c] ?? c).join('');
 
-  SubtitleSegment _makeSegment(List<Map<String, dynamic>> words) {
-    var text = words.map((w) => (w['text'] as String).trim()).join(' ').trim();
-    if (_isThai(text)) text = _thaiToLao(text);
-    return SubtitleSegment(
-      id: _uuid.v4(),
-      text: text,
-      startTime: Duration(milliseconds: words.first['start'] as int),
-      endTime: Duration(milliseconds: words.last['end'] as int),
-    );
-  }
+
 
   List<SubtitleSegment> _splitByWords(
       List<SubtitleSegment> segs, WordSplit split) {

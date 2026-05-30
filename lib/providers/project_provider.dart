@@ -9,9 +9,9 @@ class ProjectProvider extends ChangeNotifier {
   final _uuid = const Uuid();
   bool _loaded = false;
 
-  // Undo / Redo stacks (snapshots of segment list)
-  final List<List<SubtitleSegment>> _undoStack = [];
-  final List<List<SubtitleSegment>> _redoStack = [];
+  // Undo / Redo stacks (snapshots of segment list and sfx blocks)
+  final List<ProjectSnapshot> _undoStack = [];
+  final List<ProjectSnapshot> _redoStack = [];
 
   // Whether to show translated subtitles in preview
   bool showTranslation = false;
@@ -86,6 +86,7 @@ class ProjectProvider extends ChangeNotifier {
       segments: src.segments.map((s) => s.copy()).toList(),
       videoDuration: src.videoDuration,
       language: src.language,
+      sourceLanguage: src.sourceLanguage,
       fontSize: src.fontSize,
       fontWeight: src.fontWeight,
       subtitlePositionY: src.subtitlePositionY,
@@ -114,7 +115,10 @@ class ProjectProvider extends ChangeNotifier {
 
   void _pushHistory() {
     if (_currentProject == null) return;
-    _undoStack.add(_currentProject!.segments.map((s) => s.copy()).toList());
+    _undoStack.add(ProjectSnapshot(
+      _currentProject!.segments.map((s) => s.copy()).toList(),
+      _currentProject!.sfxBlocks.map((s) => s.copy()).toList(),
+    ));
     _redoStack.clear();
     if (_undoStack.length > 30) _undoStack.removeAt(0);
   }
@@ -131,8 +135,13 @@ class ProjectProvider extends ChangeNotifier {
 
   void undo() {
     if (_undoStack.isEmpty || _currentProject == null) return;
-    _redoStack.add(_currentProject!.segments.map((s) => s.copy()).toList());
-    _currentProject!.segments = _undoStack.removeLast();
+    _redoStack.add(ProjectSnapshot(
+      _currentProject!.segments.map((s) => s.copy()).toList(),
+      _currentProject!.sfxBlocks.map((s) => s.copy()).toList(),
+    ));
+    final snap = _undoStack.removeLast();
+    _currentProject!.segments = snap.segments;
+    _currentProject!.sfxBlocks = snap.sfxBlocks;
     final index = _projects.indexWhere((p) => p.id == _currentProject!.id);
     if (index != -1) _projects[index] = _currentProject!;
     _persist();
@@ -141,12 +150,39 @@ class ProjectProvider extends ChangeNotifier {
 
   void redo() {
     if (_redoStack.isEmpty || _currentProject == null) return;
-    _undoStack.add(_currentProject!.segments.map((s) => s.copy()).toList());
-    _currentProject!.segments = _redoStack.removeLast();
+    _undoStack.add(ProjectSnapshot(
+      _currentProject!.segments.map((s) => s.copy()).toList(),
+      _currentProject!.sfxBlocks.map((s) => s.copy()).toList(),
+    ));
+    final snap = _redoStack.removeLast();
+    _currentProject!.segments = snap.segments;
+    _currentProject!.sfxBlocks = snap.sfxBlocks;
     final index = _projects.indexWhere((p) => p.id == _currentProject!.id);
     if (index != -1) _projects[index] = _currentProject!;
     _persist();
     notifyListeners();
+  }
+
+  void addSfxBlock(SfxBlock block) {
+    if (_currentProject == null) return;
+    _pushHistory();
+    _currentProject!.sfxBlocks.add(block);
+    _currentProject!.sfxBlocks.sort((a, b) => a.startTime.compareTo(b.startTime));
+    commit();
+  }
+
+  void removeSfxBlock(String id) {
+    if (_currentProject == null) return;
+    _pushHistory();
+    _currentProject!.sfxBlocks.removeWhere((b) => b.id == id);
+    commit();
+  }
+
+  void updateSfxBlocks(List<SfxBlock> blocks, {bool recordHistory = true}) {
+    if (_currentProject == null) return;
+    if (recordHistory) _pushHistory();
+    _currentProject!.sfxBlocks = blocks;
+    commit();
   }
 
   void toggleShowTranslation() {
@@ -189,4 +225,10 @@ class ProjectProvider extends ChangeNotifier {
     _persist();
     notifyListeners();
   }
+}
+
+class ProjectSnapshot {
+  final List<SubtitleSegment> segments;
+  final List<SfxBlock> sfxBlocks;
+  ProjectSnapshot(this.segments, this.sfxBlocks);
 }
