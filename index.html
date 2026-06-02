@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="lo">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KarnSub — ສ້າງ subtitle ໄວ ງ່າຍ ດ້ວຍ AI</title>
+<meta name="description" content="KarnSub — ແອັບສ້າງ subtitle ພາສາລາວ ດ້ວຍ AI. ຖອດສຽງ, ພາກສຽງ AI, ຕັດຕໍ່ວິດີໂອ ແບບ CapCut. ດາວໂຫຼດຟຣີ.">
+<meta property="og:title" content="KarnSub — ສ້າງ subtitle ໄວ ງ່າຍ ດ້ວຍ AI">
+<meta property="og:description" content="ຖອດສຽງພາສາລາວ, ພາກສຽງ AI, ຕັດຕໍ່ວິດີໂອ ໃນແອັບດຽວ">
+<meta property="og:image" content="icon.png">
+<meta property="og:type" content="website">
+<link rel="icon" href="icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Lao:wght@400;500;600;700;800&family=Poppins:wght@600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0a0a0f;
+    --bg2:#12121c;
+    --card:#16161f;
+    --line:#26263a;
+    --gold:#f5c542;
+    --gold2:#ffd95e;
+    --txt:#f4f4f8;
+    --mut:#9a9ab0;
+    --accent:#7c5cff;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{
+    font-family:'Noto Sans Lao',system-ui,sans-serif;
+    background:var(--bg);color:var(--txt);line-height:1.7;
+    overflow-x:hidden;
+  }
+  .wrap{max-width:1080px;margin:0 auto;padding:0 20px}
+  a{color:inherit;text-decoration:none}
+
+  /* ====== glow background ====== */
+  .glow{position:fixed;inset:0;z-index:0;pointer-events:none}
+  .glow::before,.glow::after{content:"";position:absolute;border-radius:50%;filter:blur(120px);opacity:.35}
+  .glow::before{width:480px;height:480px;background:var(--gold);top:-160px;left:-120px}
+  .glow::after{width:520px;height:520px;background:var(--accent);bottom:-200px;right:-160px;opacity:.28}
+
+  /* ====== nav ====== */
+  nav{position:sticky;top:0;z-index:50;backdrop-filter:blur(14px);
+      background:rgba(10,10,15,.7);border-bottom:1px solid var(--line)}
+  .nav-in{display:flex;align-items:center;justify-content:space-between;height:64px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:19px}
+  .brand img{width:34px;height:34px;border-radius:9px}
+  .brand b{background:linear-gradient(90deg,var(--gold),var(--gold2));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .nav-dl{background:linear-gradient(90deg,var(--gold),var(--gold2));color:#161200;
+    padding:9px 18px;border-radius:999px;font-weight:700;font-size:14px;transition:.2s}
+  .nav-dl:hover{transform:translateY(-1px);box-shadow:0 8px 24px rgba(245,197,66,.35)}
+
+  /* ====== hero ====== */
+  header{position:relative;z-index:1;text-align:center;padding:72px 0 56px}
+  .pill{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);
+    background:var(--card);padding:7px 16px;border-radius:999px;font-size:13px;color:var(--mut);margin-bottom:22px}
+  .pill .dot{width:8px;height:8px;border-radius:50%;background:#46d369;box-shadow:0 0 10px #46d369}
+  h1{font-size:clamp(34px,6vw,60px);line-height:1.15;font-weight:800;letter-spacing:-.5px}
+  h1 .hl{background:linear-gradient(90deg,var(--gold),var(--gold2));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{font-size:clamp(16px,2.4vw,20px);color:var(--mut);max-width:620px;margin:20px auto 34px}
+  .cta{display:flex;gap:14px;justify-content:center;flex-wrap:wrap}
+  .btn{display:inline-flex;align-items:center;gap:10px;padding:15px 30px;border-radius:14px;
+    font-weight:700;font-size:16px;transition:.2s;cursor:pointer;border:none;font-family:inherit}
+  .btn-main{background:linear-gradient(90deg,var(--gold),var(--gold2));color:#161200}
+  .btn-main:hover{transform:translateY(-2px);box-shadow:0 14px 36px rgba(245,197,66,.4)}
+  .btn-ghost{background:var(--card);color:var(--txt);border:1px solid var(--line)}
+  .btn-ghost:hover{border-color:var(--gold)}
+  .meta{margin-top:18px;font-size:13px;color:var(--mut)}
+
+  /* ====== hero phone mock ====== */
+  .mock{position:relative;z-index:1;margin:36px auto 0;width:230px;height:470px;
+    border-radius:38px;border:9px solid #1c1c28;background:linear-gradient(160deg,#14141f,#0c0c14);
+    box-shadow:0 40px 90px rgba(0,0,0,.6);overflow:hidden}
+  .mock .notch{position:absolute;top:10px;left:50%;transform:translateX(-50%);width:90px;height:18px;background:#1c1c28;border-radius:0 0 14px 14px;z-index:2}
+  .mock-screen{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:flex-end;padding:18px}
+  .mock-screen .vid{position:absolute;inset:0;background:
+    radial-gradient(circle at 30% 30%,rgba(124,92,255,.4),transparent 60%),
+    radial-gradient(circle at 70% 70%,rgba(245,197,66,.3),transparent 55%),#0e0e16}
+  .cap{position:relative;z-index:1;align-self:center;text-align:center;font-weight:700;font-size:15px;
+    padding:8px 14px;border-radius:10px;margin-bottom:30px;
+    background:rgba(0,0,0,.45);backdrop-filter:blur(4px)}
+  .cap .yellow{color:var(--gold)}
+
+  /* ====== sections ====== */
+  section{position:relative;z-index:1;padding:64px 0}
+  .eyebrow{color:var(--gold);font-weight:700;font-size:13px;letter-spacing:1.5px;text-transform:uppercase;text-align:center}
+  .h2{font-size:clamp(26px,4vw,38px);font-weight:800;text-align:center;margin:10px 0 12px}
+  .lead{text-align:center;color:var(--mut);max-width:560px;margin:0 auto 44px}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:18px}
+  .feat{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:26px;transition:.25s}
+  .feat:hover{transform:translateY(-4px);border-color:var(--gold);box-shadow:0 18px 40px rgba(0,0,0,.4)}
+  .feat .ic{width:48px;height:48px;border-radius:13px;display:grid;place-items:center;font-size:24px;margin-bottom:16px;
+    background:linear-gradient(160deg,rgba(245,197,66,.18),rgba(124,92,255,.18))}
+  .feat h3{font-size:18px;font-weight:700;margin-bottom:7px}
+  .feat p{color:var(--mut);font-size:14.5px}
+
+  /* ====== install steps ====== */
+  .steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:18px;margin-top:10px}
+  .step{background:var(--bg2);border:1px solid var(--line);border-radius:18px;padding:26px;position:relative}
+  .step .num{position:absolute;top:-16px;left:24px;width:38px;height:38px;border-radius:11px;
+    background:linear-gradient(90deg,var(--gold),var(--gold2));color:#161200;display:grid;place-items:center;font-weight:800;font-size:18px}
+  .step h3{margin:14px 0 6px;font-size:17px}
+  .step p{color:var(--mut);font-size:14.5px}
+
+  /* ====== pricing ====== */
+  .price-wrap{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:20px;max-width:740px;margin:0 auto}
+  .price{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:32px}
+  .price.pro{border-color:var(--gold);background:linear-gradient(165deg,rgba(245,197,66,.08),var(--card));position:relative;overflow:hidden}
+  .price.pro::after{content:"ແນະນຳ";position:absolute;top:18px;right:-34px;transform:rotate(45deg);
+    background:var(--gold);color:#161200;font-weight:800;font-size:12px;padding:5px 40px}
+  .price .tier{font-size:14px;color:var(--mut);font-weight:600;letter-spacing:1px;text-transform:uppercase}
+  .price .amt{font-size:40px;font-weight:800;margin:10px 0 4px}
+  .price .amt small{font-size:16px;color:var(--mut);font-weight:500}
+  .price ul{list-style:none;margin:20px 0 0}
+  .price li{padding:9px 0;color:var(--txt);display:flex;gap:10px;align-items:flex-start;font-size:15px;border-top:1px solid var(--line)}
+  .price li::before{content:"✓";color:var(--gold);font-weight:800;flex-shrink:0}
+  .price li.no{color:var(--mut)}
+  .price li.no::before{content:"–";color:var(--mut)}
+
+  /* ====== faq ====== */
+  .faq{max-width:760px;margin:0 auto}
+  details{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 22px;margin-bottom:12px}
+  details[open]{border-color:var(--gold)}
+  summary{font-weight:700;cursor:pointer;list-style:none;display:flex;justify-content:space-between;align-items:center;font-size:16px}
+  summary::after{content:"+";color:var(--gold);font-size:22px;font-weight:700}
+  details[open] summary::after{content:"–"}
+  details p{color:var(--mut);margin-top:12px;font-size:15px}
+
+  /* ====== final cta ====== */
+  .final{text-align:center;background:linear-gradient(160deg,rgba(245,197,66,.1),rgba(124,92,255,.08));
+    border:1px solid var(--line);border-radius:26px;padding:54px 24px;margin:30px 0}
+  .final h2{font-size:clamp(26px,4vw,36px);font-weight:800}
+  .final p{color:var(--mut);margin:12px 0 28px}
+
+  footer{border-top:1px solid var(--line);padding:34px 0;text-align:center;color:var(--mut);font-size:14px;position:relative;z-index:1}
+  footer .brand{justify-content:center;margin-bottom:12px;font-size:17px}
+
+  @media(max-width:560px){
+    .btn{width:100%;justify-content:center}
+    .nav-dl{padding:8px 14px}
+  }
+</style>
+</head>
+<body>
+<div class="glow"></div>
+
+<nav>
+  <div class="wrap nav-in">
+    <a href="#" class="brand"><img src="icon.png" alt="KarnSub"><span>Karn<b>Sub</b></span></a>
+    <a href="#download" class="nav-dl">ດາວໂຫຼດ</a>
+  </div>
+</nav>
+
+<header class="wrap">
+  <span class="pill"><span class="dot"></span> ເວີຊັນ 1.1.0 · ສຳລັບ Android</span>
+  <h1>ສ້າງ <span class="hl">subtitle ພາສາລາວ</span><br>ໄວ ງ່າຍ ດ້ວຍ AI</h1>
+  <p class="sub">ຖອດສຽງເປັນ subtitle, ພາກສຽງ AI, ໃສ່ສຽງ SFX ແລະ ຕັດຕໍ່ວິດີໂອ ແບບ CapCut — ຄົບໃນແອັບດຽວ. ສ້າງມາເພື່ອ creator ລາວ.</p>
+  <div class="cta">
+    <a href="#download" class="btn btn-main">⬇ ດາວໂຫຼດ APK ຟຣີ</a>
+    <a href="#features" class="btn btn-ghost">ເບິ່ງຟີເຈີ</a>
+  </div>
+  <p class="meta">ຟຣີ · ບໍ່ມີໂຄສະນາ · ໃຊ້ Gemini API ຂອງເຈົ້າເອງ (BYOK)</p>
+
+  <div class="mock">
+    <div class="notch"></div>
+    <div class="mock-screen">
+      <div class="vid"></div>
+      <div class="cap">ສະບາຍດີ <span class="yellow">ທຸກຄົນ</span> 👋</div>
+    </div>
+  </div>
+</header>
+
+<!-- FEATURES -->
+<section id="features" class="wrap">
+  <p class="eyebrow">ຟີເຈີ</p>
+  <h2 class="h2">ທຸກຢ່າງທີ່ creator ຕ້ອງການ</h2>
+  <p class="lead">ຕັ້ງແຕ່ຖອດສຽງຈົນຮອດ export — ບໍ່ຕ້ອງສະຫຼັບຫຼາຍແອັບ</p>
+  <div class="grid">
+    <div class="feat"><div class="ic">🎙️</div><h3>ຖອດສຽງເປັນ subtitle</h3><p>AI ຖອດສຽງພາສາລາວແມ່ນຍຳ ໄວ ບໍ່ຕ້ອງພິມເອງ</p></div>
+    <div class="feat"><div class="ic">🗣️</div><h3>ພາກສຽງ AI</h3><p>ສ້າງສຽງພາກ AI ທຳມະຊາດ ວາງເປັນ track ແຍກ ປັບສຽງໄດ້</p></div>
+    <div class="feat"><div class="ic">🎵</div><h3>ສຽງ SFX ອັດຕະໂນມັດ</h3><p>ໃສ່ emoji → ໄດ້ສຽງ pop, swoosh, punch ອັດຕະໂນມັດ</p></div>
+    <div class="feat"><div class="ic">✂️</div><h3>ຕັດຕໍ່ແບບ CapCut</h3><p>trim, split, ລຶບທ່ອນ ໂດຍກົງເທິງ timeline</p></div>
+    <div class="feat"><div class="ic">🖼️</div><h3>ໃສ່ຮູບ/sticker</h3><p>ວາງຮູບເທິງວິດີໂອ ຍ້າຍ ໝູນ ປັບຂະໜາດໄດ້</p></div>
+    <div class="feat"><div class="ic">🎤</div><h3>Subtitle Karaoke</h3><p>ຄຳຕໍ່ຄຳ ໄຮໄລ້ຕາມສຽງ ແບບ MV</p></div>
+    <div class="feat"><div class="ic">🌐</div><h3>ສອງພາສາ</h3><p>ສະແດງ subtitle ສອງພາສາພ້ອມກັນ</p></div>
+    <div class="feat"><div class="ic">📤</div><h3>Export ຄຸນນະພາບສູງ</h3><p>burn subtitle ຕິດວິດີໂອ ບັນທຶກລົງເຄື່ອງໂດຍກົງ</p></div>
+  </div>
+</section>
+
+<!-- INSTALL -->
+<section class="wrap">
+  <p class="eyebrow">ການຕິດຕັ້ງ</p>
+  <h2 class="h2">ຕິດຕັ້ງໃນ 3 ຂັ້ນຕອນ</h2>
+  <p class="lead">ເພາະບໍ່ໄດ້ຢູ່ Play Store ຕ້ອງເປີດ "ຕິດຕັ້ງຈາກແຫຼ່ງທີ່ບໍ່ຮູ້ຈັກ" ກ່ອນ</p>
+  <div class="steps">
+    <div class="step"><div class="num">1</div><h3>ດາວໂຫຼດ APK</h3><p>ກົດປຸ່ມ "ດາວໂຫຼດ APK" ດ້ານລຸ່ມ → ລໍໂຫຼດໃຫ້ແລ້ວ</p></div>
+    <div class="step"><div class="num">2</div><h3>ອະນຸຍາດການຕິດຕັ້ງ</h3><p>ເປີດໄຟລ໌ → ຖ້າມີຄຳເຕືອນ ກົດ "ການຕັ້ງຄ່າ" → ເປີດ "ອະນຸຍາດຈາກແຫຼ່ງນີ້"</p></div>
+    <div class="step"><div class="num">3</div><h3>ຕິດຕັ້ງ ແລະ ເປີດ</h3><p>ກົດ "ຕິດຕັ້ງ" → ເປີດແອັບ → ໃສ່ Gemini API key → ເລີ່ມໃຊ້ໄດ້ເລີຍ</p></div>
+  </div>
+</section>
+
+<!-- PRICING -->
+<section id="pricing" class="wrap">
+  <p class="eyebrow">ລາຄາ</p>
+  <h2 class="h2">ໃຊ້ຟຣີ ຫຼື ປົດ PRO</h2>
+  <p class="lead">ໃຊ້ໄດ້ຟຣີທຸກຟີເຈີ — PRO ເອົາ watermark ອອກ ແລະ ປົດ feature ພິເສດ</p>
+  <div class="price-wrap">
+    <div class="price">
+      <div class="tier">ຟຣີ</div>
+      <div class="amt">0 <small>ກີບ</small></div>
+      <ul>
+        <li>ຖອດສຽງເປັນ subtitle</li>
+        <li>ຕັດຕໍ່ວິດີໂອ ໃສ່ SFX</li>
+        <li>Export ວິດີໂອ</li>
+        <li class="no">ມີ watermark KarnSub</li>
+      </ul>
+    </div>
+    <div class="price pro">
+      <div class="tier">PRO</div>
+      <div class="amt">39,000 <small>ກີບ / ເດືອນ</small></div>
+      <ul>
+        <li>ບໍ່ມີ watermark</li>
+        <li>Subtitle Karaoke</li>
+        <li>ສອງພາສາ</li>
+        <li>ພາກສຽງ AI ເຕັມຮູບແບບ</li>
+      </ul>
+    </div>
+  </div>
+  <p class="lead" style="margin-top:30px">ສະໝັກ PRO ໄດ້ໃນແອັບ (ສະແກນ QR ຈ່າຍ → ອັບໂຫຼດ slip → ປົດ PRO ທັນທີ)</p>
+</section>
+
+<!-- FAQ -->
+<section class="wrap">
+  <p class="eyebrow">ຄຳຖາມທີ່ພົບເລື້ອຍ</p>
+  <h2 class="h2">FAQ</h2>
+  <div class="faq" style="margin-top:30px">
+    <details open><summary>Gemini API key ແມ່ນຫຍັງ ຫາໄດ້ຢູ່ໃສ?</summary>
+      <p>KarnSub ໃຊ້ AI ຂອງ Google (Gemini). ເຈົ້າຕ້ອງມີ key ຂອງເຈົ້າເອງ (ຟຣີ) ຈາກ <a href="https://aistudio.google.com/apikey" style="color:var(--gold)">aistudio.google.com/apikey</a> ແລ້ວເອົາມາໃສ່ໃນແອັບ. key ເກັບໄວ້ໃນເຄື່ອງເຈົ້າເທົ່ານັ້ນ ບໍ່ສົ່ງໄປໃສ.</p></details>
+    <details><summary>ເປັນຫຍັງບໍ່ມີຢູ່ Play Store?</summary>
+      <p>ແຈກໂດຍກົງຜ່ານ website ນີ້ ເພື່ອໃຫ້ສະໝັກ PRO ຜ່ານ QR ທະນາຄານລາວໄດ້ສະດວກ. ປອດໄພ — APK ເຊັນ (sign) ຮຽບຮ້ອຍ.</p></details>
+    <details><summary>ໃຊ້ກັບໂທລະສັບຮຸ່ນໃດໄດ້ແດ່?</summary>
+      <p>Android 7.0 ຂຶ້ນໄປ (ໂທລະສັບ 64-bit ສ່ວນໃຫຍ່ໃນປັດຈຸບັນ).</p></details>
+    <details><summary>ຈ່າຍ PRO ແລ້ວ ປົດໂຕນເອງບໍ?</summary>
+      <p>ສະແກນ QR ຈ່າຍ → ຖ່າຍ slip → ອັບໂຫຼດໃນແອັບ → ລະບົບກວດ slip ດ້ວຍ AI → ປົດ PRO ໃຫ້ທັນທີ. ຖ້າມີບັນຫາທັກ WhatsApp ໄດ້.</p></details>
+    <details><summary>ຂໍ້ມູນຂອງຂ້ອຍປອດໄພບໍ?</summary>
+      <p>ວິດີໂອ/ສຽງ ປະມວນຜ່ານ Gemini (Google) ດ້ວຍ key ຂອງເຈົ້າເອງ. ເຮົາເກັບພຽງ email (ສຳລັບ login) ບໍ່ຂາຍຂໍ້ມູນ.</p></details>
+  </div>
+</section>
+
+<!-- FINAL CTA -->
+<section id="download" class="wrap">
+  <div class="final">
+    <h2>ພ້ອມສ້າງ subtitle ແລ້ວບໍ?</h2>
+    <p>ດາວໂຫຼດຟຣີ ມື້ນີ້ — ໃຊ້ໄດ້ທັນທີ</p>
+    <a href="KarnSub.apk" class="btn btn-main" download>⬇ ດາວໂຫຼດ KarnSub.apk (36 MB)</a>
+    <p class="meta">ເວີຊັນ 1.1.0 · Android 7.0+ · ອັບເດດລ່າສຸດ</p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="brand"><img src="icon.png" alt="" style="width:30px;height:30px;border-radius:8px;vertical-align:middle;margin-right:8px"><span>Karn<b style="color:var(--gold)">Sub</b></span></div>
+    <p>© 2026 KarnSub · ສ້າງ subtitle ພາສາລາວ ດ້ວຍ AI</p>
+    <p style="margin-top:8px"><a href="privacy.html" style="color:var(--gold)">ນະໂຍບາຍຄວາມເປັນສ່ວນຕົວ</a></p>
+  </div>
+</footer>
+
+</body>
+</html>
