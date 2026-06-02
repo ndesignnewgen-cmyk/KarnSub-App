@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://ndesignnewgen-cmyk.github.io/KarnSub-App/sitemap.xml
