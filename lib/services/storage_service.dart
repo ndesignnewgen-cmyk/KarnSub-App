@@ -194,6 +194,17 @@ class StorageService {
         'flipH': o.flipH,
         'isVideo': o.isVideo,
         'cover': o.cover,
+        'opacity': o.opacity,
+        'keyframes': o.keyframes
+            .map((k) => {
+                  'timeMs': k.timeMs,
+                  'x': k.x,
+                  'y': k.y,
+                  'scale': k.scale,
+                  'rotation': k.rotation,
+                  'opacity': k.opacity,
+                })
+            .toList(),
       };
 
   // Returns null if the overlay's image file is gone (drops stale entries).
@@ -212,6 +223,21 @@ class StorageService {
       flipH: j['flipH'] as bool? ?? false,
       isVideo: j['isVideo'] as bool? ?? false,
       cover: j['cover'] as bool? ?? false,
+      opacity: (j['opacity'] as num?)?.toDouble() ?? 1.0,
+      keyframes: (j['keyframes'] as List<dynamic>?)
+              ?.map((e) {
+                final m = e as Map<String, dynamic>;
+                return OverlayKeyframe(
+                  timeMs: (m['timeMs'] as num?)?.toInt() ?? 0,
+                  x: (m['x'] as num?)?.toDouble() ?? 0.5,
+                  y: (m['y'] as num?)?.toDouble() ?? 0.5,
+                  scale: (m['scale'] as num?)?.toDouble() ?? 0.5,
+                  rotation: (m['rotation'] as num?)?.toDouble() ?? 0.0,
+                  opacity: (m['opacity'] as num?)?.toDouble() ?? 1.0,
+                );
+              })
+              .toList() ??
+          [],
     );
   }
 

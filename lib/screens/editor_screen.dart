@@ -195,6 +195,12 @@ class _EditorScreenState extends State<EditorScreen>
     'broll': false, // heavy (downloads) → off by default
   };
   bool _autoEditStepsLoaded = false;
+  // CapCut-style keyframe editing: pinch=scale / drag=pan on the preview while a
+  // clip is selected → auto-create/update a zoom keyframe at the playhead.
+  ZoomEffect? _kfZoom;
+  ZoomKeyframe? _kfActive;
+  double _kfBaseScale = 1.0;
+  bool _kfMoved = false;
   // Smooth 60fps timeline auto-scroll during playback (interpolated between the
   // coarse position reports from video_player).
   Ticker? _scrollTicker;
@@ -765,7 +771,7 @@ class _EditorScreenState extends State<EditorScreen>
     for (final z in zs) {
       final s0 = z.startTime.inMilliseconds, e0 = z.endTime.inMilliseconds;
       if (ms < s0 || ms > e0) continue;
-      if (z.keyframes.length >= 2) {
+      if (z.keyframes.isNotEmpty) {
         final kfs = z.keyframes;
         if (ms <= kfs.first.timeMs) {
           return (kfs.first.scale, kfs.first.focusX, kfs.first.focusY);
@@ -792,6 +798,100 @@ class _EditorScreenState extends State<EditorScreen>
       return (s < 1.0 ? 1.0 : s, z.focusX, z.focusY);
     }
     return (1.0, 0.5, 0.5);
+  }
+
+  /// Interpolated overlay transform + opacity at [ms] (keyframes → animate;
+  /// none → static values).
+  ({double x, double y, double scale, double rotation, double opacity})
+      _overlayStateAt(ImageOverlay ov, int ms) {
+    final kfs = ov.keyframes;
+    if (kfs.isEmpty) {
+      return (x: ov.x, y: ov.y, scale: ov.scale, rotation: ov.rotation, opacity: ov.opacity);
+    }
+    if (ms <= kfs.first.timeMs) {
+      final k = kfs.first;
+      return (x: k.x, y: k.y, scale: k.scale, rotation: k.rotation, opacity: k.opacity);
+    }
+    if (ms >= kfs.last.timeMs) {
+      final k = kfs.last;
+      return (x: k.x, y: k.y, scale: k.scale, rotation: k.rotation, opacity: k.opacity);
+    }
+    int i = 0;
+    while (i < kfs.length - 1 && kfs[i + 1].timeMs < ms) {
+      i++;
+    }
+    final a = kfs[i], b = kfs[i + 1];
+    final span = (b.timeMs - a.timeMs).clamp(1, 1 << 31);
+    final t = ((ms - a.timeMs) / span).clamp(0.0, 1.0);
+    double l(double p, double q) => p + (q - p) * t;
+    return (
+      x: l(a.x, b.x),
+      y: l(a.y, b.y),
+      scale: l(a.scale, b.scale),
+      rotation: l(a.rotation, b.rotation),
+      opacity: l(a.opacity, b.opacity),
+    );
+  }
+
+  /// Find an overlay keyframe near the playhead (within [tolMs]), else create one
+  /// seeded with the current interpolated state, and return it.
+  OverlayKeyframe _overlayKeyframeAtPlayhead(ImageOverlay ov, {int tolMs = 90}) {
+    final ms = _position.inMilliseconds
+        .clamp(ov.startTime.inMilliseconds, ov.endTime.inMilliseconds);
+    for (final k in ov.keyframes) {
+      if ((k.timeMs - ms).abs() <= tolMs) return k;
+    }
+    final s = _overlayStateAt(ov, ms);
+    final kf = OverlayKeyframe(
+        timeMs: ms,
+        x: s.x,
+        y: s.y,
+        scale: s.scale,
+        rotation: s.rotation,
+        opacity: s.opacity);
+    ov.keyframes.add(kf);
+    ov.keyframes.sort((a, b) => a.timeMs.compareTo(b.timeMs));
+    return kf;
+  }
+
+  /// Get the zoom effect overlapping the selected clip, creating an empty-keyframe
+  /// one spanning the clip if none exists. Returns null if no clip is selected.
+  ZoomEffect? _ensureZoomForSelectedClip(ProjectProvider provider) {
+    final project = provider.currentProject;
+    if (project == null || _selectedClipIndex == null) return null;
+    final clips = _videoClips(project);
+    if (_selectedClipIndex! >= clips.length) return null;
+    final clip = clips[_selectedClipIndex!];
+    for (final e in project.zoomEffects) {
+      if (clip.start < e.endTime.inMilliseconds &&
+          e.startTime.inMilliseconds < clip.end) {
+        return e;
+      }
+    }
+    final z = ZoomEffect(
+      id: const Uuid().v4(),
+      startTime: Duration(milliseconds: clip.start),
+      endTime: Duration(milliseconds: clip.end),
+      keyframes: [],
+    );
+    project.zoomEffects.add(z); // direct (history handled by caller)
+    return z;
+  }
+
+  /// Find a keyframe within [tolMs] of the playhead, else create one seeded with
+  /// the current interpolated state, and return it.
+  ZoomKeyframe _keyframeAtPlayhead(ZoomEffect z, {int tolMs = 90}) {
+    final ms = _position.inMilliseconds
+        .clamp(z.startTime.inMilliseconds, z.endTime.inMilliseconds);
+    for (final k in z.keyframes) {
+      if ((k.timeMs - ms).abs() <= tolMs) return k;
+    }
+    final base = _zoomAt(ms);
+    final kf = ZoomKeyframe(
+        timeMs: ms, scale: base.$1, focusX: base.$2, focusY: base.$3);
+    z.keyframes.add(kf);
+    z.keyframes.sort((a, b) => a.timeMs.compareTo(b.timeMs));
+    return kf;
   }
 
   /// Apply zoom (Ken-Burns) to the selected video clip's time range.
@@ -2276,7 +2376,84 @@ class _EditorScreenState extends State<EditorScreen>
                           }
                           return Stack(
                             children: [
-                              Positioned.fill(child: videoLayer),
+                              // When a clip is selected: pinch = zoom, drag = pan
+                              // → auto keyframe at the playhead (CapCut-style).
+                              Positioned.fill(
+                                child: _selectedClipIndex != null
+                                    ? GestureDetector(
+                                        behavior: HitTestBehavior.opaque,
+                                        onScaleStart: (d) {
+                                          _pauseForEdit();
+                                          _kfBaseScale =
+                                              _zoomAt(_position.inMilliseconds).$1;
+                                          _kfMoved = false;
+                                          _kfZoom = null;
+                                          _kfActive = null;
+                                        },
+                                        onScaleUpdate: (d) {
+                                          if (!_kfMoved) {
+                                            provider.pushHistory();
+                                            final z = _ensureZoomForSelectedClip(
+                                                provider);
+                                            if (z == null) return;
+                                            _kfZoom = z;
+                                            _kfActive = _keyframeAtPlayhead(z);
+                                            _kfMoved = true;
+                                          }
+                                          final kf = _kfActive;
+                                          if (kf == null) return;
+                                          final ns = (_kfBaseScale * d.scale)
+                                              .clamp(1.0, 4.0);
+                                          kf.scale = ns;
+                                          if (ns > 1.001) {
+                                            kf.focusX = (kf.focusX -
+                                                    d.focalPointDelta.dx /
+                                                        (c.maxWidth * ns))
+                                                .clamp(0.0, 1.0);
+                                            kf.focusY = (kf.focusY -
+                                                    d.focalPointDelta.dy /
+                                                        (c.maxHeight * ns))
+                                                .clamp(0.0, 1.0);
+                                          }
+                                          provider.liveUpdate();
+                                          setState(() {});
+                                        },
+                                        onScaleEnd: (d) {
+                                          if (_kfMoved) {
+                                            provider.commit();
+                                            _toast(tr('ed.kfCaptured'));
+                                          }
+                                          _kfZoom = null;
+                                          _kfActive = null;
+                                          _kfMoved = false;
+                                        },
+                                        child: videoLayer,
+                                      )
+                                    : videoLayer,
+                              ),
+                              if (_selectedClipIndex != null)
+                                Positioned(
+                                  top: 6,
+                                  left: 0,
+                                  right: 0,
+                                  child: IgnorePointer(
+                                    child: Center(
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 10, vertical: 4),
+                                        decoration: BoxDecoration(
+                                          color: Colors.black54,
+                                          borderRadius:
+                                              BorderRadius.circular(20),
+                                        ),
+                                        child: Text(tr('ed.kfHint'),
+                                            style: const TextStyle(
+                                                color: Colors.white,
+                                                fontSize: 10)),
+                                      ),
+                                    ),
+                                  ),
+                                ),
                               // Image overlays active at the current playhead
                               // (drawn under the subtitle text).
                               if (project != null)
@@ -2603,6 +2780,7 @@ class _EditorScreenState extends State<EditorScreen>
         continue;
       }
       final selected = _selectedImageId == ov.id;
+      final st = _overlayStateAt(ov, posMs);
 
       // Full-screen "cover" overlay: fill the whole preview, crop overflow.
       if (ov.cover) {
@@ -2639,15 +2817,18 @@ class _EditorScreenState extends State<EditorScreen>
                 _selectedClipIndex = null;
               });
             },
-            child: Transform.flip(
-              flipX: ov.flipH,
-              child: ClipRect(
-                child: Container(
-                  decoration: selected
-                      ? BoxDecoration(
-                          border: Border.all(color: AppColors.primary, width: 2))
-                      : null,
-                  child: media,
+            child: Opacity(
+              opacity: st.opacity.clamp(0.0, 1.0),
+              child: Transform.flip(
+                flipX: ov.flipH,
+                child: ClipRect(
+                  child: Container(
+                    decoration: selected
+                        ? BoxDecoration(
+                            border: Border.all(color: AppColors.primary, width: 2))
+                        : null,
+                    child: media,
+                  ),
                 ),
               ),
             ),
@@ -2658,20 +2839,23 @@ class _EditorScreenState extends State<EditorScreen>
 
       // Allow scaling beyond the screen (up to 3× video width). The widget is
       // sized to the scaled width; rotation/flip applied around its centre.
-      final imgW = (ov.scale * w).clamp(20.0, w * 3.0);
+      final imgW = (st.scale * w).clamp(20.0, w * 3.0);
       widgets.add(Positioned(
         // Centre the (possibly oversized) box on (x,y); it may extend off-screen.
-        left: ov.x * w - imgW / 2,
-        top: ov.y * h - imgW / 2,
+        left: st.x * w - imgW / 2,
+        top: st.y * h - imgW / 2,
         width: imgW,
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
           // onScale handles drag (1 finger) + pinch-zoom + twist-rotate (2).
+          // If the overlay has keyframes, edits write to a keyframe at the
+          // playhead (CapCut-style); otherwise they change the static values.
           onScaleStart: (_) {
             _pauseForEdit();
             provider.pushHistory();
-            _imgBaseScale = ov.scale;
-            _imgBaseRot = ov.rotation;
+            final s0 = _overlayStateAt(ov, _position.inMilliseconds);
+            _imgBaseScale = s0.scale;
+            _imgBaseRot = s0.rotation;
             setState(() {
               _selectedImageId = ov.id;
               _selectedIndex = null;
@@ -2681,33 +2865,47 @@ class _EditorScreenState extends State<EditorScreen>
           },
           onScaleUpdate: (d) {
             setState(() {
-              if (d.pointerCount >= 2) {
-                ov.scale = (_imgBaseScale * d.scale).clamp(0.05, 3.0);
-                ov.rotation = (_imgBaseRot + d.rotation * 180 / 3.1415926535) % 360;
+              if (ov.keyframes.isNotEmpty) {
+                final kf = _overlayKeyframeAtPlayhead(ov);
+                if (d.pointerCount >= 2) {
+                  kf.scale = (_imgBaseScale * d.scale).clamp(0.05, 3.0);
+                  kf.rotation =
+                      (_imgBaseRot + d.rotation * 180 / 3.1415926535) % 360;
+                }
+                kf.x = (kf.x + d.focalPointDelta.dx / w).clamp(-0.5, 1.5);
+                kf.y = (kf.y + d.focalPointDelta.dy / h).clamp(-0.5, 1.5);
+              } else {
+                if (d.pointerCount >= 2) {
+                  ov.scale = (_imgBaseScale * d.scale).clamp(0.05, 3.0);
+                  ov.rotation =
+                      (_imgBaseRot + d.rotation * 180 / 3.1415926535) % 360;
+                }
+                ov.x = (ov.x + d.focalPointDelta.dx / w).clamp(-0.5, 1.5);
+                ov.y = (ov.y + d.focalPointDelta.dy / h).clamp(-0.5, 1.5);
               }
-              // focalPointDelta works for both 1- and 2-finger drags.
-              ov.x = (ov.x + d.focalPointDelta.dx / w).clamp(-0.5, 1.5);
-              ov.y = (ov.y + d.focalPointDelta.dy / h).clamp(-0.5, 1.5);
             });
             provider.liveUpdate();
           },
           onScaleEnd: (_) => provider.commit(),
-          child: Transform.rotate(
-            angle: ov.rotation * 3.1415926535 / 180.0,
-            child: Transform.flip(
-              flipX: ov.flipH,
-              child: Container(
-                decoration: selected
-                    ? BoxDecoration(
-                        border: Border.all(color: AppColors.primary, width: 2))
-                    : null,
-                child: ov.isVideo
-                    ? _brollPreview(ov.id)
-                    : Image.file(
-                        File(ov.path),
-                        fit: BoxFit.contain,
-                        errorBuilder: (_, __, ___) => const SizedBox.shrink(),
-                      ),
+          child: Opacity(
+            opacity: st.opacity.clamp(0.0, 1.0),
+            child: Transform.rotate(
+              angle: st.rotation * 3.1415926535 / 180.0,
+              child: Transform.flip(
+                flipX: ov.flipH,
+                child: Container(
+                  decoration: selected
+                      ? BoxDecoration(
+                          border: Border.all(color: AppColors.primary, width: 2))
+                      : null,
+                  child: ov.isVideo
+                      ? _brollPreview(ov.id)
+                      : Image.file(
+                          File(ov.path),
+                          fit: BoxFit.contain,
+                          errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                        ),
+                ),
               ),
             ),
           ),
@@ -3794,6 +3992,9 @@ class _EditorScreenState extends State<EditorScreen>
                   setState(() {
                     _activeSegmentIndex = i;
                     _selectedIndex = i;
+                    _selectedSfxId = null;
+                    _selectedClipIndex = null;
+                    _selectedImageId = null;
                   });
                 },
                 onDoubleTap: () => _editSegment(s, i, provider),
@@ -3980,6 +4181,7 @@ class _EditorScreenState extends State<EditorScreen>
                     setState(() {
                       _selectedIndex = null;
                       _selectedSfxId = null;
+                      _selectedImageId = null;
                       _selectedClipIndex = ci;
                       _clipTrimLeft = 0;
                       _clipTrimRight = 0;
@@ -4019,6 +4221,66 @@ class _EditorScreenState extends State<EditorScreen>
                   height: height,
                   width: 2,
                   child: Container(color: Colors.white),
+                ),
+          // Zoom keyframe markers (◆) — CapCut-style. Tap = jump, drag = retime,
+          // long-press = delete.
+          if (project != null)
+            for (final z in project.zoomEffects)
+              for (final kf in z.keyframes)
+                Positioned(
+                  left: (kf.timeMs / 1000.0) * _pxPerSec + leftPad - 11,
+                  top: height / 2 - 11,
+                  width: 22,
+                  height: 22,
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => _seekTo(Duration(milliseconds: kf.timeMs)),
+                    onLongPress: () {
+                      provider.pushHistory();
+                      z.keyframes.remove(kf);
+                      if (z.keyframes.isEmpty) {
+                        project.zoomEffects.remove(z);
+                      }
+                      provider.commit();
+                      setState(() {});
+                      _toast(tr('ed.kfDeleted'));
+                    },
+                    onHorizontalDragStart: (_) {
+                      _pauseForEdit();
+                      provider.pushHistory();
+                      _dragIndex = -1;
+                    },
+                    onHorizontalDragUpdate: (d) {
+                      final deltaMs = (d.delta.dx / _pxPerSec * 1000).round();
+                      setState(() {
+                        kf.timeMs = (kf.timeMs + deltaMs).clamp(
+                            z.startTime.inMilliseconds, z.endTime.inMilliseconds);
+                      });
+                      provider.liveUpdate();
+                    },
+                    onHorizontalDragEnd: (_) {
+                      z.keyframes.sort((a, b) => a.timeMs.compareTo(b.timeMs));
+                      provider.commit();
+                      setState(() => _dragIndex = null);
+                    },
+                    child: Center(
+                      child: Transform.rotate(
+                        angle: 0.7853981634, // 45° → diamond
+                        child: Container(
+                          width: 11,
+                          height: 11,
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFFFB703),
+                            borderRadius: BorderRadius.circular(2),
+                            border: Border.all(color: Colors.white, width: 1.2),
+                            boxShadow: const [
+                              BoxShadow(color: Colors.black54, blurRadius: 2),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
                 ),
         ],
       ),
@@ -4139,6 +4401,17 @@ class _EditorScreenState extends State<EditorScreen>
                     customColor: isCover ? AppColors.primary : null,
                   );
                 }(),
+                item(
+                  Icons.opacity,
+                  tr('ed.opacity'),
+                  () => _showOverlayOpacitySheet(provider, _selectedImageId!),
+                ),
+                item(
+                  Icons.diamond_outlined,
+                  tr('ed.kfAdd'),
+                  () => _captureOverlayKeyframe(provider, _selectedImageId!),
+                  customColor: const Color(0xFFFFB703),
+                ),
                 item(
                   Icons.delete_outline,
                   tr('ed.deleteImage'),
@@ -4537,6 +4810,41 @@ class _EditorScreenState extends State<EditorScreen>
               Positioned(left: 0, top: 0, bottom: 0, child: trimHandle(true)),
               Positioned(right: 0, top: 0, bottom: 0, child: trimHandle(false)),
             ],
+            // Keyframe markers (◆) — tap to jump, long-press to delete.
+            for (final kf in ov.keyframes)
+              Positioned(
+                left: ((kf.timeMs - ov.startTime.inMilliseconds) / 1000.0) *
+                        _pxPerSec -
+                    9,
+                top: h / 2 - 9,
+                width: 18,
+                height: 18,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => _seekTo(Duration(milliseconds: kf.timeMs)),
+                  onLongPress: () {
+                    provider.pushHistory();
+                    ov.keyframes.remove(kf);
+                    provider.commit();
+                    setState(() {});
+                    _toast(tr('ed.kfDeleted'));
+                  },
+                  child: Center(
+                    child: Transform.rotate(
+                      angle: 0.7853981634,
+                      child: Container(
+                        width: 9,
+                        height: 9,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFFB703),
+                          border: Border.all(color: Colors.white, width: 1),
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
           ],
         ),
       );
@@ -4623,6 +4931,8 @@ class _EditorScreenState extends State<EditorScreen>
               setState(() {
                 _selectedIndex = null;
                 _selectedSfxId = 'ai_voice';
+                _selectedClipIndex = null;
+                _selectedImageId = null;
               });
             },
             onHorizontalDragStart: (_) {
@@ -5051,6 +5361,8 @@ class _EditorScreenState extends State<EditorScreen>
                 setState(() {
                   _selectedIndex = null; // deselect subtitle
                   _selectedSfxId = block.id;
+                  _selectedClipIndex = null;
+                  _selectedImageId = null;
                 });
               },
               onHorizontalDragStart: (_) {
@@ -6202,21 +6514,24 @@ Widget _buildTimelineTab() {
       int sfxCount = 0;
       if (S['sfx'] == true) {
         step(tr('ed.autoEditStepSfx'));
+        // Strict mapping (unmatched emoji = no sound) + thinning (gap/variety/cap)
+        // so we don't spam Pop in the viewer's ears.
+        final cands = <({int ms, SfxType type})>[];
         for (final seg in segs) {
           final emoji = seg.emoji;
-          SfxType? sfx;
-          if (emoji != null && emoji.isNotEmpty) {
-            sfx = SfxMapper.getSfxForEmoji(emoji);
-          }
+          if (emoji == null || emoji.isEmpty) continue;
+          final sfx = SfxMapper.getSfxForEmoji(emoji, strict: true);
           if (sfx != null) {
-            final already = project.sfxBlocks.any((b) =>
-                (b.startTime - seg.startTime).abs() <
-                const Duration(milliseconds: 200));
-            if (!already) {
-              provider.addSfxBlock(SfxBlock(
-                  id: const Uuid().v4(), type: sfx, startTime: seg.startTime));
-              sfxCount++;
-            }
+            cands.add((ms: seg.startTime.inMilliseconds, type: sfx));
+          }
+        }
+        for (final b in _thinAutoSfx(cands)) {
+          final already = project.sfxBlocks.any((x) =>
+              (x.startTime - b.startTime).abs() <
+              const Duration(milliseconds: 200));
+          if (!already) {
+            provider.addSfxBlock(b);
+            sfxCount++;
           }
         }
       }
@@ -6299,23 +6614,25 @@ Widget _buildTimelineTab() {
       await GeminiSpeechService(apiKey: apiKey).autoEmojiHighlight(segs);
       provider.updateSegments(segs);
 
-      // Auto-add SFX blocks that match the assigned emojis
-      final sfxAdded = <SfxBlock>[];
+      // Auto-add SFX (strict map + thinning) so it doesn't spam Pop everywhere.
+      final cands = <({int ms, SfxType type})>[];
       for (final seg in segs) {
         final emoji = seg.emoji;
         if (emoji == null || emoji.isEmpty) continue;
-        final sfxType = SfxMapper.getSfxForEmoji(emoji);
-        if (sfxType == null) continue;
-        // Avoid duplicate SFX at the same timestamp
-        final already = project.sfxBlocks.any(
-          (b) => (b.startTime - seg.startTime).abs() < const Duration(milliseconds: 200),
-        );
-        if (!already) {
-          sfxAdded.add(SfxBlock(id: const Uuid().v4(), type: sfxType, startTime: seg.startTime));
+        final sfxType = SfxMapper.getSfxForEmoji(emoji, strict: true);
+        if (sfxType != null) {
+          cands.add((ms: seg.startTime.inMilliseconds, type: sfxType));
         }
       }
-      for (final b in sfxAdded) {
-        provider.addSfxBlock(b);
+      final sfxAdded = <SfxBlock>[];
+      for (final b in _thinAutoSfx(cands)) {
+        final already = project.sfxBlocks.any(
+          (x) => (x.startTime - b.startTime).abs() < const Duration(milliseconds: 200),
+        );
+        if (!already) {
+          sfxAdded.add(b);
+          provider.addSfxBlock(b);
+        }
       }
 
       _toast(sfxAdded.isNotEmpty
@@ -7848,6 +8165,78 @@ Widget _buildTimelineTab() {
     _toast(tr(o.cover ? 'ed.coverOnDone' : 'ed.coverOffDone'));
   }
 
+  /// Add a keyframe at the playhead capturing the overlay's current state
+  /// (turns on keyframe mode — later edits on the preview auto-keyframe).
+  void _captureOverlayKeyframe(ProjectProvider provider, String id) {
+    final o = provider.currentProject?.imageOverlays
+        .where((e) => e.id == id)
+        .firstOrNull;
+    if (o == null) return;
+    provider.pushHistory();
+    _overlayKeyframeAtPlayhead(o);
+    provider.commit();
+    setState(() {});
+    _toast(tr('ed.kfCaptured'));
+  }
+
+  /// Opacity slider for the selected overlay. In keyframe mode it writes to the
+  /// keyframe at the playhead; otherwise it sets the static opacity.
+  void _showOverlayOpacitySheet(ProjectProvider provider, String id) {
+    final o = provider.currentProject?.imageOverlays
+        .where((e) => e.id == id)
+        .firstOrNull;
+    if (o == null) return;
+    _pauseForEdit();
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppColors.surface,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) {
+        double val = _overlayStateAt(o, _position.inMilliseconds).opacity;
+        return StatefulBuilder(builder: (ctx, setSheet) {
+          return SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                Row(children: [
+                  const Icon(Icons.opacity, color: AppColors.primary, size: 20),
+                  const SizedBox(width: 8),
+                  Text(tr('ed.opacity'),
+                      style: const TextStyle(
+                          color: AppColors.textPrimary,
+                          fontSize: 15,
+                          fontWeight: FontWeight.bold)),
+                  const Spacer(),
+                  Text('${(val * 100).round()}%',
+                      style: const TextStyle(color: AppColors.textHint)),
+                ]),
+                Slider(
+                  value: val,
+                  min: 0.0,
+                  max: 1.0,
+                  activeColor: AppColors.primary,
+                  onChangeStart: (_) => provider.pushHistory(),
+                  onChanged: (v) {
+                    setSheet(() => val = v);
+                    if (o.keyframes.isNotEmpty) {
+                      _overlayKeyframeAtPlayhead(o).opacity = v;
+                    } else {
+                      o.opacity = v;
+                    }
+                    provider.liveUpdate();
+                    setState(() {});
+                  },
+                  onChangeEnd: (_) => provider.commit(),
+                ),
+              ]),
+            ),
+          );
+        });
+      },
+    );
+  }
+
   void _showImageScaleSheet(ProjectProvider provider, String id) {
     final o = provider.currentProject?.imageOverlays
         .where((e) => e.id == id)
@@ -8102,63 +8491,73 @@ Widget _buildTimelineTab() {
     );
   }
 
+  /// Thin a set of auto-SFX candidates so they don't spam the ear: enforce a
+  /// minimum gap between sounds, never the same sound twice in a row, and cap the
+  /// total. Returns ready-to-add blocks (sorted by time).
+  List<SfxBlock> _thinAutoSfx(
+    List<({int ms, SfxType type})> cands, {
+    int minGapMs = 2500,
+    int cap = 12,
+  }) {
+    cands.sort((a, b) => a.ms.compareTo(b.ms));
+    final out = <SfxBlock>[];
+    int lastMs = -1 << 30;
+    SfxType? lastType;
+    for (final c in cands) {
+      if (out.length >= cap) break;
+      if (c.ms - lastMs < minGapMs) continue; // too close → skip
+      if (c.type == lastType) continue; // no identical sound back-to-back
+      out.add(SfxBlock(
+          id: const Uuid().v4(),
+          type: c.type,
+          startTime: Duration(milliseconds: c.ms)));
+      lastMs = c.ms;
+      lastType = c.type;
+    }
+    return out;
+  }
+
   void _applyAutoSfx(ProjectProvider provider) {
     final project = provider.currentProject;
     if (project == null) return;
 
     _pauseForEdit();
-    
-    // Auto-generate SFX blocks
-    final newBlocks = <SfxBlock>[];
+
+    // Collect candidates, then thin them (gap + variety + cap) so the result
+    // isn't a wall of Pop. Emoji first (strict = no generic-Pop fallback),
+    // otherwise one word match per segment.
+    final cands = <({int ms, SfxType type})>[];
     for (final seg in project.segments) {
-      // 1) Match the Auto-✨ emoji first (most reliable). One SFX per segment.
       final emoji = seg.emoji;
       if (emoji != null && emoji.isNotEmpty) {
-        final esfx = SfxMapper.getSfxForEmoji(emoji);
+        final esfx = SfxMapper.getSfxForEmoji(emoji, strict: true);
         if (esfx != null) {
-          newBlocks.add(SfxBlock(
-            id: const Uuid().v4(),
-            type: esfx,
-            startTime: seg.startTime,
-          ));
-          continue; // already added one for this segment
+          cands.add((ms: seg.startTime.inMilliseconds, type: esfx));
+          continue; // one per segment
         }
       }
-      // 2) Otherwise match by spoken words.
-      // Prioritize word timings if available
+      // Word match (specific sounds only — getSfxForWord has no generic fallback).
       if (seg.words != null && seg.wordTimings != null) {
         var currentMs = seg.startTime.inMilliseconds;
         for (int i = 0; i < seg.words!.length; i++) {
-          final word = seg.words![i];
-          final sfx = SfxMapper.getSfxForWord(word);
-          if (sfx != null) {
-            newBlocks.add(SfxBlock(
-              id: const Uuid().v4(),
-              type: sfx,
-              startTime: Duration(milliseconds: currentMs),
-            ));
-          }
+          final sfx = SfxMapper.getSfxForWord(seg.words![i]);
+          if (sfx != null) cands.add((ms: currentMs, type: sfx));
           if (i < seg.wordTimings!.length) {
             currentMs += seg.wordTimings![i].inMilliseconds;
           }
         }
       } else {
-        // Fallback to checking the entire text
-        final words = seg.text.split(RegExp(r'\s+'));
-        for (final word in words) {
+        for (final word in seg.text.split(RegExp(r'\s+'))) {
           final sfx = SfxMapper.getSfxForWord(word);
           if (sfx != null) {
-            newBlocks.add(SfxBlock(
-              id: const Uuid().v4(),
-              type: sfx,
-              startTime: seg.startTime,
-            ));
-            break; // Only one SFX per segment if we don't have word timings to avoid overlapping too much
+            cands.add((ms: seg.startTime.inMilliseconds, type: sfx));
+            break; // one per segment without word timings
           }
         }
       }
     }
 
+    final newBlocks = _thinAutoSfx(cands);
     if (newBlocks.isEmpty) {
       _toast(tr('ed.noAutoSfx'));
       return;

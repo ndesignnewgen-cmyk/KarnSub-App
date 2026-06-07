@@ -729,6 +729,8 @@ class ImageOverlay {
   bool flipH; // mirror horizontally
   bool isVideo; // true = B-roll video clip (decoded frame-by-frame); false = still image/GIF
   bool cover; // true = fill the whole frame (crop overflow), ignoring x/y/scale/rotation
+  double opacity; // 0–1 static opacity (used when there are no keyframes)
+  List<OverlayKeyframe> keyframes; // CapCut-style: animate x/y/scale/rotation/opacity
 
   ImageOverlay({
     required this.id,
@@ -742,7 +744,9 @@ class ImageOverlay {
     this.flipH = false,
     this.isVideo = false,
     this.cover = false,
-  });
+    this.opacity = 1.0,
+    List<OverlayKeyframe>? keyframes,
+  }) : keyframes = keyframes ?? [];
 
   ImageOverlay copy({String? newId}) => ImageOverlay(
         id: newId ?? id,
@@ -756,7 +760,31 @@ class ImageOverlay {
         flipH: flipH,
         isVideo: isVideo,
         cover: cover,
+        opacity: opacity,
+        keyframes: keyframes.map((k) => k.copy()).toList(),
       );
+}
+
+/// One keyframe of an image/B-roll overlay animation. At [timeMs] the overlay is
+/// at position ([x],[y]), [scale], [rotation]° and [opacity]. Values interpolate
+/// linearly between consecutive keyframes (CapCut-style).
+class OverlayKeyframe {
+  int timeMs;
+  double x;
+  double y;
+  double scale;
+  double rotation;
+  double opacity;
+  OverlayKeyframe({
+    required this.timeMs,
+    this.x = 0.5,
+    this.y = 0.5,
+    this.scale = 0.5,
+    this.rotation = 0.0,
+    this.opacity = 1.0,
+  });
+  OverlayKeyframe copy() => OverlayKeyframe(
+      timeMs: timeMs, x: x, y: y, scale: scale, rotation: rotation, opacity: opacity);
 }
 
 /// One keyframe of a zoom/pan animation: at [timeMs] (absolute) the video is at

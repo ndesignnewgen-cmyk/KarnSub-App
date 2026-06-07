@@ -337,6 +337,18 @@ class ExportService {
               'flipH': o.flipH,
               if (o.isVideo) 'isVideo': true,
               if (o.cover) 'cover': true,
+              if (o.opacity < 0.999) 'opacity': o.opacity,
+              if (o.keyframes.isNotEmpty)
+                'keyframes': o.keyframes
+                    .map((k) => {
+                          'timeMs': k.timeMs,
+                          'x': k.x,
+                          'y': k.y,
+                          'scale': k.scale,
+                          'rotation': k.rotation,
+                          'opacity': k.opacity,
+                        })
+                    .toList(),
             })
         .toList();
 

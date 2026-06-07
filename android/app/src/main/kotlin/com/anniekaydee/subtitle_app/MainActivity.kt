@@ -50,7 +50,40 @@ class MainActivity : FlutterActivity() {
         val decoder: BrollDecoder? = null, // video B-roll sequential decoder (null = not video)
         val srcDurUs: Long = 0L,      // source clip length (for looping)
         val cover: Boolean = false,   // fill the whole frame (crop overflow)
+        val opacity: Float = 1f,      // static opacity (used when keyframes empty)
+        val keyframes: List<OvKf> = emptyList(), // animate x/y/scale/rotation/opacity
     )
+    private data class OvKf(
+        val timeUs: Long, val x: Float, val y: Float,
+        val scale: Float, val rotation: Float, val opacity: Float,
+    )
+    private data class OvState(
+        val x: Float, val y: Float, val scale: Float, val rotation: Float, val opacity: Float)
+
+    /// Interpolate an overlay's transform + opacity at [presentUs] across its
+    /// keyframes (falls back to the static values when there are none).
+    private fun overlayStateAt(ov: ImgOverlay, presentUs: Long): OvState {
+        val kfs = ov.keyframes
+        if (kfs.isEmpty()) return OvState(ov.x, ov.y, ov.scale, ov.rotation, ov.opacity)
+        if (presentUs <= kfs.first().timeUs) {
+            val k = kfs.first(); return OvState(k.x, k.y, k.scale, k.rotation, k.opacity)
+        }
+        if (presentUs >= kfs.last().timeUs) {
+            val k = kfs.last(); return OvState(k.x, k.y, k.scale, k.rotation, k.opacity)
+        }
+        var i = 0
+        while (i < kfs.size - 1 && kfs[i + 1].timeUs < presentUs) i++
+        val a = kfs[i]; val b = kfs[i + 1]
+        val span = (b.timeUs - a.timeUs).coerceAtLeast(1L)
+        val t = ((presentUs - a.timeUs).toFloat() / span).coerceIn(0f, 1f)
+        return OvState(
+            a.x + (b.x - a.x) * t,
+            a.y + (b.y - a.y) * t,
+            a.scale + (b.scale - a.scale) * t,
+            a.rotation + (b.rotation - a.rotation) * t,
+            a.opacity + (b.opacity - a.opacity) * t,
+        )
+    }
     private var imageOverlays: List<ImgOverlay> = emptyList()
 
     /** Release any B-roll video decoders held by overlays. */
@@ -58,6 +91,26 @@ class MainActivity : FlutterActivity() {
         for (ov in imageOverlays) {
             try { ov.decoder?.release() } catch (_: Exception) {}
         }
+    }
+
+    private fun parseOvKfs(raw: Any?): List<OvKf> {
+        @Suppress("UNCHECKED_CAST")
+        val list = raw as? List<Map<String, Any>> ?: return emptyList()
+        val out = ArrayList<OvKf>()
+        for (k in list) {
+            try {
+                out.add(OvKf(
+                    timeUs = (k["timeMs"] as Number).toLong() * 1000L,
+                    x = (k["x"] as? Number)?.toFloat() ?: 0.5f,
+                    y = (k["y"] as? Number)?.toFloat() ?: 0.5f,
+                    scale = (k["scale"] as? Number)?.toFloat() ?: 0.5f,
+                    rotation = (k["rotation"] as? Number)?.toFloat() ?: 0f,
+                    opacity = (k["opacity"] as? Number)?.toFloat() ?: 1f,
+                ))
+            } catch (_: Exception) {}
+        }
+        out.sortBy { it.timeUs }
+        return out
     }
 
     private fun parseImageOverlays(raw: List<Map<String, Any>>?): List<ImgOverlay> {
@@ -104,6 +157,8 @@ class MainActivity : FlutterActivity() {
                         gifW = first.width,
                         gifH = first.height,
                         cover = (m["cover"] as? Boolean) ?: false,
+                        opacity = (m["opacity"] as? Number)?.toFloat() ?: 1f,
+                        keyframes = parseOvKfs(m["keyframes"]),
                     ))
                     continue
                 }
@@ -130,6 +185,8 @@ class MainActivity : FlutterActivity() {
                     gifW = movie?.width() ?: bmp.width,
                     gifH = movie?.height() ?: bmp.height,
                     cover = (m["cover"] as? Boolean) ?: false,
+                    opacity = (m["opacity"] as? Number)?.toFloat() ?: 1f,
+                    keyframes = parseOvKfs(m["keyframes"]),
                 ))
             } catch (_: Exception) {}
         }
@@ -185,8 +242,9 @@ class MainActivity : FlutterActivity() {
         for (z in zoomEffects) {
             if (presentUs < z.startUs || presentUs > z.endUs) continue
             val s: Float; val fx: Float; val fy: Float
-            if (z.keyframes.size >= 2) {
-                // Keyframe mode: interpolate scale + focal across keyframes.
+            if (z.keyframes.isNotEmpty()) {
+                // Keyframe mode: interpolate scale + focal across keyframes
+                // (a single keyframe holds its value across the whole clip).
                 val kfs = z.keyframes
                 when {
                     presentUs <= kfs.first().timeUs -> {
@@ -357,6 +415,12 @@ class MainActivity : FlutterActivity() {
         for (ov in imageOverlays) {
             if (presentUs < ov.startUs || presentUs > ov.endUs) continue
 
+            // Interpolated transform + opacity (keyframes) at this time.
+            val st = overlayStateAt(ov, presentUs)
+            val alpha = (st.opacity.coerceIn(0f, 1f) * 255f).toInt()
+            if (alpha <= 0) continue
+            paint.alpha = alpha
+
             // Full-screen "cover" overlay: fill the whole frame, crop the overflow.
             // Ignores x/y/scale/rotation. Used for full-screen B-roll.
             if (ov.cover) {
@@ -383,13 +447,13 @@ class MainActivity : FlutterActivity() {
 
             val srcW = ov.gifW.coerceAtLeast(1)
             val srcH = ov.gifH.coerceAtLeast(1)
-            val targetW = ov.scale * w
+            val targetW = st.scale * w
             val targetH = targetW * (srcH.toFloat() / srcW.toFloat())
-            val cx = ov.x * w
-            val cy = ov.y * h
+            val cx = st.x * w
+            val cy = st.y * h
             canvas.save()
             canvas.translate(cx, cy)
-            if (ov.rotation != 0f) canvas.rotate(ov.rotation)
+            if (st.rotation != 0f) canvas.rotate(st.rotation)
             if (ov.flipH) canvas.scale(-1f, 1f)
             val dec = ov.decoder
             if (dec != null) {
@@ -400,7 +464,7 @@ class MainActivity : FlutterActivity() {
                 val fb = dec.frameAt(srcUs) ?: ov.bitmap
                 val fsW = fb.width.coerceAtLeast(1)
                 val fsH = fb.height.coerceAtLeast(1)
-                val tW = ov.scale * w
+                val tW = st.scale * w
                 val tH = tW * (fsH.toFloat() / fsW.toFloat())
                 canvas.drawBitmap(fb, null, RectF(-tW / 2f, -tH / 2f, tW / 2f, tH / 2f), paint)
                 canvas.restore()

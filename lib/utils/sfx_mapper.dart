@@ -19,7 +19,10 @@ class SfxMapper {
   static SfxType _badumtss() => _rand([SfxType.badumtss, SfxType.badumtss2]);
 
   /// Map an emoji string → SfxType (used after auto-emoji assigns emoji to segments).
-  static SfxType? getSfxForEmoji(String emoji) {
+  /// When [strict] is true, an unmatched emoji returns null instead of a generic
+  /// Pop — so auto-SFX only adds a sound for emojis with a meaningful match
+  /// (avoids spamming Pop everywhere).
+  static SfxType? getSfxForEmoji(String emoji, {bool strict = false}) {
     if (emoji.isEmpty) return null;
     // ── ❤️ Love / Heart ──
     if (_has(emoji, ['❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💕','💗','💓','💞','💝','🥰','😍','😘','💋'])) return _pop();
@@ -70,8 +73,8 @@ class SfxMapper {
     if (_has(emoji, ['👾','😵‍💫'])) return SfxType.glitch;
     // ── 📯 Airhorn / Hype ──
     if (_has(emoji, ['📯'])) return SfxType.airhorn;
-    // ── Generic pop for any unmatched emoji ──
-    return _pop();
+    // ── Generic pop for any unmatched emoji (skipped in strict mode) ──
+    return strict ? null : _pop();
   }
 
   /// Map a word (Lao/Thai/English) → SfxType.
