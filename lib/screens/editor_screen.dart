@@ -181,6 +181,7 @@ class _EditorScreenState extends State<EditorScreen>
   // natively). Keyed by ImageOverlay.id.
   final Map<String, VideoPlayerController> _brollCtrls = {};
   final Set<String> _brollInit = {}; // ids whose controller is initializing
+  final Set<String> _brollActive = {}; // ids currently inside their visible range (aligned)
   // Smooth 60fps timeline auto-scroll during playback (interpolated between the
   // coarse position reports from video_player).
   Ticker? _scrollTicker;
@@ -386,14 +387,21 @@ class _EditorScreenState extends State<EditorScreen>
 
   // ── B-roll video overlays (muted, looped players synced to the timeline) ──
 
-  /// Create controllers for any video overlay that doesn't have one yet, and
-  /// dispose controllers whose overlay was removed. Cheap idempotent diff — safe
-  /// to call often (after add/remove, on load, on tick).
+  /// Create controllers only for video overlays NEAR the playhead (a small
+  /// pre-roll window) and dispose ones that are far away or removed. This caps
+  /// the number of simultaneous hardware decoders — the main cause of B-roll lag
+  /// when many clips (e.g. Auto B-roll) are on the timeline.
   void _ensureBrollControllers(SubtitleProject? project) {
     if (project == null) return;
+    final posMs = _position.inMilliseconds;
+    const prerollMs = 2000; // open the decoder this long before the clip starts
+    const graceMs = 1500; // keep it this long after the clip ends (hysteresis)
     final wanted = <String>{};
     for (final ov in project.imageOverlays) {
       if (!ov.isVideo) continue;
+      final s = ov.startTime.inMilliseconds;
+      final e = ov.endTime.inMilliseconds;
+      if (posMs < s - prerollMs || posMs > e + graceMs) continue; // not near
       wanted.add(ov.id);
       if (_brollCtrls.containsKey(ov.id) || _brollInit.contains(ov.id)) continue;
       if (!File(ov.path).existsSync()) continue;
@@ -401,7 +409,7 @@ class _EditorScreenState extends State<EditorScreen>
       final c = VideoPlayerController.file(File(ov.path));
       c.initialize().then((_) async {
         await c.setVolume(0); // B-roll is muted (visuals only)
-        await c.setLooping(true);
+        await c.setLooping(true); // wrap handled natively → no manual re-seek
         _brollInit.remove(ov.id);
         if (!mounted) { c.dispose(); return; }
         _brollCtrls[ov.id] = c;
@@ -414,11 +422,14 @@ class _EditorScreenState extends State<EditorScreen>
     final stale = _brollCtrls.keys.where((id) => !wanted.contains(id)).toList();
     for (final id in stale) {
       _brollCtrls.remove(id)?.dispose();
+      _brollActive.remove(id);
     }
   }
 
-  /// Drive each B-roll controller from the current playhead: play/pause with the
-  /// main video, seek to the looped in-clip time, and correct drift > 200ms.
+  /// Drive each B-roll controller from the playhead. Key to smoothness: align
+  /// (seek) only ONCE when the clip enters its visible range, then let it
+  /// free-run with the main video (looping handles wrap). No per-tick seeking
+  /// during playback — that was the stutter. Only re-seek while paused/scrubbing.
   void _syncBroll(SubtitleProject? project) {
     if (_brollCtrls.isEmpty || project == null) return;
     final posMs = _position.inMilliseconds;
@@ -428,19 +439,25 @@ class _EditorScreenState extends State<EditorScreen>
       if (c == null || !c.value.isInitialized) continue;
       final s = ov.startTime.inMilliseconds;
       final e = ov.endTime.inMilliseconds;
+      final dur = c.value.duration.inMilliseconds;
       final visible = posMs >= s && posMs <= e;
       if (!visible) {
-        if (c.value.isPlaying) c.pause();
+        if (_brollActive.remove(ov.id) || c.value.isPlaying) c.pause();
         continue;
       }
-      final dur = c.value.duration.inMilliseconds;
       final want = dur > 0 ? (posMs - s) % dur : (posMs - s);
-      final cur = c.value.position.inMilliseconds;
-      if ((cur - want).abs() > 200) c.seekTo(Duration(milliseconds: want));
-      if (_isPlaying && !c.value.isPlaying) {
-        c.play();
-      } else if (!_isPlaying && c.value.isPlaying) {
-        c.pause();
+      if (!_brollActive.contains(ov.id)) {
+        // Just entered → align once, then hand off to free-run.
+        _brollActive.add(ov.id);
+        c.seekTo(Duration(milliseconds: want));
+        if (_isPlaying) { c.play(); } else { c.pause(); }
+      } else if (_isPlaying) {
+        if (!c.value.isPlaying) c.play(); // keep playing; DON'T seek (smooth)
+      } else {
+        // Paused / scrubbing → keep the displayed frame aligned to the playhead.
+        final cur = c.value.position.inMilliseconds;
+        if ((cur - want).abs() > 120) c.seekTo(Duration(milliseconds: want));
+        if (c.value.isPlaying) c.pause();
       }
     }
   }
@@ -1475,6 +1492,7 @@ class _EditorScreenState extends State<EditorScreen>
     _bgMusicPlayer?.dispose();
     for (final c in _brollCtrls.values) { c.dispose(); }
     _brollCtrls.clear();
+    _brollActive.clear();
     _tabController.dispose();
     _timelineScroll.dispose();
     super.dispose();

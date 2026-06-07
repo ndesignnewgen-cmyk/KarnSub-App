@@ -27,6 +27,14 @@ class ImageSearchService {
   // Pixabay key (royalty-free, no attribution). Images-only — audio API is locked.
   static const _pixabayKey = '56187304-d1f94a26a598e4b26e0bb30ba';
 
+  // Pexels key (royalty-free video + photos, no attribution). PRIMARY B-roll
+  // source — much larger video library than Pixabay. Get a free key at
+  // https://www.pexels.com/api/ and paste it below. Until set, B-roll video
+  // search falls back to Pixabay automatically.
+  static const _pexelsKey = 'A86VsAPxO34I57pbDOrRdKr4EvpCVSa0KKXNlfM4Gk7vgSygfKU3SqyH';
+  static bool get _hasPexels =>
+      _pexelsKey.isNotEmpty && !_pexelsKey.startsWith('PASTE_');
+
   /// Search [query] (English works best). Tries Pixabay (best quality + license)
   /// first, then Openverse, then Wikimedia Commons (different hosts — survives if
   /// one is blocked/slow).
@@ -258,39 +266,63 @@ class ImageSearchService {
     return null;
   }
 
-  /// Pixabay VIDEO search — royalty-free clips for auto B-roll. Returns direct
-  /// downloadable .mp4 URLs (prefers the lighter "small"/"tiny" renditions).
+  /// VIDEO search for auto B-roll → direct downloadable .mp4 URLs.
+  /// Pexels first (large library), Pixabay fallback.
   static Future<List<String>> searchVideo(String query, {int limit = 5}) async {
+    final r = await searchVideoDetailed(query, limit: limit);
+    return r.map((v) => v.url).toList();
+  }
+
+  /// VIDEO search with thumbnails (for the manual "search B-roll from web" grid).
+  /// Tries Pexels (primary), then Pixabay (fallback) — different hosts so it
+  /// survives if one is slow/blocked or out of quota.
+  static Future<List<WebVideo>> searchVideoDetailed(String query,
+      {int limit = 24}) async {
     final q = query.trim();
     if (q.isEmpty) return [];
-    final uri =
-        Uri.parse('https://pixabay.com/api/videos/').replace(queryParameters: {
-      'key': _pixabayKey,
-      'q': q,
-      'per_page': '${limit.clamp(3, 200)}',
-      'safesearch': 'true',
+    if (_hasPexels) {
+      final px = await _searchPexelsVideos(q, limit);
+      if (px.isNotEmpty) return px;
+    }
+    return _searchPixabayVideos(q, limit);
+  }
+
+  /// Pexels video search — royalty-free, commercial OK, no attribution required.
+  static Future<List<WebVideo>> _searchPexelsVideos(String q, int limit) async {
+    final uri = Uri.parse('https://api.pexels.com/videos/search')
+        .replace(queryParameters: {
+      'query': q,
+      'per_page': '${limit.clamp(3, 80)}',
     });
     try {
       final res = await http.get(uri, headers: {
+        'Authorization': _pexelsKey,
         'User-Agent': 'KarnSub/1.1 (subtitle app)',
       }).timeout(const Duration(seconds: 25));
       if (res.statusCode != 200) return [];
       final data = jsonDecode(res.body) as Map<String, dynamic>;
-      final hits = (data['hits'] as List<dynamic>? ?? []);
-      final out = <String>[];
-      for (final h in hits) {
-        final m = h as Map<String, dynamic>;
-        final vids = m['videos'] as Map<String, dynamic>?;
-        if (vids == null) continue;
-        // Lighter renditions first — plenty for an in-frame B-roll overlay.
-        for (final size in ['small', 'tiny', 'medium', 'large']) {
-          final v = vids[size] as Map<String, dynamic>?;
-          final url = (v?['url'] ?? '').toString();
-          if (url.isNotEmpty) {
-            out.add(url);
-            break;
+      final vids = (data['videos'] as List<dynamic>? ?? []);
+      final out = <WebVideo>[];
+      for (final v in vids) {
+        final m = v as Map<String, dynamic>;
+        final files = (m['video_files'] as List<dynamic>? ?? []);
+        // Pick the mp4 rendition closest to ~720p (light but sharp enough).
+        Map<String, dynamic>? best;
+        for (final f in files) {
+          final fm = f as Map<String, dynamic>;
+          if ((fm['file_type'] ?? '').toString() != 'video/mp4') continue;
+          if (best == null) {
+            best = fm;
+          } else {
+            final h = (fm['height'] as num?)?.toInt() ?? 0;
+            final bh = (best['height'] as num?)?.toInt() ?? 0;
+            if ((h - 720).abs() < (bh - 720).abs()) best = fm;
           }
         }
+        final url = (best?['link'] ?? '').toString();
+        if (url.isEmpty) continue;
+        final thumb = (m['image'] ?? '').toString();
+        out.add(WebVideo(thumb: thumb, url: url, title: ''));
       }
       return out;
     } catch (_) {
@@ -298,12 +330,8 @@ class ImageSearchService {
     }
   }
 
-  /// Pixabay VIDEO search with thumbnails — for the manual "search B-roll from
-  /// web" grid. Returns clips with a preview image + direct .mp4 URL.
-  static Future<List<WebVideo>> searchVideoDetailed(String query,
-      {int limit = 24}) async {
-    final q = query.trim();
-    if (q.isEmpty) return [];
+  /// Pixabay video search (fallback) with thumbnails + direct .mp4 URL.
+  static Future<List<WebVideo>> _searchPixabayVideos(String q, int limit) async {
     final uri =
         Uri.parse('https://pixabay.com/api/videos/').replace(queryParameters: {
       'key': _pixabayKey,
@@ -334,7 +362,6 @@ class ImageSearchService {
           if (t.isNotEmpty && thumb.isEmpty) thumb = t;
         }
         if (url.isEmpty) continue;
-        // Fallback thumbnail derived from Pixabay's picture id if none provided.
         if (thumb.isEmpty) {
           final pid = (m['picture_id'] ?? '').toString();
           if (pid.isNotEmpty) {
