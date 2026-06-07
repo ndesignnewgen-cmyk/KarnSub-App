@@ -10,6 +10,7 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
 import 'package:uuid/uuid.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
@@ -182,6 +183,18 @@ class _EditorScreenState extends State<EditorScreen>
   final Map<String, VideoPlayerController> _brollCtrls = {};
   final Set<String> _brollInit = {}; // ids whose controller is initializing
   final Set<String> _brollActive = {}; // ids currently inside their visible range (aligned)
+  // Auto Edit pipeline: which steps to run (user-togglable checklist, persisted).
+  final Map<String, bool> _autoEditSteps = {
+    'proofread': true,
+    'karaoke': true,
+    'emoji': true,
+    'sfx': true,
+    'fade': true,
+    'zoom': true,
+    'cut': true,
+    'broll': false, // heavy (downloads) → off by default
+  };
+  bool _autoEditStepsLoaded = false;
   // Smooth 60fps timeline auto-scroll during playback (interpolated between the
   // coarse position reports from video_player).
   Ticker? _scrollTicker;
@@ -1403,48 +1416,62 @@ class _EditorScreenState extends State<EditorScreen>
     _position = pos; // cheap field update (no rebuild) for scroll math
     if (!playing) _scrollTicker?.stop();
 
-    // AI Auto-Cut dynamic preview seek listener
     final project = context.read<ProjectProvider>().currentProject;
-    if (project != null && project.isAutoCut && _keptRegions.isNotEmpty) {
-      final posMs = pos.inMilliseconds;
-      bool inKept = false;
-      int? nextStartMs;
-      for (final region in _keptRegions) {
-        if (posMs >= region[0] && posMs <= region[1]) {
-          inKept = true;
-          break;
-        }
-        if (region[0] > posMs) {
-          if (nextStartMs == null || region[0] < nextStartMs) {
-            nextStartMs = region[0];
-          }
-        }
-      }
-      if (!inKept) {
-        if (nextStartMs != null) {
-          _videoController!.seekTo(Duration(milliseconds: nextStartMs));
-          return;
-        } else {
-          _videoController!.seekTo(_duration);
-          return;
-        }
-      }
-    }
 
-    // Manual video cuts: skip over any removed range during preview so the
-    // playhead jumps to the end of the cut (the next kept frame).
-    if (project != null && project.removedRanges.isNotEmpty) {
-      final posMs = pos.inMilliseconds;
-      for (final r in project.removedRanges) {
-        if (posMs >= r[0] && posMs < r[1]) {
-          final jumpTo = r[1];
-          if (jumpTo >= _duration.inMilliseconds - 50) {
-            _videoController!.pause();
-            _videoController!.seekTo(_duration);
-          } else {
-            _videoController!.seekTo(Duration(milliseconds: jumpTo));
+    // Auto-skip removed/cut spans ONLY while actually playing. While paused or
+    // scrubbing, leave the playhead exactly where the user put it (otherwise
+    // scrubbing into trailing silence would snap to the clip end).
+    if (playing) {
+      // AI Auto-Cut: skip gaps between kept regions during playback.
+      if (project != null && project.isAutoCut && _keptRegions.isNotEmpty) {
+        final posMs = pos.inMilliseconds;
+        bool inKept = false;
+        int? nextStartMs;
+        for (final region in _keptRegions) {
+          if (posMs >= region[0] && posMs <= region[1]) {
+            inKept = true;
+            break;
           }
-          return;
+          if (region[0] > posMs) {
+            if (nextStartMs == null || region[0] < nextStartMs) {
+              nextStartMs = region[0];
+            }
+          }
+        }
+        if (!inKept) {
+          if (nextStartMs != null) {
+            _videoController!.seekTo(Duration(milliseconds: nextStartMs));
+            return;
+          } else {
+            // Past the last kept region (trailing silence) → end of content.
+            // Pause cleanly instead of snapping to the raw end (which froze it).
+            _videoController!.pause();
+            _pauseAiVoice();
+            _pauseBgMusic();
+            _pauseBroll();
+            _scrollTicker?.stop();
+            return;
+          }
+        }
+      }
+
+      // Manual video cuts: jump over any removed range during playback.
+      if (project != null && project.removedRanges.isNotEmpty) {
+        final posMs = pos.inMilliseconds;
+        for (final r in project.removedRanges) {
+          if (posMs >= r[0] && posMs < r[1]) {
+            final jumpTo = r[1];
+            if (jumpTo >= _duration.inMilliseconds - 50) {
+              _videoController!.pause();
+              _pauseAiVoice();
+              _pauseBgMusic();
+              _pauseBroll();
+              _scrollTicker?.stop();
+            } else {
+              _videoController!.seekTo(Duration(milliseconds: jumpTo));
+            }
+            return;
+          }
         }
       }
     }
@@ -1577,7 +1604,7 @@ class _EditorScreenState extends State<EditorScreen>
     }
   }
 
-  void _togglePlay() {
+  Future<void> _togglePlay() async {
     final c = _videoController;
     if (c == null) return;
     _scrubDebounce?.cancel(); // drop any pending scrub seek
@@ -1590,15 +1617,25 @@ class _EditorScreenState extends State<EditorScreen>
       _scrollTimelineToPosition(); // settle exactly on the current position
       _lastSfxTickMs = -1;
     } else {
-      // If we're at (or past) the end, restart from the beginning.
-      if (_duration > Duration.zero &&
-          c.value.position >= _duration - const Duration(milliseconds: 200)) {
-        c.seekTo(Duration.zero);
+      final project = context.read<ProjectProvider>().currentProject;
+      final posMs = c.value.position.inMilliseconds;
+      // "At end" = real end, OR (with Auto-Cut) past the last kept region.
+      bool atEnd = _duration > Duration.zero &&
+          c.value.position >= _duration - const Duration(milliseconds: 200);
+      int restartMs = 0;
+      if ((project?.isAutoCut ?? false) && _keptRegions.isNotEmpty) {
+        final inKept =
+            _keptRegions.any((r) => posMs >= r[0] && posMs <= r[1]);
+        if (!inKept && posMs >= _keptRegions.last[1]) atEnd = true;
+        restartMs = _keptRegions.first[0];
       }
-      c.play();
+      // Restart from the start of content. Await the seek so the listener
+      // doesn't immediately re-pause us at the old (end) position.
+      if (atEnd) await c.seekTo(Duration(milliseconds: restartMs));
+      await c.play();
       _resumeAiVoice();
       _resumeBgMusic();
-      _syncBroll(context.read<ProjectProvider>().currentProject);
+      _syncBroll(project);
       _anchorPosMs = c.value.position.inMilliseconds;
       _anchorWallMs = DateTime.now().millisecondsSinceEpoch;
       _lastSfxTickMs = _anchorPosMs - 1;
@@ -5724,6 +5761,222 @@ Widget _buildTimelineTab() {
     }
   }
 
+  /// Core of Auto B-roll (NO own UI / history): pick photogenic moments, fetch a
+  /// stock clip (video → photo fallback) and drop each as a full-screen B-roll
+  /// overlay. Returns how many were added. [onStep] reports progress (i of n).
+  /// Caller handles pushHistory()/commit() and the progress dialog.
+  Future<int> _runAutoBrollCore(
+    ProjectProvider provider,
+    String apiKey, {
+    void Function(int i, int n)? onStep,
+  }) async {
+    final project = provider.currentProject;
+    if (project == null || project.segments.isEmpty) return 0;
+    const cap = 8;
+    final segs = project.segments;
+    var idxs = <int>[for (int i = 0; i < segs.length; i++) i];
+    idxs = idxs.where((i) => segs[i].text.trim().length >= 6).toList();
+    if (idxs.isEmpty) idxs = [for (int i = 0; i < segs.length; i++) i];
+    if (idxs.length > cap) {
+      final picked = <int>[];
+      final stride = idxs.length / cap;
+      for (int k = 0; k < cap; k++) {
+        picked.add(idxs[(k * stride).floor()]);
+      }
+      idxs = picked;
+    }
+    final texts = idxs.map((i) => segs[i].text).toList();
+    final queries =
+        await GeminiSpeechService(apiKey: apiKey).suggestBrollQueries(texts);
+    int added = 0;
+    for (int k = 0; k < idxs.length; k++) {
+      final q = (k < queries.length ? queries[k] : '').trim();
+      if (q.isEmpty) continue;
+      onStep?.call(k + 1, idxs.length);
+      String? path;
+      bool isVid = false;
+      final vids = await ImageSearchService.searchVideo(q, limit: 4);
+      if (vids.isNotEmpty) {
+        path = await ImageSearchService.downloadVideo(vids.first);
+        isVid = path != null;
+      }
+      if (path == null) {
+        final imgs = await ImageSearchService.search(q, limit: 3);
+        if (imgs.isNotEmpty) {
+          path = await ImageSearchService.download(imgs.first.full,
+              fallbackUrl: imgs.first.thumb);
+        }
+      }
+      if (path == null) continue;
+      final seg = segs[idxs[k]];
+      final endMs = seg.endTime.inMilliseconds > seg.startTime.inMilliseconds
+          ? seg.endTime.inMilliseconds
+          : seg.startTime.inMilliseconds + 2500;
+      provider.addImageOverlay(ImageOverlay(
+        id: const Uuid().v4(),
+        path: path,
+        startTime: seg.startTime,
+        endTime: Duration(milliseconds: endMs),
+        x: 0.5,
+        y: 0.40,
+        scale: 1.0,
+        isVideo: isVid,
+        cover: true,
+      ));
+      added++;
+    }
+    return added;
+  }
+
+  /// Auto Edit: fade IN from black at the very start + fade OUT to black at the
+  /// very end. Skips if any fade already exists (so re-runs don't stack).
+  void _addAutoFades(ProjectProvider provider) {
+    final project = provider.currentProject;
+    if (project == null || project.fadeEffects.isNotEmpty) return;
+    final durMs = _duration.inMilliseconds;
+    if (durMs < 1200) return;
+    provider.addFadeEffect(FadeEffect(
+      id: const Uuid().v4(),
+      startTime: Duration.zero,
+      endTime: const Duration(milliseconds: 500),
+      toBlack: false, // black → clear (fade in)
+    ));
+    provider.addFadeEffect(FadeEffect(
+      id: const Uuid().v4(),
+      startTime: Duration(milliseconds: durMs - 600),
+      endTime: Duration(milliseconds: durMs),
+      toBlack: true, // clear → black (fade out)
+    ));
+  }
+
+  /// Auto Edit: a subtle punch-in zoom on up to 3 emphasised lines. Skips if any
+  /// zoom already exists (so re-runs don't stack).
+  void _addAutoZooms(ProjectProvider provider, List<SubtitleSegment> segs) {
+    final project = provider.currentProject;
+    if (project == null || project.zoomEffects.isNotEmpty) return;
+    final picks = <SubtitleSegment>[];
+    for (final s in segs) {
+      if ((s.emphasis ?? const []).isNotEmpty) picks.add(s);
+      if (picks.length >= 3) break;
+    }
+    for (final s in picks) {
+      provider.addZoomEffect(ZoomEffect(
+        id: const Uuid().v4(),
+        startTime: s.startTime,
+        endTime: s.endTime,
+        fromScale: 1.0,
+        toScale: 1.12,
+        focusX: 0.5,
+        focusY: 0.45,
+      ));
+    }
+  }
+
+  Future<void> _loadAutoEditSteps() async {
+    if (_autoEditStepsLoaded) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      for (final k in _autoEditSteps.keys.toList()) {
+        final v = prefs.getBool('autoedit_$k');
+        if (v != null) _autoEditSteps[k] = v;
+      }
+    } catch (_) {}
+    _autoEditStepsLoaded = true;
+  }
+
+  Future<void> _saveAutoEditSteps() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      for (final e in _autoEditSteps.entries) {
+        await prefs.setBool('autoedit_${e.key}', e.value);
+      }
+    } catch (_) {}
+  }
+
+  /// Checklist sheet — tick which Auto Edit steps to run, then Start.
+  void _showAutoEditChecklist(ProjectProvider provider) {
+    final items = <(String, IconData, String)>[
+      ('proofread', Icons.spellcheck, 'ed.aeProofread'),
+      ('karaoke', Icons.music_note, 'ed.aeKaraoke'),
+      ('emoji', Icons.emoji_emotions, 'ed.aeEmoji'),
+      ('sfx', Icons.graphic_eq, 'ed.aeSfx'),
+      ('fade', Icons.gradient, 'ed.aeFade'),
+      ('zoom', Icons.zoom_in, 'ed.aeZoom'),
+      ('cut', Icons.content_cut, 'ed.aeCut'),
+      ('broll', Icons.movie_filter, 'ed.aeBroll'),
+    ];
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppColors.surface,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) {
+        return StatefulBuilder(builder: (ctx, setSheet) {
+          return SafeArea(
+            child: SingleChildScrollView(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(children: [
+                      const Icon(Icons.auto_fix_high, color: AppColors.primary),
+                      const SizedBox(width: 8),
+                      Text(tr('ed.autoEditTitle'),
+                          style: const TextStyle(
+                              color: AppColors.textPrimary,
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold)),
+                    ]),
+                    const SizedBox(height: 4),
+                    Text(tr('ed.aePick'),
+                        style: const TextStyle(
+                            color: AppColors.textHint, fontSize: 12)),
+                    const SizedBox(height: 4),
+                    ...items.map((it) => SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          dense: true,
+                          value: _autoEditSteps[it.$1] ?? false,
+                          activeColor: AppColors.primary,
+                          secondary: Icon(it.$2,
+                              color: AppColors.textSecondary, size: 20),
+                          title: Text(tr(it.$3),
+                              style: const TextStyle(
+                                  color: AppColors.textPrimary, fontSize: 14)),
+                          onChanged: (v) =>
+                              setSheet(() => _autoEditSteps[it.$1] = v),
+                        )),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        style: ElevatedButton.styleFrom(
+                            backgroundColor: AppColors.primary,
+                            padding: const EdgeInsets.symmetric(vertical: 12)),
+                        onPressed: () {
+                          Navigator.pop(ctx);
+                          _saveAutoEditSteps();
+                          _runAutoEditPipeline(provider);
+                        },
+                        icon: const Icon(Icons.play_arrow, color: Colors.white),
+                        label: Text(tr('ed.aeRun'),
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold)),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        });
+      },
+    );
+  }
+
   /// Auto B-roll: AI reads the transcript, picks photogenic moments, finds a
   /// matching royalty-free photo (Pixabay) and drops it as a large full-width
   /// overlay above the subtitle for that line's duration — like a B-roll cut.
@@ -5859,7 +6112,18 @@ Widget _buildTimelineTab() {
       _showProFeatureDialog(tr('ed.autoEditPro'));
       return;
     }
+    await _loadAutoEditSteps();
+    if (!mounted) return;
+    _showAutoEditChecklist(provider);
+  }
+
+  /// Runs the selected Auto Edit steps (from [_autoEditSteps]) in one pass.
+  /// Each step is best-effort so a single failure never aborts the rest.
+  Future<void> _runAutoEditPipeline(ProjectProvider provider) async {
+    final project = provider.currentProject;
+    if (project == null || project.segments.isEmpty) return;
     _pauseForEdit();
+    final S = _autoEditSteps;
 
     String status = tr('ed.autoEditStepKaraoke');
     void Function(void Function())? setDlg;
@@ -5900,72 +6164,114 @@ Widget _buildTimelineTab() {
     try {
       provider.pushHistory();
       final segs = project.segments.map((s) => s.copy()).toList();
-
-      // 1) Karaoke word units (so the colour sweep moves word-by-word).
-      step(tr('ed.autoEditStepKaraoke'));
-      try {
-        await LaoWordService.refineToRealWords(segs, locale: project.language);
-        await LaoWordService.ensureWordUnits(segs, locale: project.language);
-      } catch (_) {}
-
-      // 2) Emoji + highlight via Gemini (best-effort; quota-safe internally).
-      step(tr('ed.autoEditStepEmoji'));
       final apiKey = await ApiConfig.getApiKey();
-      if (apiKey != null && apiKey.isNotEmpty) {
+      final hasKey = apiKey != null && apiKey.isNotEmpty;
+
+      // Proofread (fix spelling/typos) — before word-splitting.
+      if (S['proofread'] == true && hasKey) {
+        step(tr('ed.autoEditStepProof'));
+        try {
+          await GeminiSpeechService(apiKey: apiKey)
+              .proofreadSegments(segments: segs, language: project.language);
+        } catch (_) {}
+      }
+
+      // Karaoke word units (so the colour sweep moves word-by-word).
+      if (S['karaoke'] == true) {
+        step(tr('ed.autoEditStepKaraoke'));
+        try {
+          await LaoWordService.refineToRealWords(segs, locale: project.language);
+          await LaoWordService.ensureWordUnits(segs, locale: project.language);
+        } catch (_) {}
+      }
+
+      // Emoji + highlight via Gemini (best-effort; quota-safe internally).
+      if (S['emoji'] == true && hasKey) {
+        step(tr('ed.autoEditStepEmoji'));
         try {
           await GeminiSpeechService(apiKey: apiKey).autoEmojiHighlight(segs);
         } catch (_) {}
       }
       provider.updateSegments(segs, recordHistory: false);
+      if (S['emoji'] == true) {
+        project.isKaraokeHighlight = true;
+        provider.updateProject(project);
+      }
 
-      // 3) Enable Karaoke highlight on the project.
-      project.isKaraokeHighlight = true;
-      provider.updateProject(project);
-
-      // 4) Auto SFX from the assigned emojis (and matching words).
-      step(tr('ed.autoEditStepSfx'));
+      // Auto SFX from the assigned emojis (and matching words).
       int sfxCount = 0;
-      for (final seg in segs) {
-        final emoji = seg.emoji;
-        SfxType? sfx;
-        if (emoji != null && emoji.isNotEmpty) {
-          sfx = SfxMapper.getSfxForEmoji(emoji);
-        }
-        if (sfx != null) {
-          final already = project.sfxBlocks.any((b) =>
-              (b.startTime - seg.startTime).abs() <
-              const Duration(milliseconds: 200));
-          if (!already) {
-            provider.addSfxBlock(SfxBlock(
-                id: const Uuid().v4(), type: sfx, startTime: seg.startTime));
-            sfxCount++;
+      if (S['sfx'] == true) {
+        step(tr('ed.autoEditStepSfx'));
+        for (final seg in segs) {
+          final emoji = seg.emoji;
+          SfxType? sfx;
+          if (emoji != null && emoji.isNotEmpty) {
+            sfx = SfxMapper.getSfxForEmoji(emoji);
+          }
+          if (sfx != null) {
+            final already = project.sfxBlocks.any((b) =>
+                (b.startTime - seg.startTime).abs() <
+                const Duration(milliseconds: 200));
+            if (!already) {
+              provider.addSfxBlock(SfxBlock(
+                  id: const Uuid().v4(), type: sfx, startTime: seg.startTime));
+              sfxCount++;
+            }
           }
         }
       }
 
-      // 5) Cut silence (Auto-Cut) if not already on.
-      step(tr('ed.autoEditStepCut'));
-      if (!project.isAutoCut && project.videoPath != null) {
-        try {
-          if (_keptRegions.isEmpty) {
-            final flat =
-                await ExportService.detectSpeechRegions(project.videoPath!);
-            final durMs =
-                _duration.inMilliseconds > 0 ? _duration.inMilliseconds : 10000;
-            _keptRegions = computeKeptRegions(flat, durMs);
-          }
-          if (_keptRegions.isNotEmpty) {
-            project.isAutoCut = true;
-            provider.updateProject(project);
-          }
-        } catch (_) {}
+      // Fade IN/OUT at the very start & end.
+      if (S['fade'] == true) {
+        step(tr('ed.autoEditStepFade'));
+        _addAutoFades(provider);
+      }
+
+      // Subtle punch-in zoom on emphasised lines.
+      if (S['zoom'] == true) {
+        step(tr('ed.autoEditStepZoom'));
+        _addAutoZooms(provider, segs);
+      }
+
+      // Cut silence (Auto-Cut) if not already on.
+      if (S['cut'] == true) {
+        step(tr('ed.autoEditStepCut'));
+        if (!project.isAutoCut && project.videoPath != null) {
+          try {
+            if (_keptRegions.isEmpty) {
+              final flat =
+                  await ExportService.detectSpeechRegions(project.videoPath!);
+              final durMs = _duration.inMilliseconds > 0
+                  ? _duration.inMilliseconds
+                  : 10000;
+              _keptRegions = computeKeptRegions(flat, durMs);
+            }
+            if (_keptRegions.isNotEmpty) {
+              project.isAutoCut = true;
+              provider.updateProject(project);
+            }
+          } catch (_) {}
+        }
+      }
+
+      // Auto B-roll (heavy: network downloads) — last.
+      int brollCount = 0;
+      if (S['broll'] == true && hasKey) {
+        brollCount = await _runAutoBrollCore(provider, apiKey,
+            onStep: (i, n) =>
+                step(tr('ed.autoBrollStep', {'i': i, 'n': n})));
       }
 
       provider.commit();
+      if (S['broll'] == true) _ensureBrollControllers(provider.currentProject);
       if (mounted) {
         Navigator.of(context, rootNavigator: true).pop();
         setState(() {});
-        _toast('${tr('ed.autoEditDone')}${sfxCount > 0 ? ' · $sfxCount SFX' : ''}');
+        final extra = [
+          if (sfxCount > 0) '$sfxCount SFX',
+          if (brollCount > 0) '$brollCount B-roll',
+        ].join(' · ');
+        _toast('${tr('ed.autoEditDone')}${extra.isNotEmpty ? ' · $extra' : ''}');
       }
     } catch (e) {
       if (mounted) {
