@@ -87,6 +87,85 @@ class SubscriptionService {
     return fetchAndCache(user);
   }
 
+  /// Redeem a verified payment slip: atomically claims [refId] (anti-reuse),
+  /// extends the user's PRO by one month, and mirrors it to the local cache.
+  /// Returns a [RedeemResult].
+  /// Detail of the last redeem failure (for surfacing to the user / debugging).
+  static String? lastError;
+
+  static Future<RedeemResult> redeemBySlip({
+    required String refId,
+    required int amountKip,
+    String? bank,
+  }) async {
+    lastError = null;
+    final user = AuthService.currentUser;
+    if (user == null) return RedeemResult.notLoggedIn;
+    if (!FirebaseService.available) {
+      lastError = 'Firebase ບໍ່ພ້ອມ (ບໍ່ໄດ້ຕັ້ງຄ່າ / offline)';
+      return RedeemResult.error;
+    }
+
+    try {
+      // Firestore doc IDs cannot contain '/', be empty, or be over 1500 bytes.
+      final safeRefId = refId
+          .replaceAll(RegExp(r'[/\\\s]+'), '_')
+          .replaceAll(RegExp(r'_+'), '_');
+      if (safeRefId.isEmpty) {
+        lastError = 'refId ບໍ່ຖືກຕ້ອງ';
+        return RedeemResult.error;
+      }
+      final payRef = _db.collection('payments').doc(safeRefId);
+      final userRef = _db.collection(_collection).doc(user.uid);
+
+      final newExpiry = await _db.runTransaction<DateTime?>((tx) async {
+        final paySnap = await tx.get(payRef);
+        if (paySnap.exists) {
+          throw _SlipReused(); // refId already redeemed
+        }
+        final userSnap = await tx.get(userRef);
+        final current = userSnap.exists
+            ? _latest(_parseExpiry(userSnap.data()?[_fieldExpiry]),
+                _parseExpiry(userSnap.data()?[_fieldTrial]))
+            : null;
+        // Extend by one month from the later of now and the current expiry.
+        final base = (current != null && current.isAfter(DateTime.now()))
+            ? current
+            : DateTime.now();
+        final extended = DateTime(base.year, base.month + 1, base.day,
+            base.hour, base.minute, base.second);
+
+        tx.set(payRef, {
+          'uid': user.uid,
+          'amountKip': amountKip,
+          'bank': bank ?? '',
+          'createdAt': FieldValue.serverTimestamp(),
+        });
+        tx.set(
+          userRef,
+          {
+            'email': user.email,
+            _fieldExpiry: Timestamp.fromDate(extended),
+          },
+          SetOptions(merge: true),
+        );
+        return extended;
+      });
+
+      if (newExpiry != null) {
+        await FreeQuotaService.activatePro(expiry: newExpiry);
+        await FreeQuotaService.syncCloudExpiry(newExpiry);
+      }
+      return RedeemResult.success;
+    } on _SlipReused {
+      return RedeemResult.alreadyUsed;
+    } catch (e) {
+      debugPrint('[SubscriptionService] redeem failed: $e');
+      lastError = e.toString();
+      return RedeemResult.error;
+    }
+  }
+
   /// Returns the later of two nullable dates.
   static DateTime? _latest(DateTime? a, DateTime? b) {
     if (a == null) return b;
@@ -106,3 +185,7 @@ class SubscriptionService {
     return null;
   }
 }
+
+enum RedeemResult { success, alreadyUsed, notLoggedIn, error }
+
+class _SlipReused implements Exception {}

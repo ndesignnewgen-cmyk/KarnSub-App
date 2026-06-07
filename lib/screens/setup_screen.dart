@@ -3,6 +3,7 @@ import 'package:flutter_animate/flutter_animate.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:provider/provider.dart';
 import '../theme/app_theme.dart';
+import '../i18n/i18n.dart';
 import '../models/subtitle_style_model.dart';
 import '../providers/project_provider.dart';
 import '../services/free_quota_service.dart';
@@ -10,6 +11,7 @@ import '../services/api_config.dart';
 import '../widgets/style_preview_card.dart';
 import 'processing_screen.dart';
 import 'editor_screen.dart';
+import 'settings_screen.dart';
 
 class SetupScreen extends StatefulWidget {
   const SetupScreen({super.key});
@@ -29,9 +31,11 @@ class _SetupScreenState extends State<SetupScreen> {
   String _targetLanguage = 'lo';
   String _aiEngine = 'gemini';
   bool _isPro = false;
+  bool _proofread = true;
   bool _hasGroqKey = false;
   bool _hasOpenAiKey = false;
   final _nameController = TextEditingController();
+  final _hintController = TextEditingController();
 
   @override
   void initState() {
@@ -56,6 +60,7 @@ class _SetupScreenState extends State<SetupScreen> {
   @override
   void dispose() {
     _nameController.dispose();
+    _hintController.dispose();
     super.dispose();
   }
 
@@ -81,15 +86,15 @@ class _SetupScreenState extends State<SetupScreen> {
   void _startProcessing() {
     if (_videoPath == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('ກາລຸນາເລືອກວິດີໂອກ່ອນ'),
+        SnackBar(
+          content: Text(tr('setup.pickVideoFirst')),
           backgroundColor: AppColors.accent,
         ),
       );
       return;
     }
     final name = _nameController.text.trim().isEmpty
-        ? 'ໂປຣເຈກ ${DateTime.now().day}/${DateTime.now().month}'
+        ? '${tr('setup.defaultProjectName')} ${DateTime.now().day}/${DateTime.now().month}'
         : _nameController.text.trim();
 
     final project = context.read<ProjectProvider>().createProject(name);
@@ -100,6 +105,8 @@ class _SetupScreenState extends State<SetupScreen> {
     project.translateMode = _translateMode;
     project.language = _targetLanguage;
     project.sourceLanguage = _sourceLanguage;
+    project.transcriptionHint = _hintController.text.trim();
+    project.proofread = _proofread;
     project.showBilingual = (_translateMode == TranslateMode.bilingual);
 
     Navigator.pushReplacement(
@@ -118,7 +125,7 @@ class _SetupScreenState extends State<SetupScreen> {
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(
-        title: const Text('ໂປຣເຈກໃໝ່'),
+        title: Text(tr('setup.title')),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new, size: 18),
           onPressed: () => Navigator.pop(context),
@@ -129,36 +136,46 @@ class _SetupScreenState extends State<SetupScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _buildSectionLabel('ຊື່ໂປຣເຈກ'),
+            _buildSectionLabel(tr('setup.projectName')),
             const SizedBox(height: 8),
             _buildNameField(),
             const SizedBox(height: 24),
 
-            _buildSectionLabel('ອັບໂຫລດວິດີໂອ'),
+            _buildSectionLabel(tr('setup.uploadVideo')),
             const SizedBox(height: 8),
             _buildVideoUpload(),
             const SizedBox(height: 24),
-            _buildSectionLabel('ອັດຕາສ່ວນ'),
+            _buildSectionLabel(tr('setup.aspectRatio')),
             const SizedBox(height: 10),
             _buildAspectRatioSelector(),
             const SizedBox(height: 24),
-            _buildSectionLabel('ສໄຕລ໌ Subtitle'),
+            _buildSectionLabel(tr('setup.subtitleStyle')),
             const SizedBox(height: 10),
             _buildStyleGrid(),
             const SizedBox(height: 24),
-            _buildSectionLabel('ພາສາສຽງໃນວິດີໂອ (Speech Audio)'),
+            _buildSectionLabel(tr('setup.speechLang')),
             const SizedBox(height: 10),
             _buildSourceLanguageSelector(),
             const SizedBox(height: 24),
-            _buildSectionLabel('ພາສາ Subtitles ທີ່ຕ້ອງການ'),
+            _buildSectionLabel(tr('setup.subtitleLang')),
             const SizedBox(height: 10),
             _buildTargetLanguageSelector(),
             const SizedBox(height: 24),
-            _buildSectionLabel('ເຄື່ອງມື AI ຖອດສຽງ (AI Engine)'),
+            _buildSectionLabel(tr('setup.aiEngine')),
             const SizedBox(height: 10),
             _buildAiEngineSelector(),
+            if (!_hasGroqKey && !_hasOpenAiKey) ...[
+              const SizedBox(height: 10),
+              _buildGroqTip(),
+            ],
             const SizedBox(height: 24),
-            _buildSectionLabel('ຮູບແບບການສະແດງຜົນ (Translation Mode)'),
+            _buildSectionLabel(tr('setup.hint')),
+            const SizedBox(height: 8),
+            _buildHintField(),
+            const SizedBox(height: 14),
+            _buildProofreadToggle(),
+            const SizedBox(height: 24),
+            _buildSectionLabel(tr('setup.translationMode')),
             const SizedBox(height: 10),
             _buildDisplayModeSelector(),
             AnimatedContainer(
@@ -231,7 +248,7 @@ class _SetupScreenState extends State<SetupScreen> {
                   : const SizedBox.shrink(),
             ),
             const SizedBox(height: 24),
-            _buildSectionLabel('ການແບ່ງ Subtitle'),
+            _buildSectionLabel(tr('setup.subtitleSplit')),
             const SizedBox(height: 10),
             _buildWordSplitOptions(),
             const SizedBox(height: 24),
@@ -265,7 +282,7 @@ class _SetupScreenState extends State<SetupScreen> {
       controller: _nameController,
       style: const TextStyle(color: AppColors.textPrimary),
       decoration: InputDecoration(
-        hintText: 'ເຊັ່ນ: ຄລິບສອນທຳອາຫານ EP.1',
+        hintText: tr('setup.nameHint'),
         hintStyle: const TextStyle(color: AppColors.textHint),
         filled: true,
         fillColor: AppColors.surface,
@@ -284,6 +301,122 @@ class _SetupScreenState extends State<SetupScreen> {
         contentPadding: const EdgeInsets.symmetric(
           horizontal: 16,
           vertical: 14,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHintField() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        TextField(
+          controller: _hintController,
+          style: const TextStyle(color: AppColors.textPrimary, fontSize: 14),
+          decoration: InputDecoration(
+            hintText: tr('setup.hintHint'),
+            hintStyle: const TextStyle(color: AppColors.textHint),
+            filled: true,
+            fillColor: AppColors.surface,
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: const BorderSide(color: AppColors.border),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: const BorderSide(color: AppColors.border),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: const BorderSide(color: AppColors.primary, width: 1.5),
+            ),
+            contentPadding:
+                const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            prefixIcon: const Icon(Icons.spellcheck, color: AppColors.textHint, size: 18),
+          ),
+        ),
+        const SizedBox(height: 6),
+        Text(tr('setup.hintDesc'),
+            style: const TextStyle(color: AppColors.textHint, fontSize: 11)),
+      ],
+    );
+  }
+
+  Widget _buildProofreadToggle() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.fact_check_outlined, color: AppColors.primary, size: 20),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(tr('setup.proofread'),
+                    style: const TextStyle(
+                        color: AppColors.textPrimary,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600)),
+                const SizedBox(height: 2),
+                Text(tr('setup.proofreadDesc'),
+                    style: const TextStyle(color: AppColors.textHint, fontSize: 11)),
+              ],
+            ),
+          ),
+          Switch(
+            value: _proofread,
+            activeColor: AppColors.primary,
+            onChanged: (v) => setState(() => _proofread = v),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildGroqTip() {
+    return GestureDetector(
+      onTap: () => Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => const SettingsScreen()),
+      ),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          gradient: LinearGradient(colors: [
+            const Color(0xFF00BFA5).withValues(alpha: 0.15),
+            const Color(0xFF00BFA5).withValues(alpha: 0.05),
+          ]),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: const Color(0xFF00BFA5).withValues(alpha: 0.4)),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.bolt, color: Color(0xFF00BFA5), size: 22),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(tr('setup.groqTipTitle'),
+                      style: const TextStyle(
+                          color: Color(0xFF00BFA5),
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 2),
+                  Text(tr('setup.groqTipBody'),
+                      style: const TextStyle(
+                          color: Color(0xFF00BFA5), fontSize: 11, height: 1.35)),
+                ],
+              ),
+            ),
+            const Icon(Icons.chevron_right, color: Color(0xFF00BFA5), size: 20),
+          ],
         ),
       ),
     );
@@ -325,9 +458,9 @@ class _SetupScreenState extends State<SetupScreen> {
                     overflow: TextOverflow.ellipsis,
                   ),
                   const SizedBox(height: 4),
-                  const Text(
-                    'ແຕະເພື່ອປ່ຽນວິດີໂອ',
-                    style: TextStyle(color: AppColors.textHint, fontSize: 12),
+                  Text(
+                    tr('setup.tapToChange'),
+                    style: const TextStyle(color: AppColors.textHint, fontSize: 12),
                   ),
                 ],
               )
@@ -348,17 +481,17 @@ class _SetupScreenState extends State<SetupScreen> {
                     ),
                   ),
                   const SizedBox(height: 10),
-                  const Text(
-                    'ແຕະເລືອກວິດີໂອ',
-                    style: TextStyle(
+                  Text(
+                    tr('setup.tapToPick'),
+                    style: const TextStyle(
                       color: AppColors.textPrimary,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
                   const SizedBox(height: 4),
-                  const Text(
-                    'MP4, MOV, AVI • ສູງສຸດ 10 ນາທີ',
-                    style: TextStyle(color: AppColors.textHint, fontSize: 12),
+                  Text(
+                    tr('setup.videoFormats'),
+                    style: const TextStyle(color: AppColors.textHint, fontSize: 12),
                   ),
                 ],
               ),
@@ -456,10 +589,10 @@ class _SetupScreenState extends State<SetupScreen> {
 
   Widget _buildSourceLanguageSelector() {
     final langs = [
-      ('th', '🇹🇭 ພາສາໄທ', 'ສຽງເວົ້າພາສາໄທ'),
-      ('lo', '🇱🇦 ພາສາລາວ', 'ສຽງເວົ້າພາສາລາວ'),
-      ('en', '🇬🇧 English', 'English Speech'),
-      ('', '🤖 Auto Detect', 'ກວດຫາອັດຕະໂນມັດ'),
+      ('th', tr('lang.opt.th'), tr('lang.src.th')),
+      ('lo', tr('lang.opt.lo'), tr('lang.src.lo')),
+      ('en', tr('lang.opt.en'), tr('lang.src.en')),
+      ('', tr('lang.opt.auto'), tr('lang.src.auto')),
     ];
     return GridView.builder(
       shrinkWrap: true,
@@ -528,9 +661,9 @@ class _SetupScreenState extends State<SetupScreen> {
 
   Widget _buildTargetLanguageSelector() {
     final langs = [
-      ('lo', '🇱🇦 ພາສາລາວ', 'ຊັບພາສາລາວ'),
-      ('th', '🇹🇭 ພາສາໄທ', 'ซับไทย'),
-      ('en', '🇬🇧 English', 'English Sub'),
+      ('lo', tr('lang.opt.lo'), tr('lang.tgt.lo')),
+      ('th', tr('lang.opt.th'), tr('lang.tgt.th')),
+      ('en', tr('lang.opt.en'), tr('lang.tgt.en')),
     ];
     return Row(
       children: langs.map((l) {
@@ -593,9 +726,9 @@ class _SetupScreenState extends State<SetupScreen> {
     // Only show translation/bilingual modes if target != source
     final isTranslating = _sourceLanguage != _targetLanguage;
     final options = [
-      (TranslateMode.none, 'ບໍ່ແປ', 'ສະແດງພາສາເດີມ', false),
-      (TranslateMode.translate, 'ແປພາສາ', 'ສະແດງຊັບແປ', true),
-      (TranslateMode.bilingual, 'ສອງພາສາ', 'Bilingual (2 ແຖວ)', true),
+      (TranslateMode.none, tr('mode.none'), tr('mode.none.sub'), false),
+      (TranslateMode.translate, tr('mode.translate'), tr('mode.translate.sub'), true),
+      (TranslateMode.bilingual, tr('mode.bilingual'), tr('mode.bilingual.sub'), true),
     ];
     
     return Row(
@@ -672,9 +805,9 @@ class _SetupScreenState extends State<SetupScreen> {
 
   Widget _buildAiEngineSelector() {
     final engines = [
-      ('gemini', '♊️ Gemini AI', 'ແນະນຳສຳລັບຊັບລາວ (ແປໂດຍກົງ)', true),
-      ('groq', '⚡️ Groq Whisper', 'ຖອດສຽງໄວສູງສຸດ', _hasGroqKey),
-      ('whisper', '🧠 OpenAI Whisper', 'ຈັບເວລາລະອຽດ', _hasOpenAiKey),
+      ('gemini', tr('engine.gemini'), tr('engine.gemini.sub'), true),
+      ('groq', tr('engine.groq'), tr('engine.groq.sub'), _hasGroqKey),
+      ('whisper', tr('engine.whisper'), tr('engine.whisper.sub'), _hasOpenAiKey),
     ];
     return Row(
       children: engines.map((e) {
@@ -686,7 +819,7 @@ class _SetupScreenState extends State<SetupScreen> {
                 ? () {
                     ScaffoldMessenger.of(context).showSnackBar(
                       SnackBar(
-                        content: Text('ກາລຸນາໃສ່ API Key ສໍາລັບ ${e.$2} ໃນໜ້າ Settings ກ່ອນ'),
+                        content: Text('${e.$2}: ${tr('engine.needKey')}'),
                         backgroundColor: AppColors.accent,
                       ),
                     );
@@ -751,14 +884,15 @@ class _SetupScreenState extends State<SetupScreen> {
   }
 
   Widget _buildWordSplitOptions() {
+    final w = tr('split.word');
     final options = [
-      (WordSplit.none, 'ບໍ່ແບ່ງ'),
-      (WordSplit.one, '1 ຄຳ'),
-      (WordSplit.two, '2 ຄຳ'),
-      (WordSplit.three, '3 ຄຳ'),
-      (WordSplit.four, '4 ຄຳ'),
-      (WordSplit.six, '6 ຄຳ'),
-      (WordSplit.eight, '8 ຄຳ'),
+      (WordSplit.none, tr('split.none')),
+      (WordSplit.one, '1 $w'),
+      (WordSplit.two, '2 $w'),
+      (WordSplit.three, '3 $w'),
+      (WordSplit.four, '4 $w'),
+      (WordSplit.six, '6 $w'),
+      (WordSplit.eight, '8 $w'),
     ];
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
@@ -797,7 +931,7 @@ class _SetupScreenState extends State<SetupScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _buildSectionLabel('ຕົວຢ່າງ Subtitle'),
+        _buildSectionLabel(tr('setup.previewLabel')),
         const SizedBox(height: 10),
         Container(
           width: double.infinity,
@@ -808,7 +942,7 @@ class _SetupScreenState extends State<SetupScreen> {
             border: Border.all(color: AppColors.border),
           ),
           child: Center(
-            child: _buildLivePreviewText('ນີ້ຄືຕົວຢ່າງ subtitle ຂອງເຈົ້າ'),
+            child: _buildLivePreviewText(tr('setup.previewText')),
           ),
         ),
       ],
@@ -905,7 +1039,7 @@ class _SetupScreenState extends State<SetupScreen> {
           const Icon(Icons.auto_awesome, size: 20),
           const SizedBox(width: 8),
           Text(
-            _videoPath != null ? 'ສ້າງ Subtitle →' : 'ກາລຸນາເລືອກວິດີໂອກ່ອນ',
+            _videoPath != null ? tr('setup.createSubtitle') : tr('setup.pickVideoFirst'),
             style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
           ),
         ],
@@ -921,14 +1055,14 @@ class _SetupScreenState extends State<SetupScreen> {
         minimumSize: const Size(double.infinity, 48),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
       ),
-      child: const Row(
+      child: Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.edit_outlined, size: 18, color: AppColors.textSecondary),
-          SizedBox(width: 8),
+          const Icon(Icons.edit_outlined, size: 18, color: AppColors.textSecondary),
+          const SizedBox(width: 8),
           Text(
-            'ພິມ subtitle ດ້ວຍຕົນເອງ',
-            style: TextStyle(
+            tr('setup.manualType'),
+            style: const TextStyle(
               color: AppColors.textSecondary,
               fontSize: 15,
               fontWeight: FontWeight.w500,
@@ -942,15 +1076,15 @@ class _SetupScreenState extends State<SetupScreen> {
   void _startManual() {
     if (_videoPath == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('ກາລຸນາເລືອກວິດີໂອກ່ອນ'),
+        SnackBar(
+          content: Text(tr('setup.pickVideoFirst')),
           backgroundColor: AppColors.accent,
         ),
       );
       return;
     }
     final name = _nameController.text.trim().isEmpty
-        ? 'ໂປຣເຈກ ${DateTime.now().day}/${DateTime.now().month}'
+        ? '${tr('setup.defaultProjectName')} ${DateTime.now().day}/${DateTime.now().month}'
         : _nameController.text.trim();
 
     final project = context.read<ProjectProvider>().createProject(name);
@@ -988,16 +1122,16 @@ class _SetupScreenState extends State<SetupScreen> {
             ),
           ],
         ),
-        content: const Text(
-          'ຟີເຈີນີ້ສຳລັບ PRO ເທົ່ານັ້ນ\nສະມັກ PRO 39,000 ກີບ/ເດືອນ ໃນໜ້າ "ຕັ້ງຄ່າ"',
-          style: TextStyle(color: AppColors.textSecondary, fontSize: 13),
+        content: Text(
+          tr('pro.dialogBody'),
+          style: const TextStyle(color: AppColors.textSecondary, fontSize: 13),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text(
-              'ປິດ',
-              style: TextStyle(color: AppColors.textSecondary),
+            child: Text(
+              tr('common.close'),
+              style: const TextStyle(color: AppColors.textSecondary),
             ),
           ),
           ElevatedButton(
@@ -1006,7 +1140,7 @@ class _SetupScreenState extends State<SetupScreen> {
               backgroundColor: const Color(0xFFFFD700),
               foregroundColor: Colors.black,
             ),
-            child: const Text('Upgrade PRO'),
+            child: Text(tr('pro.upgrade')),
           ),
         ],
       ),

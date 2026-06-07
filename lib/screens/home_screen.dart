@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:provider/provider.dart';
 import '../theme/app_theme.dart';
+import '../i18n/i18n.dart';
 import '../providers/project_provider.dart';
 import '../models/subtitle_style_model.dart';
 import '../services/media_info_service.dart';
@@ -75,9 +76,9 @@ class _HomeScreenState extends State<HomeScreen> {
                   padding: const EdgeInsets.fromLTRB(20, 4, 16, 8),
                   child: Row(
                     children: [
-                      const Text(
-                        'ໂປຣເຈກຫຼ້າສຸດ',
-                        style: TextStyle(
+                      Text(
+                        tr('home.recentProjects'),
+                        style: const TextStyle(
                           color: AppColors.textPrimary,
                           fontWeight: FontWeight.bold,
                           fontSize: 15,
@@ -171,7 +172,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ),
                 Text(
-                  count == 0 ? 'ສ້າງ subtitle ໄວ ດ້ວຍ AI' : 'ມີ $count ໂປຣເຈກ',
+                  count == 0 ? tr('home.tagline') : tr('home.projectCount', {'n': count}),
                   style: const TextStyle(
                     color: AppColors.textSecondary,
                     fontSize: 12,
@@ -251,9 +252,9 @@ class _HomeScreenState extends State<HomeScreen> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          const Text(
-                            'ສ້າງໂປຣເຈກໃໝ່',
-                            style: TextStyle(
+                          Text(
+                            tr('home.newProject'),
+                            style: const TextStyle(
                               color: Colors.white,
                               fontSize: 17,
                               fontWeight: FontWeight.bold,
@@ -261,7 +262,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           ),
                           const SizedBox(height: 3),
                           Text(
-                            'ອັບໂຫລດ video → AI ສ້າງ subtitle',
+                            tr('home.newProjectSub'),
                             style: TextStyle(
                               color: Colors.white.withOpacity(0.8),
                               fontSize: 12.5,
@@ -302,7 +303,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _badges(SubtitleProject p) {
     final hasTrans = p.segments.any((s) => (s.translatedText ?? '').isNotEmpty);
     final chips = <Widget>[];
-    if (hasTrans) chips.add(_chip(Icons.translate, '2 ພາສາ'));
+    if (hasTrans) chips.add(_chip(Icons.translate, tr('home.bilingualBadge')));
     return Wrap(spacing: 6, runSpacing: 4, children: chips);
   }
 
@@ -384,7 +385,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                     ),
                                   ),
                                   Text(
-                                    '${p.segments.length} ປ່ອນ',
+                                    '${p.segments.length} ${tr('home.segments')}',
                                     style: const TextStyle(
                                       color: AppColors.textSecondary,
                                       fontSize: 11,
@@ -497,7 +498,7 @@ class _HomeScreenState extends State<HomeScreen> {
                               ),
                               const SizedBox(height: 2),
                               Text(
-                                '${p.segments.length} ປ່ອນ • ${_fmtDate(p.createdAt)}',
+                                '${p.segments.length} ${tr('home.segments')} • ${_fmtDate(p.createdAt)}',
                                 style: const TextStyle(
                                   color: AppColors.textHint,
                                   fontSize: 10.5,
@@ -540,9 +541,9 @@ class _HomeScreenState extends State<HomeScreen> {
         }
       },
       itemBuilder: (_) => [
-        _menuItem('rename', Icons.edit_outlined, 'ປ່ຽນຊື່'),
-        _menuItem('dup', Icons.copy_all_outlined, 'ສຳເນົາ'),
-        _menuItem('del', Icons.delete_outline, 'ລຶບ', danger: true),
+        _menuItem('rename', Icons.edit_outlined, tr('home.rename')),
+        _menuItem('dup', Icons.copy_all_outlined, tr('home.duplicate')),
+        _menuItem('del', Icons.delete_outline, tr('common.delete'), danger: true),
       ],
     );
   }
@@ -581,22 +582,22 @@ class _HomeScreenState extends State<HomeScreen> {
       builder: (_) => AlertDialog(
         backgroundColor: AppColors.surface,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text(
-          'ປ່ຽນຊື່ໂປຣເຈກ',
-          style: TextStyle(color: AppColors.textPrimary, fontSize: 16),
+        title: Text(
+          tr('home.renameTitle'),
+          style: const TextStyle(color: AppColors.textPrimary, fontSize: 16),
         ),
         content: TextField(
           controller: ctrl,
           autofocus: true,
           style: const TextStyle(color: AppColors.textPrimary),
-          decoration: const InputDecoration(hintText: 'ຊື່ໂປຣເຈກ'),
+          decoration: InputDecoration(hintText: tr('home.projectNameHint')),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text(
-              'ຍົກເລີກ',
-              style: TextStyle(color: AppColors.textSecondary),
+            child: Text(
+              tr('common.cancel'),
+              style: const TextStyle(color: AppColors.textSecondary),
             ),
           ),
           ElevatedButton(
@@ -610,7 +611,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 borderRadius: BorderRadius.circular(10),
               ),
             ),
-            child: const Text('ບັນທຶກ'),
+            child: Text(tr('common.save')),
           ),
         ],
       ),
@@ -637,14 +638,14 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
           const SizedBox(height: 16),
-          const Text(
-            'ຍັງບໍ່ມີໂປຣເຈກ',
-            style: TextStyle(color: AppColors.textSecondary, fontSize: 15),
+          Text(
+            tr('home.empty'),
+            style: const TextStyle(color: AppColors.textSecondary, fontSize: 15),
           ),
           const SizedBox(height: 6),
-          const Text(
-            'ກົດ "ສ້າງໂປຣເຈກໃໝ່" ເພື່ອເລີ່ມ',
-            style: TextStyle(color: AppColors.textHint, fontSize: 13),
+          Text(
+            tr('home.emptySub'),
+            style: const TextStyle(color: AppColors.textHint, fontSize: 13),
           ),
         ],
       ),
@@ -657,26 +658,26 @@ class _HomeScreenState extends State<HomeScreen> {
       builder: (_) => AlertDialog(
         backgroundColor: AppColors.surface,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Row(
+        title: Row(
           children: [
-            Icon(Icons.delete_outline, color: AppColors.accent, size: 22),
-            SizedBox(width: 8),
+            const Icon(Icons.delete_outline, color: AppColors.accent, size: 22),
+            const SizedBox(width: 8),
             Text(
-              'ລຶບໂປຣເຈກ',
-              style: TextStyle(color: AppColors.textPrimary, fontSize: 16),
+              tr('home.deleteTitle'),
+              style: const TextStyle(color: AppColors.textPrimary, fontSize: 16),
             ),
           ],
         ),
         content: Text(
-          'ຕ້ອງການລຶບ "$name" ບໍ?\nຂໍ້ມູນຈະຫາຍໄປຖາວອນ',
+          tr('home.deleteBody', {'name': name}),
           style: const TextStyle(color: AppColors.textSecondary, fontSize: 14),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text(
-              'ຍົກເລີກ',
-              style: TextStyle(color: AppColors.textSecondary),
+            child: Text(
+              tr('common.cancel'),
+              style: const TextStyle(color: AppColors.textSecondary),
             ),
           ),
           ElevatedButton(
@@ -688,7 +689,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 borderRadius: BorderRadius.circular(10),
               ),
             ),
-            child: const Text('ລຶບ', style: TextStyle(color: Colors.white)),
+            child: Text(tr('common.delete'), style: const TextStyle(color: Colors.white)),
           ),
         ],
       ),

@@ -113,12 +113,101 @@ class ProjectProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  ProjectSnapshot _snapshot() => ProjectSnapshot(
+        _currentProject!.segments.map((s) => s.copy()).toList(),
+        _currentProject!.sfxBlocks.map((s) => s.copy()).toList(),
+        _currentProject!.removedRanges.map((r) => List<int>.from(r)).toList(),
+        List<int>.from(_currentProject!.splitPointsMs),
+        _currentProject!.imageOverlays.map((o) => o.copy()).toList(),
+        _currentProject!.zoomEffects.map((z) => z.copy()).toList(),
+        _currentProject!.fadeEffects.map((f) => f.copy()).toList(),
+        _currentProject!.shakeEffects.map((s) => s.copy()).toList(),
+      );
+
+  void _restore(ProjectSnapshot snap) {
+    _currentProject!.segments = snap.segments;
+    _currentProject!.sfxBlocks = snap.sfxBlocks;
+    _currentProject!.removedRanges =
+        snap.removedRanges.map((r) => List<int>.from(r)).toList();
+    _currentProject!.splitPointsMs = List<int>.from(snap.splitPointsMs);
+    _currentProject!.imageOverlays =
+        snap.imageOverlays.map((o) => o.copy()).toList();
+    _currentProject!.zoomEffects =
+        snap.zoomEffects.map((z) => z.copy()).toList();
+    _currentProject!.fadeEffects =
+        snap.fadeEffects.map((f) => f.copy()).toList();
+    _currentProject!.shakeEffects =
+        snap.shakeEffects.map((s) => s.copy()).toList();
+  }
+
+  void addImageOverlay(ImageOverlay o) {
+    if (_currentProject == null) return;
+    _pushHistory();
+    _currentProject!.imageOverlays.add(o);
+    commit();
+  }
+
+  void removeImageOverlay(String id) {
+    if (_currentProject == null) return;
+    _pushHistory();
+    _currentProject!.imageOverlays.removeWhere((o) => o.id == id);
+    commit();
+  }
+
+  void addZoomEffect(ZoomEffect z) {
+    if (_currentProject == null) return;
+    _pushHistory();
+    // Remove any existing zoom overlapping the same range (one zoom per span).
+    _currentProject!.zoomEffects.removeWhere((e) =>
+        z.startTime < e.endTime && e.startTime < z.endTime);
+    _currentProject!.zoomEffects.add(z);
+    commit();
+  }
+
+  void removeZoomEffect(String id) {
+    if (_currentProject == null) return;
+    _pushHistory();
+    _currentProject!.zoomEffects.removeWhere((z) => z.id == id);
+    commit();
+  }
+
+  void addFadeEffect(FadeEffect f) {
+    if (_currentProject == null) return;
+    _pushHistory();
+    _currentProject!.fadeEffects.add(f);
+    commit();
+  }
+
+  void removeFadeEffectsIn(int startMs, int endMs) {
+    if (_currentProject == null) return;
+    _pushHistory();
+    _currentProject!.fadeEffects.removeWhere((f) =>
+        f.startTime.inMilliseconds < endMs &&
+        startMs < f.endTime.inMilliseconds);
+    commit();
+  }
+
+  void addShakeEffect(ShakeEffect s) {
+    if (_currentProject == null) return;
+    _pushHistory();
+    _currentProject!.shakeEffects.removeWhere((e) =>
+        s.startTime < e.endTime && e.startTime < s.endTime);
+    _currentProject!.shakeEffects.add(s);
+    commit();
+  }
+
+  void removeShakeEffectsIn(int startMs, int endMs) {
+    if (_currentProject == null) return;
+    _pushHistory();
+    _currentProject!.shakeEffects.removeWhere((s) =>
+        s.startTime.inMilliseconds < endMs &&
+        startMs < s.endTime.inMilliseconds);
+    commit();
+  }
+
   void _pushHistory() {
     if (_currentProject == null) return;
-    _undoStack.add(ProjectSnapshot(
-      _currentProject!.segments.map((s) => s.copy()).toList(),
-      _currentProject!.sfxBlocks.map((s) => s.copy()).toList(),
-    ));
+    _undoStack.add(_snapshot());
     _redoStack.clear();
     if (_undoStack.length > 30) _undoStack.removeAt(0);
   }
@@ -135,13 +224,8 @@ class ProjectProvider extends ChangeNotifier {
 
   void undo() {
     if (_undoStack.isEmpty || _currentProject == null) return;
-    _redoStack.add(ProjectSnapshot(
-      _currentProject!.segments.map((s) => s.copy()).toList(),
-      _currentProject!.sfxBlocks.map((s) => s.copy()).toList(),
-    ));
-    final snap = _undoStack.removeLast();
-    _currentProject!.segments = snap.segments;
-    _currentProject!.sfxBlocks = snap.sfxBlocks;
+    _redoStack.add(_snapshot());
+    _restore(_undoStack.removeLast());
     final index = _projects.indexWhere((p) => p.id == _currentProject!.id);
     if (index != -1) _projects[index] = _currentProject!;
     _persist();
@@ -150,13 +234,8 @@ class ProjectProvider extends ChangeNotifier {
 
   void redo() {
     if (_redoStack.isEmpty || _currentProject == null) return;
-    _undoStack.add(ProjectSnapshot(
-      _currentProject!.segments.map((s) => s.copy()).toList(),
-      _currentProject!.sfxBlocks.map((s) => s.copy()).toList(),
-    ));
-    final snap = _redoStack.removeLast();
-    _currentProject!.segments = snap.segments;
-    _currentProject!.sfxBlocks = snap.sfxBlocks;
+    _undoStack.add(_snapshot());
+    _restore(_redoStack.removeLast());
     final index = _projects.indexWhere((p) => p.id == _currentProject!.id);
     if (index != -1) _projects[index] = _currentProject!;
     _persist();
@@ -230,5 +309,20 @@ class ProjectProvider extends ChangeNotifier {
 class ProjectSnapshot {
   final List<SubtitleSegment> segments;
   final List<SfxBlock> sfxBlocks;
-  ProjectSnapshot(this.segments, this.sfxBlocks);
+  final List<List<int>> removedRanges;
+  final List<int> splitPointsMs;
+  final List<ImageOverlay> imageOverlays;
+  final List<ZoomEffect> zoomEffects;
+  final List<FadeEffect> fadeEffects;
+  final List<ShakeEffect> shakeEffects;
+  ProjectSnapshot(
+    this.segments,
+    this.sfxBlocks, [
+    this.removedRanges = const [],
+    this.splitPointsMs = const [],
+    this.imageOverlays = const [],
+    this.zoomEffects = const [],
+    this.fadeEffects = const [],
+    this.shakeEffects = const [],
+  ]);
 }

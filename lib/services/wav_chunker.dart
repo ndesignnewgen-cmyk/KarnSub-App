@@ -17,7 +17,12 @@ class WavChunk {
 class WavChunker {
   /// Splits a WAV file into smaller chunks of [chunkDurationSeconds].
   /// Returns a list of [WavChunk] containing the path and start time of each chunk.
-  static Future<List<WavChunk>> splitWav(String inputPath, {double chunkDurationSeconds = 15.0}) async {
+  ///
+  /// [snapWindowSeconds] > 0 nudges each cut to the QUIETEST point within ±window
+  /// of the nominal boundary, so a chunk never splits a word in half (the cut
+  /// lands in the silence between words). No overlap/dedup needed.
+  static Future<List<WavChunk>> splitWav(String inputPath,
+      {double chunkDurationSeconds = 15.0, double snapWindowSeconds = 0.5}) async {
     final file = File(inputPath);
     if (!file.existsSync()) {
       throw Exception('WAV file not found: $inputPath');
@@ -63,12 +68,51 @@ class WavChunker {
     final tempDir = await getTemporaryDirectory();
     final baseName = DateTime.now().millisecondsSinceEpoch.toString();
     
+    // Snap search window (in bytes), used to move a cut into the nearest silence.
+    int snapBytes = (snapWindowSeconds * bytesPerSecond).toInt();
+    snapBytes -= (snapBytes % bytesPerSample);
+    final is16Mono = bitsPerSample == 16; // energy scan supports 16-bit PCM
+
+    /// Find the quietest sample-aligned cut near [nominalEnd] within ±snapBytes.
+    int snapToSilence(int nominalEnd, int offset) {
+      if (snapBytes <= 0 || !is16Mono) return nominalEnd;
+      int lo = nominalEnd - snapBytes;
+      int hi = nominalEnd + snapBytes;
+      if (lo < offset + bytesPerSample) lo = offset + bytesPerSample;
+      if (hi > rawData.length) hi = rawData.length;
+      if (hi - lo < bytesPerSample * 4) return nominalEnd;
+      // Short-term energy over ~10 ms windows; pick the window with min energy.
+      int win = (0.01 * bytesPerSecond).toInt();
+      win -= (win % bytesPerSample);
+      if (win < bytesPerSample * 2) win = bytesPerSample * 2;
+      final step = (bytesPerSample * 2); // coarse scan for speed
+      int bestPos = nominalEnd;
+      double bestEnergy = double.infinity;
+      for (int c = lo; c + win <= hi; c += step) {
+        double e = 0;
+        for (int b = c; b < c + win; b += 2) {
+          int s = rawData[b] | (rawData[b + 1] << 8);
+          if (s >= 0x8000) s -= 0x10000;
+          e += (s < 0 ? -s : s).toDouble();
+        }
+        if (e < bestEnergy) {
+          bestEnergy = e;
+          bestPos = c + (win ~/ 2);
+        }
+      }
+      bestPos -= (bestPos % bytesPerSample);
+      return bestPos.clamp(offset + bytesPerSample, rawData.length);
+    }
+
     final chunks = <WavChunk>[];
     int offset = 0;
     int chunkIndex = 0;
 
     while (offset < rawData.length) {
-      final end = (offset + bytesPerChunk < rawData.length) ? offset + bytesPerChunk : rawData.length;
+      int end = (offset + bytesPerChunk < rawData.length)
+          ? offset + bytesPerChunk
+          : rawData.length;
+      if (end < rawData.length) end = snapToSilence(end, offset); // don't split a word
       final chunkData = rawData.sublist(offset, end);
       
       final chunkWavPath = '${tempDir.path}/chunk_${baseName}_$chunkIndex.wav';

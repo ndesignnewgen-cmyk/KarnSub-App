@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 import '../models/subtitle_style_model.dart';
 import 'audio_sync_service.dart';
+import 'audio_preprocess.dart';
 
 class GeminiSpeechException implements Exception {
   final String message;
@@ -17,13 +18,26 @@ class GeminiSpeechException implements Exception {
 
 class GeminiSpeechService {
   static const _channel = MethodChannel('com.anniekaydee.subtitle_app/audio');
-  static const _endpoint =
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent';
+
+  // Primary model = gemini-3.5-flash: BEST Lao spelling/accuracy. It can return
+  // 503 when overloaded, but that's transient — so we retry it several times
+  // first, and only switch to the more-available (but lower Lao quality)
+  // fallback as a LAST resort so transcription never hard-fails.
+  static const _primaryModel = 'gemini-3.5-flash';
+  static const _fallbackModel = 'gemini-2.5-flash';
+  static String _endpointFor(String model) =>
+      'https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent';
+  static final _endpoint = _endpointFor(_primaryModel);
 
   // Long audio is split into chunks of ~this length so Gemini's timestamps stay
   // accurate (its drift grows with duration). Each chunk is cut at a silence and
   // its words are offset by the chunk's exact start time.
-  static const int _chunkTargetMs = 15000;
+  // Bigger chunks = far fewer Gemini requests (free tier is only ~20/day for
+  // 3.5). Timing is corrected afterwards by Groq/Whisper forced-align or energy
+  // VAD, so Gemini only needs accurate TEXT here — larger chunks even give it
+  // more context. ~30s keeps a 5-min video well under the daily request cap
+  // while limiting Gemini's own timestamp drift before alignment.
+  static const int _chunkTargetMs = 30000;
 
   final String apiKey;
   final _uuid = const Uuid();
@@ -34,6 +48,7 @@ class GeminiSpeechService {
     String videoPath, {
     String language = 'lo',
     WordSplit wordSplit = WordSplit.none,
+    String hint = '',
     void Function(String)? onProgress,
   }) async {
     onProgress?.call('ດຶງສຽງຈາກວິດີໂອ...');
@@ -54,9 +69,11 @@ class GeminiSpeechService {
     if (!wavFile.existsSync()) {
       throw GeminiSpeechException('ໄຟລ໌ audio ສ້າງບໍ່ສໍາເລັດ');
     }
-    final wavBytes = await wavFile.readAsBytes();
+    final rawBytes = await wavFile.readAsBytes();
     wavFile.deleteSync();
-    if (wavBytes.length <= 44) return [];
+    if (rawBytes.length <= 44) return [];
+    // Clean up the recognizer's copy: high-pass + loudness normalize.
+    final wavBytes = AudioPreprocess.processBytes(rawBytes);
 
     // Parse the WAV header → bytes-per-millisecond (extractAudio outputs
     // 16 kHz mono 16-bit, but read the header to stay correct if that changes).
@@ -79,7 +96,7 @@ class GeminiSpeechService {
       'en' => 'English',
       _ => 'ພາສາລາວ',
     };
-    final prompt = _buildPrompt(langName);
+    final prompt = _buildPrompt(langName, hint);
 
     // Decide chunk boundaries (single chunk for short clips).
     List<List<int>> chunks;
@@ -211,7 +228,12 @@ class GeminiSpeechService {
     return out.isEmpty ? entries : out;
   }
 
-  String _buildPrompt(String langName) =>
+  String _buildPrompt(String langName, [String hint = '']) {
+    final h = hint.trim();
+    final glossary = h.isEmpty
+        ? ''
+        : '\n\nຄຳສະເພາະ/ຊື່ທີ່ອາດປະກົດໃນສຽງ (ສະກົດໃຫ້ຖືກຕາມນີ້ເມື່ອໄດ້ຍິນ): $h\n';
+    return glossary +
       '''ຖອດສຽງ audio ນີ້ເປັນ $langName ພ້ອມ timestamp ລະດັບຄຳ (word-level) ໃຫ້ຊັດ ແລະ ຕົງກັບສຽງທີ່ສຸດ
 
 ກົດການແບ່ງຄຳ (ສຳຄັນທີ່ສຸດ):
@@ -234,6 +256,7 @@ class GeminiSpeechService {
 
 ສົ່ງ JSON array ເທົ່ານັ້ນ (ບໍ່ໃສ່ text ອື່ນ):
 [{"start":0.00,"end":0.50,"text":"ຄຳເຕັມ"}]''';
+  }
 
   /// Plan chunk ranges [startMs, endMs]. Cuts at silence midpoints between
   /// speech regions whenever a chunk would exceed [target]; falls back to fixed
@@ -306,17 +329,22 @@ class GeminiSpeechService {
       'generationConfig': {'temperature': 0.1},
     });
 
-    final flash35Endpoint = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent';
-
-    const maxAttempts = 5; // Increased to 5 to handle rate limit retries robustly
+    const maxAttempts = 6; // retry the primary (best-Lao) model several times
     String responseBody = '';
     int statusCode = 0;
+    // Once the primary model returns 429 (daily free-tier quota = 20/day for
+    // 3.5), retrying it is pointless — switch to the fallback model, which has a
+    // SEPARATE, larger free quota. So the app keeps working after 3.5 runs out.
+    bool quotaFallback = false;
     for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-      final activeEndpoint = flash35Endpoint;
-      final uri = Uri.parse('$activeEndpoint?key=$apiKey');
-      
+      final useFallback = quotaFallback || attempt == maxAttempts;
+      final activeModel = useFallback ? _fallbackModel : _primaryModel;
+      final uri = Uri.parse('${_endpointFor(activeModel)}?key=$apiKey');
+
       if (attempt >= 2) {
-        onProgress?.call('Gemini 3.5 Flash ບໍ່ຫວ່າງ, ກຳລັງລອງໃໝ່ ($attempt/$maxAttempts)...');
+        onProgress?.call(useFallback
+            ? 'ສະລັບໄປໃຊ້ Gemini ຮຸ່ນສຳຮອງ (ຄັ້ງສຸດທ້າຍ)...'
+            : '$activeModel ບໍ່ຫວ່າງ, ກຳລັງລອງໃໝ່ ($attempt/$maxAttempts)...');
       }
 
       try {
@@ -344,17 +372,22 @@ class GeminiSpeechService {
         return jsonDecode(responseBody) as Map<String, dynamic>;
       }
 
+      // 429 on the PRIMARY model = its daily quota is gone → switch to the
+      // fallback model immediately (separate quota), don't waste time waiting.
+      if (statusCode == 429 && !useFallback && !quotaFallback) {
+        quotaFallback = true;
+        onProgress?.call('Gemini 3.5 ໝົດໂຄຕ້າ — ສະຫຼັບໄປ Gemini 2.5...');
+        await Future.delayed(const Duration(seconds: 1));
+        continue;
+      }
+
       final retryable =
           statusCode == 503 || statusCode == 429 || statusCode == 500;
       if (retryable && attempt < maxAttempts) {
-        final delaySecs = 4 * attempt;
-        if (statusCode == 429) {
-          onProgress
-              ?.call('Gemini ຂໍ້ຈຳກັດໂຄຕາ (429) — ລໍຖ້າ $delaySecs ວິນາທີ ($attempt/$maxAttempts)...');
-        } else {
-          onProgress
-              ?.call('Gemini ຄົນໃຊ້ຫຼາຍ (503) — ລໍຖ້າ $delaySecs ວິນາທີ ($attempt/$maxAttempts)...');
-        }
+        final delaySecs = 3 * attempt;
+        onProgress?.call(statusCode == 429
+            ? 'Gemini ໂຄຕ້າເຕັມ (429) — ລໍຖ້າ $delaySecs ວິ ($attempt/$maxAttempts)...'
+            : 'Gemini ຄົນໃຊ້ຫຼາຍ ($statusCode) — ລໍຖ້າ $delaySecs ວິ ($attempt/$maxAttempts)...');
         await Future.delayed(Duration(seconds: delaySecs));
         continue;
       }
@@ -365,6 +398,10 @@ class GeminiSpeechService {
         msg = err['error']?['message'] ?? responseBody;
       } catch (_) {
         msg = responseBody;
+      }
+      if (statusCode == 429) {
+        throw GeminiSpeechException(
+            'Gemini ໝົດໂຄຕ້າຟຣີມື້ນີ້ (free tier 20 ຄັ້ງ/ມື້). ແນະນຳ: ໃສ່ Groq API key (ຟຣີ, ໂຄຕ້າສູງກວ່າ) ໃນ Settings ສຳລັບຖອດສຽງ — ຫຼື ລໍມື້ໃໝ່');
       }
       if (statusCode == 503) {
         throw GeminiSpeechException(
@@ -487,6 +524,8 @@ class GeminiSpeechService {
     if (segs.isEmpty) return;
     const chunkSize = 80;
     bool hasAnySuccess = false;
+    bool useFallbackModel = false; // switch to 2.5 once 3.5 hits its daily quota
+    bool quotaHit = false;
     String lastErrorMessage = '';
 
     for (int start = 0; start < segs.length; start += chunkSize) {
@@ -529,14 +568,24 @@ class GeminiSpeechService {
       });
 
       try {
-        final uri = Uri.parse('$_endpoint?key=$apiKey');
+        final model = useFallbackModel ? _fallbackModel : _primaryModel;
+        final uri = Uri.parse('${_endpointFor(model)}?key=$apiKey');
         final response = await http.post(
           uri,
           headers: {'Content-Type': 'application/json'},
           body: body,
         ).timeout(const Duration(minutes: 2));
 
+        // 429 on primary = daily quota gone → retry this chunk on the fallback
+        // model (separate quota) instead of failing.
+        if (response.statusCode == 429 && !useFallbackModel) {
+          useFallbackModel = true;
+          quotaHit = true;
+          start -= chunkSize; // redo this same chunk with the fallback model
+          continue;
+        }
         if (response.statusCode != 200) {
+          if (response.statusCode == 429) quotaHit = true;
           lastErrorMessage = 'API error status ${response.statusCode}: ${response.body}';
           continue;
         }
@@ -577,10 +626,14 @@ class GeminiSpeechService {
     }
 
     if (!hasAnySuccess && segs.isNotEmpty) {
+      if (quotaHit) {
+        throw GeminiSpeechException(
+            'Auto ✨ ໝົດໂຄຕ້າ Gemini ຟຣີມື້ນີ້ (20 ຄັ້ງ/ມື້) — ໃສ່ Groq key (ຟຣີ) ໃນ Settings ຫຼື ລໍມື້ໃໝ່');
+      }
       throw GeminiSpeechException(
-        lastErrorMessage.isNotEmpty 
-          ? 'Auto ✨ ບໍ່ສຳເລັດ: $lastErrorMessage' 
-          : 'Auto ✨ ບໍ່ສຳເລັດ — ລອງໃໝ່'
+        lastErrorMessage.isNotEmpty
+          ? 'Auto ✨ ບໍ່ສຳເລັດ: $lastErrorMessage'
+          : 'Auto ✨ ບໍ່ສຳເລັດ — ລອງໃໝ່',
       );
     }
   }
@@ -660,13 +713,16 @@ class GeminiSpeechService {
 
     final langName = switch (targetLang) {
       'en' => 'English',
-      'th' => 'ພາສາໄທ',
-      'zh' => 'ພາສາຈີນ',
+      'th' => 'Thai (ภาษาไทย) — ສະກົດໄທໃຫ້ຖືກຕ້ອງ',
+      'lo' =>
+        'Lao (ພາສາລາວ) — ໃຊ້ການສະກົດລາວທີ່ຖືກຕ້ອງ, ແປເປັນຄຳເວົ້າລາວທຳມະຊາດ (ບໍ່ແມ່ນແປງຕົວອັກສອນໄທ)',
+      'zh' => 'Chinese (中文)',
       _ => 'English',
     };
 
     final prompt =
-        'ແປ subtitle ຕໍ່ໄປນີ້ທຸກ entry ເປັນ $langName ໃຫ້ຖືກຕ້ອງ ລຽບໄຫຼ ກ້ວາງສັ້ນໄດ້ໃຈ.\n'
+        'ແປ subtitle ຕໍ່ໄປນີ້ທຸກ entry ເປັນ $langName ໃຫ້ຖືກຕ້ອງ ລຽບໄຫຼ ກະທັດຮັດ.\n'
+        'ຮັກສາຈຳນວນ entry ໃຫ້ເທົ່າเดิม (${texts.length} ອັນ). ຮັກສາ ຊື່/ຍີ່ຫໍ້/ຕົວເລກ/ຄຳ English ໄວ້ຄືเดิม.\n'
         'ສົ່ງຄືນ JSON array ຂອງ strings ໃນລໍາດັບດຽວກັນ ບໍ່ໃສ່ text ອື່ນ:\n'
         '${jsonEncode(texts)}';
 
@@ -681,25 +737,55 @@ class GeminiSpeechService {
       'generationConfig': {'temperature': 0.2},
     });
 
-    final uri = Uri.parse('$_endpoint?key=$apiKey');
-    final httpClient = HttpClient();
-    final request = await httpClient.postUrl(uri);
-    request.headers.contentType = ContentType.json;
-    request.write(body);
-    final response =
-        await request.close().timeout(const Duration(minutes: 2));
+    // Retry across primary → fallback model (separate quota) on 429/503.
+    String responseBody = '';
+    int statusCode = 0;
+    bool quotaFallback = false;
+    const maxAttempts = 5;
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+      final useFallback = quotaFallback || attempt == maxAttempts;
+      final uri = Uri.parse(
+          '${_endpointFor(useFallback ? _fallbackModel : _primaryModel)}?key=$apiKey');
+      http.Response resp;
+      try {
+        resp = await http
+            .post(uri, headers: {'Content-Type': 'application/json'}, body: body)
+            .timeout(const Duration(seconds: 60));
+      } catch (_) {
+        if (attempt >= maxAttempts) {
+          throw GeminiSpeechException('ເຊື່ອມຕໍ່ Gemini ບໍ່ໄດ້ — ລອງໃໝ່');
+        }
+        await Future.delayed(Duration(seconds: 2 * attempt));
+        continue;
+      }
+      statusCode = resp.statusCode;
+      responseBody = resp.body;
+      if (statusCode == 200) break;
+      if (statusCode == 429 && !useFallback && !quotaFallback) {
+        quotaFallback = true; // 3.5 quota gone → switch to 2.5
+        await Future.delayed(const Duration(seconds: 1));
+        continue;
+      }
+      final retryable = statusCode == 429 || statusCode == 503 || statusCode == 500;
+      if (retryable && attempt < maxAttempts) {
+        await Future.delayed(Duration(seconds: 2 * attempt));
+        continue;
+      }
+      break;
+    }
 
-    final responseBody = await response.transform(utf8.decoder).join();
-
-    if (response.statusCode != 200) {
+    if (statusCode != 200) {
+      if (statusCode == 429) {
+        throw GeminiSpeechException(
+            'Gemini ໝົດໂຄຕ້າຟຣີມື້ນີ້ (20 ຄັ້ງ/ມື້) — ໃສ່ Groq key ຫຼື ລໍມື້ໃໝ່');
+      }
       String msg;
       try {
-        final err = jsonDecode(responseBody);
-        msg = err['error']?['message'] ?? responseBody;
+        msg = jsonDecode(responseBody)['error']?['message'] ?? responseBody;
       } catch (_) {
         msg = responseBody;
       }
-      throw GeminiSpeechException('Gemini ${response.statusCode}: $msg');
+      throw GeminiSpeechException('Gemini $statusCode: $msg');
     }
 
     try {
@@ -783,17 +869,19 @@ class GeminiSpeechService {
         'generationConfig': {'temperature': 0.1}, // Low temp for accurate translation
       });
 
-      final flash35Endpoint = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent';
-
       try {
         http.Response? response;
-        const maxAttempts = 4;
+        const maxAttempts = 5;
+        bool quotaFallback = false;
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-          final activeEndpoint = flash35Endpoint;
-          final uri = Uri.parse('$activeEndpoint?key=$apiKey');
-          
+          final useFallback = quotaFallback || attempt == maxAttempts;
+          final activeModel = useFallback ? _fallbackModel : _primaryModel;
+          final uri = Uri.parse('${_endpointFor(activeModel)}?key=$apiKey');
+
           if (attempt >= 2) {
-            onProgress?.call('Gemini 3.5 Flash ບໍ່ຫວ່າງ, ກຳລັງລອງໃໝ່ ($attempt/$maxAttempts)...');
+            onProgress?.call(useFallback
+                ? 'ສະລັບໄປໃຊ້ Gemini ຮຸ່ນສຳຮອງ...'
+                : '$activeModel ບໍ່ຫວ່າງ, ກຳລັງລອງໃໝ່ ($attempt/$maxAttempts)...');
           }
 
           try {
@@ -804,26 +892,33 @@ class GeminiSpeechService {
             ).timeout(const Duration(seconds: 45));
           } catch (_) {
             if (attempt >= maxAttempts) break;
-            await Future.delayed(Duration(seconds: 4 * attempt));
+            await Future.delayed(Duration(seconds: 3 * attempt));
             continue;
           }
-          
+
           if (response.statusCode == 200) {
             break;
           }
-          
+
+          // 429 on primary = daily quota gone → jump to fallback model now.
+          if (response.statusCode == 429 && !useFallback && !quotaFallback) {
+            quotaFallback = true;
+            await Future.delayed(const Duration(seconds: 1));
+            continue;
+          }
+
           final retryable = response.statusCode == 429 || response.statusCode == 503 || response.statusCode == 500;
           if (retryable && attempt < maxAttempts) {
-            final delaySecs = 4 * attempt;
-            onProgress?.call('Gemini ຂໍ້ຈຳກັດໂຄຕາ (${response.statusCode}) — ລໍຖ້າ $delaySecs ວິນາທີ ($attempt/$maxAttempts)...');
+            final delaySecs = 3 * attempt;
+            onProgress?.call('Gemini ຄົນໃຊ້ຫຼາຍ (${response.statusCode}) — ລໍຖ້າ $delaySecs ວິນາທີ ($attempt/$maxAttempts)...');
             await Future.delayed(Duration(seconds: delaySecs));
             continue;
           } else {
             break;
           }
         }
-        
-        if (response == null || response.statusCode != 200) continue; 
+
+        if (response == null || response.statusCode != 200) continue;
 
         final data = jsonDecode(response.body) as Map<String, dynamic>;
         final parts = (data['candidates']?[0]?['content'] as Map<String, dynamic>?)?['parts'] as List<dynamic>?;
@@ -877,8 +972,6 @@ class GeminiSpeechService {
 
     onProgress?.call('Gemini ກຳລັງແປພາສາ...');
     
-    final flash35Endpoint = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent';
-
     const chunkSize = 40;
     for (int i = 0; i < segments.length; i += chunkSize) {
       final end = (i + chunkSize > segments.length) ? segments.length : i + chunkSize;
@@ -981,13 +1074,17 @@ class GeminiSpeechService {
 
       try {
         http.Response? response;
-        const maxAttempts = 4;
+        const maxAttempts = 5;
+        bool quotaFallback = false;
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-          final activeEndpoint = flash35Endpoint;
-          final uri = Uri.parse('$activeEndpoint?key=$apiKey');
-          
+          final useFallback = quotaFallback || attempt == maxAttempts;
+          final activeModel = useFallback ? _fallbackModel : _primaryModel;
+          final uri = Uri.parse('${_endpointFor(activeModel)}?key=$apiKey');
+
           if (attempt >= 2) {
-            onProgress?.call('Gemini 3.5 Flash ບໍ່ຫວ່າງ, ກຳລັງລອງໃໝ່ ($attempt/$maxAttempts)...');
+            onProgress?.call(useFallback
+                ? 'ສະລັບໄປໃຊ້ Gemini ຮຸ່ນສຳຮອງ...'
+                : '$activeModel ບໍ່ຫວ່າງ, ກຳລັງລອງໃໝ່ ($attempt/$maxAttempts)...');
           }
 
           try {
@@ -998,26 +1095,33 @@ class GeminiSpeechService {
             ).timeout(const Duration(seconds: 45));
           } catch (_) {
             if (attempt >= maxAttempts) break;
-            await Future.delayed(Duration(seconds: 4 * attempt));
+            await Future.delayed(Duration(seconds: 3 * attempt));
             continue;
           }
-          
+
           if (response.statusCode == 200) {
             break;
           }
-          
+
+          // 429 on primary = daily quota gone → jump to fallback model now.
+          if (response.statusCode == 429 && !useFallback && !quotaFallback) {
+            quotaFallback = true;
+            await Future.delayed(const Duration(seconds: 1));
+            continue;
+          }
+
           final retryable = response.statusCode == 429 || response.statusCode == 503 || response.statusCode == 500;
           if (retryable && attempt < maxAttempts) {
-            final delaySecs = 4 * attempt;
-            onProgress?.call('Gemini ຂໍ້ຈຳກັດໂຄຕາ (${response.statusCode}) — ລໍຖ້າ $delaySecs ວິນາທີ ($attempt/$maxAttempts)...');
+            final delaySecs = 3 * attempt;
+            onProgress?.call('Gemini ຄົນໃຊ້ຫຼາຍ (${response.statusCode}) — ລໍຖ້າ $delaySecs ວິນາທີ ($attempt/$maxAttempts)...');
             await Future.delayed(Duration(seconds: delaySecs));
             continue;
           } else {
             break;
           }
         }
-        
-        if (response == null || response.statusCode != 200) continue; 
+
+        if (response == null || response.statusCode != 200) continue;
 
         final data = jsonDecode(response.body) as Map<String, dynamic>;
         final parts = (data['candidates']?[0]?['content'] as Map<String, dynamic>?)?['parts'] as List<dynamic>?;
@@ -1048,6 +1152,252 @@ class GeminiSpeechService {
         }
       } catch (_) {
         // Continue to next batch on error
+      }
+    }
+  }
+
+  /// For each subtitle line, suggest a SHORT English meme/GIF search query
+  /// (1–3 words, e.g. "shocked", "money rain", "facepalm"). Returns "" for lines
+  /// that don't need a meme. Same length & order as [texts].
+  Future<List<String>> suggestMemeQueries(List<String> texts) async {
+    if (texts.isEmpty) return [];
+    final prompt =
+        'For each subtitle line below, give a SHORT English search query (1-3 words) '
+        'for a funny/reaction meme GIF that fits its vibe (e.g. "shocked", "money rain", '
+        '"facepalm", "clapping", "mind blown"). If a line is plain/neutral and needs no '
+        'meme, return "". Keep the SAME number of items (${texts.length}) in order. '
+        'Return ONLY a JSON array of strings.\n\nInput: ${jsonEncode(texts)}';
+    final body = jsonEncode({
+      'contents': [{'parts': [{'text': prompt}]}],
+      'generationConfig': {'temperature': 0.5},
+    });
+    String responseBody = '';
+    int statusCode = 0;
+    bool quotaFallback = false;
+    const maxAttempts = 4;
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+      final useFallback = quotaFallback || attempt == maxAttempts;
+      final uri = Uri.parse(
+          '${_endpointFor(useFallback ? _fallbackModel : _primaryModel)}?key=$apiKey');
+      http.Response resp;
+      try {
+        resp = await http
+            .post(uri, headers: {'Content-Type': 'application/json'}, body: body)
+            .timeout(const Duration(seconds: 45));
+      } catch (_) {
+        if (attempt >= maxAttempts) return List.filled(texts.length, '');
+        await Future.delayed(Duration(seconds: 2 * attempt));
+        continue;
+      }
+      statusCode = resp.statusCode;
+      responseBody = resp.body;
+      if (statusCode == 200) break;
+      if (statusCode == 429 && !useFallback && !quotaFallback) {
+        quotaFallback = true;
+        await Future.delayed(const Duration(seconds: 1));
+        continue;
+      }
+      if ((statusCode == 503 || statusCode == 500) && attempt < maxAttempts) {
+        await Future.delayed(Duration(seconds: 2 * attempt));
+        continue;
+      }
+      break;
+    }
+    if (statusCode != 200) return List.filled(texts.length, '');
+    try {
+      final data = jsonDecode(responseBody) as Map<String, dynamic>;
+      final parts = (data['candidates']?[0]?['content']
+          as Map<String, dynamic>?)?['parts'] as List<dynamic>?;
+      var raw = (parts?[0]['text'] as String? ?? '').trim();
+      raw = raw.replaceAll('```json', '').replaceAll('```', '').trim();
+      final s = raw.indexOf('[');
+      final e = raw.lastIndexOf(']');
+      if (s == -1 || e == -1) return List.filled(texts.length, '');
+      final list = jsonDecode(raw.substring(s, e + 1)) as List<dynamic>;
+      final out = list.map((x) => x.toString().trim()).toList();
+      // pad/truncate to texts.length for safety
+      if (out.length < texts.length) {
+        out.addAll(List.filled(texts.length - out.length, ''));
+      }
+      return out.sublist(0, texts.length);
+    } catch (_) {
+      return List.filled(texts.length, '');
+    }
+  }
+
+  /// For each subtitle line, suggest a SHORT English stock-photo search query
+  /// describing the REAL VISUAL SUBJECT to show as B-roll (a place, object,
+  /// scene, food, animal, activity). Abstract/filler/greeting lines return ""
+  /// (no B-roll). Used by the auto B-roll feature.
+  Future<List<String>> suggestBrollQueries(List<String> texts) async {
+    if (texts.isEmpty) return [];
+    final prompt =
+        'For each subtitle line below, give a SHORT English stock-photo search '
+        'query (1-3 words) describing the REAL VISUAL SUBJECT to show as B-roll '
+        '(a concrete, photogenic place/object/scene/food/animal/activity — e.g. '
+        '"mountain lake", "street food", "city at night", "coffee cup", '
+        '"ocean waves", "rice field"). If a line is abstract, filler, a greeting, '
+        'or has nothing concrete to show, return "". Keep the SAME number of '
+        'items (${texts.length}) in order. Return ONLY a JSON array of strings.'
+        '\n\nInput: ${jsonEncode(texts)}';
+    final body = jsonEncode({
+      'contents': [{'parts': [{'text': prompt}]}],
+      'generationConfig': {'temperature': 0.4},
+    });
+    String responseBody = '';
+    int statusCode = 0;
+    bool quotaFallback = false;
+    const maxAttempts = 4;
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+      final useFallback = quotaFallback || attempt == maxAttempts;
+      final uri = Uri.parse(
+          '${_endpointFor(useFallback ? _fallbackModel : _primaryModel)}?key=$apiKey');
+      http.Response resp;
+      try {
+        resp = await http
+            .post(uri, headers: {'Content-Type': 'application/json'}, body: body)
+            .timeout(const Duration(seconds: 45));
+      } catch (_) {
+        if (attempt >= maxAttempts) return List.filled(texts.length, '');
+        await Future.delayed(Duration(seconds: 2 * attempt));
+        continue;
+      }
+      statusCode = resp.statusCode;
+      responseBody = resp.body;
+      if (statusCode == 200) break;
+      if (statusCode == 429 && !useFallback && !quotaFallback) {
+        quotaFallback = true;
+        await Future.delayed(const Duration(seconds: 1));
+        continue;
+      }
+      if ((statusCode == 503 || statusCode == 500) && attempt < maxAttempts) {
+        await Future.delayed(Duration(seconds: 2 * attempt));
+        continue;
+      }
+      break;
+    }
+    if (statusCode != 200) return List.filled(texts.length, '');
+    try {
+      final data = jsonDecode(responseBody) as Map<String, dynamic>;
+      final parts = (data['candidates']?[0]?['content']
+          as Map<String, dynamic>?)?['parts'] as List<dynamic>?;
+      var raw = (parts?[0]['text'] as String? ?? '').trim();
+      raw = raw.replaceAll('```json', '').replaceAll('```', '').trim();
+      final s = raw.indexOf('[');
+      final e = raw.lastIndexOf(']');
+      if (s == -1 || e == -1) return List.filled(texts.length, '');
+      final list = jsonDecode(raw.substring(s, e + 1)) as List<dynamic>;
+      final out = list.map((x) => x.toString().trim()).toList();
+      if (out.length < texts.length) {
+        out.addAll(List.filled(texts.length - out.length, ''));
+      }
+      return out.sublist(0, texts.length);
+    } catch (_) {
+      return List.filled(texts.length, '');
+    }
+  }
+
+  /// Second pass: send the FULL transcript text back to Gemini to fix spelling,
+  /// typos and cross-chunk consistency — WITHOUT changing meaning, order, or the
+  /// number of lines (so timings stay aligned). Edits `segment.text` in place.
+  Future<void> proofreadSegments({
+    required List<SubtitleSegment> segments,
+    required String language,
+    String hint = '',
+    void Function(String)? onProgress,
+  }) async {
+    if (segments.isEmpty) return;
+    final langName = switch (language) {
+      'lo' => 'Lao (ພາສາລາວ)',
+      'th' => 'Thai (ภาษาไทย)',
+      'en' => 'English',
+      _ => 'Lao (ພາສາລາວ)',
+    };
+    final h = hint.trim();
+    final glossary = h.isEmpty
+        ? ''
+        : '\nProper nouns / names to spell correctly when they appear: $h\n';
+
+    onProgress?.call('Gemini ກຳລັງກວດທານ...');
+    const chunkSize = 40;
+    for (int i = 0; i < segments.length; i += chunkSize) {
+      final end = (i + chunkSize > segments.length) ? segments.length : i + chunkSize;
+      final batch = segments.sublist(i, end);
+      final texts = batch.map((s) => s.text).toList();
+      onProgress?.call('Gemini ກຳລັງກວດທານ (${i + 1}-$end/${segments.length})...');
+
+      final prompt =
+          'You are a $langName subtitle proofreader. Below is a JSON array of subtitle lines transcribed from speech.\n'
+          'Fix ONLY: spelling/typos, wrong/garbled characters, missing or extra spacing, and consistency of repeated names across lines.\n'
+          'DO NOT: change the meaning, rephrase, translate, merge, split, reorder, add, or remove any line.\n'
+          'Keep numbers as digits and keep English/brand words as-is.$glossary'
+          'Return ONLY a valid JSON array of EXACTLY ${texts.length} strings, in the same order. No markdown, no explanations.\n\n'
+          'Input: ${jsonEncode(texts)}';
+
+      final body = jsonEncode({
+        'contents': [{'parts': [{'text': prompt}]}],
+        'generationConfig': {'temperature': 0.0},
+      });
+
+      try {
+        http.Response? response;
+        const maxAttempts = 4;
+        bool quotaFallback = false;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+          final useFallback = quotaFallback || attempt == maxAttempts;
+          final uri = Uri.parse(
+              '${_endpointFor(useFallback ? _fallbackModel : _primaryModel)}?key=$apiKey');
+          try {
+            response = await http
+                .post(uri, headers: {'Content-Type': 'application/json'}, body: body)
+                .timeout(const Duration(seconds: 45));
+          } catch (_) {
+            if (attempt >= maxAttempts) break;
+            await Future.delayed(Duration(seconds: 3 * attempt));
+            continue;
+          }
+          if (response.statusCode == 200) break;
+          if (response.statusCode == 429 && !useFallback && !quotaFallback) {
+            quotaFallback = true;
+            await Future.delayed(const Duration(seconds: 1));
+            continue;
+          }
+          final retryable = response.statusCode == 429 ||
+              response.statusCode == 503 ||
+              response.statusCode == 500;
+          if (retryable && attempt < maxAttempts) {
+            await Future.delayed(Duration(seconds: 3 * attempt));
+            continue;
+          }
+          break;
+        }
+        if (response == null || response.statusCode != 200) continue;
+
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        final parts = (data['candidates']?[0]?['content']
+            as Map<String, dynamic>?)?['parts'] as List<dynamic>?;
+        if (parts == null || parts.isEmpty) continue;
+        var raw = (parts[0]['text'] as String? ?? '').trim();
+        raw = raw.replaceAll('```json', '').replaceAll('```', '').trim();
+        final s = raw.indexOf('[');
+        final e = raw.lastIndexOf(']');
+        if (s == -1 || e == -1) continue;
+        final list = jsonDecode(raw.substring(s, e + 1)) as List<dynamic>;
+
+        // Safety: only apply if the count matches exactly (keeps timing aligned).
+        if (list.length == batch.length) {
+          for (int j = 0; j < batch.length; j++) {
+            final fixed = list[j].toString().trim();
+            if (fixed.isNotEmpty && fixed != batch[j].text) {
+              batch[j].text = fixed;
+              // Re-derive word units later so karaoke stays correct.
+              batch[j].words = null;
+              batch[j].wordTimings = null;
+            }
+          }
+        }
+      } catch (_) {
+        // best-effort — skip this batch on error
       }
     }
   }

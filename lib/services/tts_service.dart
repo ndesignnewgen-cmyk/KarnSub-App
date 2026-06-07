@@ -1,25 +1,56 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import '../models/subtitle_style_model.dart';
 import '../services/api_config.dart';
-import 'audio_synth.dart';
+import '../services/api_config.dart';
 
 class TtsService {
-  // Premium curated fallback catalog for standard ElevenLabs voices (multilingual)
-  static const List<Map<String, String>> _fallbackElevenVoices = [
-    {'name': 'Rachel', 'locale': '21m00Tcm4TlvDq8ikWAM', 'gender': 'female'},
-    {'name': 'Clyde', 'locale': '2EiwWnXF2V4j26hz8ZHL', 'gender': 'male'},
-    {'name': 'Adam', 'locale': 'pNInz6obpgq5paNs9W5D', 'gender': 'male'},
-    {'name': 'Nicole', 'locale': 'piTKgcLEGmPEeDFServer', 'gender': 'female'},
-    {'name': 'Antoni', 'locale': 'ErXwobaYiN019PkySvjV', 'gender': 'male'},
-    {'name': 'Bella', 'locale': 'EXAVITQu4vr4xnSDxMaL', 'gender': 'female'},
-    {'name': 'Domi', 'locale': 'AZnzlk1XvdvUeBnXmlld', 'gender': 'female'},
-    {'name': 'Elli', 'locale': 'MF3mGyEYCl7XYWbV9VbO', 'gender': 'female'},
-    {'name': 'Josh', 'locale': 'TxGEqn7nUJQDX49t3u4g', 'gender': 'male'},
-    {'name': 'Arnold', 'locale': 'VR6A4mxSTDL5QQGgMiPP', 'gender': 'male'},
+  static const _channel = MethodChannel('com.anniekaydee.subtitle_app/audio');
+
+  static const _primaryTtsModel = 'gemini-3.1-flash-tts-preview';
+  static const _fallbackTtsModel = 'gemini-2.5-flash-preview-tts';
+  
+  static String _getTtsEndpoint(String model) {
+    return 'https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent';
+  }
+
+  // The 30 Gemini prebuilt voices. `name` = friendly label shown to the user,
+  // `locale` = the Gemini voiceName, `gender` is best-effort for the UI tag.
+  static const List<Map<String, String>> _geminiVoices = [
+    {'name': 'Zephyr', 'locale': 'Zephyr', 'gender': 'female'},
+    {'name': 'Puck', 'locale': 'Puck', 'gender': 'male'},
+    {'name': 'Charon', 'locale': 'Charon', 'gender': 'male'},
+    {'name': 'Kore', 'locale': 'Kore', 'gender': 'female'},
+    {'name': 'Fenrir', 'locale': 'Fenrir', 'gender': 'male'},
+    {'name': 'Leda', 'locale': 'Leda', 'gender': 'female'},
+    {'name': 'Orus', 'locale': 'Orus', 'gender': 'male'},
+    {'name': 'Aoede', 'locale': 'Aoede', 'gender': 'female'},
+    {'name': 'Callirrhoe', 'locale': 'Callirrhoe', 'gender': 'female'},
+    {'name': 'Autonoe', 'locale': 'Autonoe', 'gender': 'female'},
+    {'name': 'Enceladus', 'locale': 'Enceladus', 'gender': 'male'},
+    {'name': 'Iapetus', 'locale': 'Iapetus', 'gender': 'male'},
+    {'name': 'Umbriel', 'locale': 'Umbriel', 'gender': 'male'},
+    {'name': 'Algieba', 'locale': 'Algieba', 'gender': 'male'},
+    {'name': 'Despina', 'locale': 'Despina', 'gender': 'female'},
+    {'name': 'Erinome', 'locale': 'Erinome', 'gender': 'female'},
+    {'name': 'Algenib', 'locale': 'Algenib', 'gender': 'male'},
+    {'name': 'Rasalgethi', 'locale': 'Rasalgethi', 'gender': 'male'},
+    {'name': 'Laomedeia', 'locale': 'Laomedeia', 'gender': 'female'},
+    {'name': 'Achernar', 'locale': 'Achernar', 'gender': 'female'},
+    {'name': 'Alnilam', 'locale': 'Alnilam', 'gender': 'male'},
+    {'name': 'Schedar', 'locale': 'Schedar', 'gender': 'male'},
+    {'name': 'Gacrux', 'locale': 'Gacrux', 'gender': 'female'},
+    {'name': 'Pulcherrima', 'locale': 'Pulcherrima', 'gender': 'female'},
+    {'name': 'Achird', 'locale': 'Achird', 'gender': 'male'},
+    {'name': 'Zubenelgenubi', 'locale': 'Zubenelgenubi', 'gender': 'male'},
+    {'name': 'Vindemiatrix', 'locale': 'Vindemiatrix', 'gender': 'female'},
+    {'name': 'Sadachbia', 'locale': 'Sadachbia', 'gender': 'male'},
+    {'name': 'Sadaltager', 'locale': 'Sadaltager', 'gender': 'male'},
+    {'name': 'Sulafat', 'locale': 'Sulafat', 'gender': 'female'},
   ];
 
   TtsService();
@@ -28,59 +59,10 @@ class TtsService {
     return ['lo', 'th', 'en'];
   }
 
-  /// Dynamically queries ElevenLabs for supported and cloned voices.
-  /// Falls back to premium standard offline catalog if key is missing or offline.
+  /// Returns the 30 Gemini prebuilt voices.
+  /// No network call — Gemini voices are a fixed catalog.
   Future<List<Map<String, String>>> getVoicesForLanguage(String langCode) async {
-    final sfxOption = {
-      'name': 'ສະເພາະເອັບເຟັກສຽງ SFX (SFX Only)',
-      'locale': 'sfx_only',
-      'gender': 'neutral',
-    };
-
-    // 1. Try to fetch dynamic voices from ElevenLabs API if key is present
-    final apiKey = await ApiConfig.getElevenLabsKey();
-    if (apiKey != null && apiKey.isNotEmpty) {
-      try {
-        final url = Uri.parse('https://api.elevenlabs.io/v1/voices');
-        final response = await http.get(
-          url,
-          headers: {'xi-api-key': apiKey},
-        ).timeout(const Duration(seconds: 5));
-
-        if (response.statusCode == 200) {
-          final data = jsonDecode(response.body);
-          final voicesList = data['voices'] as List?;
-          if (voicesList != null) {
-            final result = <Map<String, String>>[];
-            for (final v in voicesList) {
-              final m = Map<String, dynamic>.from(v);
-              final name = m['name'] as String? ?? '';
-              final voiceId = m['voice_id'] as String? ?? '';
-              
-              // Extract gender from voice labels if present
-              final labels = Map<String, dynamic>.from(m['labels'] ?? {});
-              final gender = (labels['gender'] as String? ?? 'unknown').toLowerCase();
-              
-              result.add({
-                'name': name,
-                'locale': voiceId, // store ElevenLabs voice_id in locale
-                'gender': gender,
-              });
-            }
-            if (result.isNotEmpty) {
-              // Sort standard, custom logically
-              result.sort((a, b) => a['name']!.compareTo(b['name']!));
-              return [sfxOption, ...result];
-            }
-          }
-        }
-      } catch (_) {
-        // Fall back to offline static lists on error or timeout
-      }
-    }
-
-    // 2. Return premium curated fallback catalog
-    return [sfxOption, ..._fallbackElevenVoices];
+    return _geminiVoices;
   }
 
   /// Synthesizes each segment's text to a temp WAV file using ElevenLabs, then
@@ -93,363 +75,190 @@ class TtsService {
     required double speechRate,
     required bool useTranslation,
     required String outputWavPath,
-    String? outputSfxWavPath,
-    required bool autoSyncSfx,
-    List<SfxBlock>? sfxBlocks,
     void Function(String)? onProgress,
   }) async {
     if (segments.isEmpty) return 'ບໍ່ມີຄຳບັນຍາຍເພື່ອພາກສຽງ';
 
-    final bool isSfxOnly = voiceName == 'ສະເພາະເອັບເຟັກສຽງ SFX (SFX Only)';
+    if (segments.isEmpty) return 'ບໍ່ມີຄຳບັນຍາຍເພື່ອພາກສຽງ';
 
-    if (isSfxOnly) {
-      onProgress?.call('ກຳລັງສ້າງເອັບເຟັກສຽງອັດສະລິຍະ...');
-      final sampleRate = 24000;
-      final channels = 1;
-      final bitsPerSample = 16;
-      final bytesPerSample = bitsPerSample ~/ 8;
-      
-      // Calculate total duration
-      int totalDurationMs = 0;
-      for (final seg in segments) {
-        if (seg.endTime.inMilliseconds > totalDurationMs) {
-          totalDurationMs = seg.endTime.inMilliseconds;
-        }
-      }
-      if (totalDurationMs == 0) totalDurationMs = 10000; // fallback
-      
-      final numSamples = (totalDurationMs / 1000.0 * sampleRate).toInt();
-      final flatPcmBytes = Uint8List(numSamples * channels * bytesPerSample);
-      
-      final popSfx = AudioSynth.generatePop(sampleRate);
-      final dingSfx = AudioSynth.generateDing(sampleRate);
-      final bytesPerMs = (sampleRate * channels * bytesPerSample) ~/ 1000;
-      
-      for (final seg in segments) {
-        // Play Pop SFX if there's an emoji
-        if (seg.emoji != null && seg.emoji!.isNotEmpty) {
-          final startMs = seg.startTime.inMilliseconds;
-          final offset = startMs * bytesPerMs;
-          _mixPcm(flatPcmBytes, popSfx, offset);
-        }
-        
-        // Play Ding SFX for emphasis words
-        if (seg.emphasis != null && seg.emphasis!.isNotEmpty) {
-          if (seg.wordTimings != null && seg.wordTimings!.isNotEmpty) {
-            for (final idx in seg.emphasis!) {
-              if (idx < seg.wordTimings!.length) {
-                final wordTimeMs = seg.wordTimings![idx].inMilliseconds;
-                final offset = wordTimeMs * bytesPerMs;
-                _mixPcm(flatPcmBytes, dingSfx, offset);
-              }
-            }
-          } else {
-            final startMs = seg.startTime.inMilliseconds;
-            final offset = startMs * bytesPerMs;
-            _mixPcm(flatPcmBytes, dingSfx, offset);
-          }
-        }
-      }
-      
-      // Write to file
-      final outputFile = File(outputWavPath);
-      final waveHeader = _buildWavHeader(
-        totalPcmSize: flatPcmBytes.length,
-        channels: channels,
-        sampleRate: sampleRate,
-        bitsPerSample: bitsPerSample,
-      );
-      
-      final outputBytes = BytesBuilder();
-      outputBytes.add(waveHeader);
-      outputBytes.add(flatPcmBytes);
-      await outputFile.writeAsBytes(outputBytes.toBytes());
-      return null; // Success!
-    }
-
-    final apiKey = await ApiConfig.getElevenLabsKey();
-    if (apiKey == null || apiKey.isEmpty) {
-      onProgress?.call('ບໍ່ພົບ API Key. ກາລຸນາຕັ້ງຄ່າກ່ອນ.');
-      return 'ບໍ່ພົບ API Key ຂອງ ElevenLabs. ກະລຸນາກວດສອບໜ້າຕັ້ງຄ່າ API Key';
-    }
-
-    // Determine voice ID from selected voice name (lookup dynamic list)
-    onProgress?.call('ກຳລັງກວດສອບລາຍຊື່ສຽງພາກ...');
+    // Resolve the selected friendly name → Gemini voiceName.
+    onProgress?.call('ກຳລັງກຽມພາກສຽງ...');
     final voices = await getVoicesForLanguage(languageCode);
     final matchedVoice = voices.firstWhere(
       (v) => v['name'] == voiceName,
-      orElse: () => voices.isNotEmpty ? voices.first : _fallbackElevenVoices.first,
+      orElse: () => _geminiVoices.first,
     );
-    final voiceId = matchedVoice['locale'] ?? '21m00Tcm4TlvDq8ikWAM';
+    final voiceId = matchedVoice['locale'] ?? 'Kore';
 
-    final tempDir = await getTemporaryDirectory();
-    final List<({int startMs, int endMs, File file})> chunks = [];
+    final apiKey = await ApiConfig.getApiKey(); // Gemini key (same as transcription)
+    if (apiKey == null || apiKey.isEmpty) {
+      onProgress?.call('ບໍ່ພົບ Gemini API Key. ກະລຸນາຕັ້ງຄ່າກ່ອນ.');
+      return 'ບໍ່ພົບ Gemini API Key. ກະລຸນາໃສ່ Gemini Key ໃນໜ້າຕັ້ງຄ່າ';
+    }
 
     try {
-      onProgress?.call('ກຳລັງກຽມພາກສຽງດ້ວຍ ElevenLabs...');
+      // ──────────────────────────────────────────────────────────────────
+      // Single-request TTS (Fast Professional Style)
+      // Combines all text without punctuation to force continuous, fast speech
+      // ──────────────────────────────────────────────────────────────────
+      onProgress?.call('ກຳລັງລວມຂໍ້ຄວາມສຳລັບພາກສຽງ...');
 
-      // 1. Synthesize each segment using ElevenLabs REST API
-      for (int i = 0; i < segments.length; i++) {
-        final seg = segments[i];
-        final text = (useTranslation ? (seg.translatedText ?? seg.text) : seg.text).trim();
-        if (text.isEmpty) continue;
-
-        onProgress?.call('ກຳລັງສັງເຄາະສຽງປະໂຫຍກທີ່ ${i + 1}/${segments.length}...');
-        final tempFile = File('${tempDir.path}/tts_chunk_${DateTime.now().millisecondsSinceEpoch}_$i.wav');
-
-        // Post request to ElevenLabs S16LE PCM 24kHz stream endpoint
-        final url = Uri.parse('https://api.elevenlabs.io/v1/text-to-speech/$voiceId?output_format=pcm_24000');
-        final payload = {
-          'text': text,
-          'model_id': 'eleven_multilingual_v2',
-          'voice_settings': {
-            'stability': 0.5,
-            'similarity_boost': 0.75,
-          }
-        };
-
-        final response = await http.post(
-          url,
-          headers: {
-            'xi-api-key': apiKey,
-            'Content-Type': 'application/json',
-          },
-          body: jsonEncode(payload),
-        );
-
-        if (response.statusCode == 200) {
-          final rawPcmBytes = response.bodyBytes;
-          if (rawPcmBytes.isNotEmpty) {
-            // ElevenLabs returns raw pcm_24000 S16LE bytes. Prepend standard 44-byte WAV header.
-            final header = _buildWavHeader(
-              totalPcmSize: rawPcmBytes.length,
-              channels: 1, // Mono
-              sampleRate: 24000, // 24 kHz
-              bitsPerSample: 16, // 16-bit
-            );
-
-            final wavBuilder = BytesBuilder();
-            wavBuilder.add(header);
-            wavBuilder.add(rawPcmBytes);
-
-            await tempFile.writeAsBytes(wavBuilder.toBytes());
-
-            if (tempFile.existsSync() && tempFile.lengthSync() > 44) {
-              chunks.add((
-                startMs: seg.startTime.inMilliseconds,
-                endMs: seg.endTime.inMilliseconds,
-                file: tempFile,
-              ));
-            }
-          } else {
-            throw Exception('Response bodyBytes is empty');
-          }
-        } else {
-          final statusCode = response.statusCode;
-          String details = response.body;
-          try {
-            final json = jsonDecode(response.body);
-            details = json['detail']?['message'] ?? json['error']?['message'] ?? response.body;
-          } catch (_) {}
-          
-          if (statusCode == 401) {
-            return 'ElevenLabs Error (401): API Key ບໍ່ຖືກຕ້ອງ (Invalid API Key). ກະລຸນາກວດສອບ Key ຄືນໃໝ່.';
-          } else if (statusCode == 403) {
-            return 'ElevenLabs Error (403): ໂຄຕາໝົດ ຫຼື ຕົວອັກສອນໝົດ (Out of characters/credits). ກະລຸນາກວດສອບແພັກເກັດຂອງທ່ານ.';
-          } else if (statusCode == 400 && details.contains('restricted')) {
-            return 'ElevenLabs Error (400): Key ຖືກຈຳກັດສິດ (Restricted Key). ກະລຸນາກວດສອບວ່າໄດ້ອະນຸມັດ "Text to Speech" ໃຫ້ກັບ Key ຕົວນີ້ແລ້ວ ຫຼື ປິດປຸ່ມ Restrict Key ໃນ ElevenLabs Dashboard.';
-          }
-          
-          final errMsg = 'ElevenLabs API Error $statusCode: $details';
-          onProgress?.call('ເກີດຂໍ້ຜິດພາດ: $errMsg');
-          throw Exception(errMsg);
-        }
+      final allTexts = <String>[];
+      for (final seg in segments) {
+        // Remove pauses (., \n) to force continuous fast speaking
+        String text = (useTranslation ? (seg.translatedText ?? seg.text) : seg.text).trim();
+        text = text.replaceAll('\n', ' ').replaceAll('.', ' ').replaceAll(',', ' ');
+        if (text.isNotEmpty) allTexts.add(text);
       }
 
-      if (chunks.isEmpty) {
-        onProgress?.call('ບໍ່ມີຂໍ້ຄວາມສຳລັບການພາກສຽງ');
+      if (allTexts.isEmpty) {
         return 'ບໍ່ມີຂໍ້ຄວາມທີ່ສາມາດພາກສຽງໄດ້';
       }
 
-      onProgress?.call('ກຳລັງຈັດຊ່ວງເວລາໃຫ້ຕົງປາກ...');
-      
-      // 2. Read the first WAV file header to extract audio specs (SampleRate, Channels)
-      final firstFileBytes = await chunks.first.file.readAsBytes();
-      if (firstFileBytes.length < 44) return 'ໄຟລ໌ສຽງພາກຊົ່ວຄາວເສຍຫາຍ';
-      
-      final channels = ByteData.sublistView(firstFileBytes, 22, 24).getInt16(0, Endian.little);
-      final sampleRate = ByteData.sublistView(firstFileBytes, 24, 28).getInt32(0, Endian.little);
-      final bitsPerSample = ByteData.sublistView(firstFileBytes, 34, 36).getInt16(0, Endian.little);
-      final bytesPerSample = bitsPerSample ~/ 8;
-      
-      // 3. Stitched Audio Data Buffer
-      final List<Uint8List> pcmBuffers = [];
-      int currentTimelineMs = 0;
+      // Join with space so there are no sentence breaks
+      final combinedText = allTexts.join(' ');
 
-      for (final chunk in chunks) {
-        // A. Calculate silence gap from currentTimelineMs to chunk's startMs
-        final silenceMs = chunk.startMs - currentTimelineMs;
-        if (silenceMs > 0) {
-          final numSamples = (silenceMs / 1000.0 * sampleRate).toInt();
-          final silenceByteSize = numSamples * channels * bytesPerSample;
-          final silenceBytes = Uint8List(silenceByteSize); // all initialized to 0x00
-          pcmBuffers.add(silenceBytes);
-          currentTimelineMs = chunk.startMs;
-        }
+      onProgress?.call('ກຳລັງສັງເຄາະສຽງ AI ແບບຕໍ່ເນື່ອງ (${allTexts.length} ປະໂຫຍກ)...');
 
-        // B. Read the raw PCM data (excluding the WAV header)
-        final chunkBytes = await chunk.file.readAsBytes();
-        
-        // Find "data" chunk offset to safely extract raw PCM
-        int dataOffset = 44;
-        for (int offset = 12; offset < chunkBytes.length - 8; offset++) {
-          if (chunkBytes[offset] == 100 && // 'd'
-              chunkBytes[offset + 1] == 97 && // 'a'
-              chunkBytes[offset + 2] == 116 && // 't'
-              chunkBytes[offset + 3] == 97) { // 'a'
-            dataOffset = offset + 8;
-            break;
+      final payload = {
+        'contents': [
+          {
+            'parts': [
+              {'text': combinedText}
+            ]
+          }
+        ],
+        'generationConfig': {
+          'responseModalities': ['AUDIO'],
+          'speechConfig': {
+            'voiceConfig': {
+              'prebuiltVoiceConfig': {'voiceName': voiceId}
+            }
           }
         }
-        
-        if (dataOffset < chunkBytes.length) {
-          final rawPcm = chunkBytes.sublist(dataOffset);
-          pcmBuffers.add(rawPcm);
-          
-          final chunkDurationMs = (rawPcm.length / (sampleRate * channels * bytesPerSample) * 1000).toInt();
-          currentTimelineMs += chunkDurationMs;
+      };
+
+      http.Response? response;
+      const maxRetries = 5;
+      String currentModel = _primaryTtsModel;
+      bool usedFallback = false;
+      
+      for (int attempt = 1; attempt <= maxRetries; attempt++) {
+        final url = Uri.parse('${_getTtsEndpoint(currentModel)}?key=$apiKey');
+        try {
+          response = await http.post(
+            url,
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode(payload),
+          ).timeout(const Duration(minutes: 3));
+        } catch (e) {
+          if (attempt >= maxRetries) {
+            return 'ເຊື່ອມຕໍ່ Gemini ບໍ່ໄດ້: $e';
+          }
+          onProgress?.call('ເນັດຊ້າ ລອງໃໝ່ ($attempt/$maxRetries)...');
+          await Future.delayed(Duration(seconds: 3 * attempt));
+          continue;
         }
+
+        if (response.statusCode == 429) {
+          if (!usedFallback) {
+            onProgress?.call('ໂຄຕ້າຮຸ່ນຫຼັກເຕັມ! ກຳລັງສະລັບໄປໃຊ້ຮຸ່ນສຳຮອງ...');
+            currentModel = _fallbackTtsModel;
+            usedFallback = true;
+            continue; // retry immediately with fallback
+          }
+          if (attempt >= maxRetries) break;
+          final waitSec = 5 * attempt;
+          onProgress?.call('Quota ສຳຮອງກໍເຕັມ — ລໍຖ້າ ${waitSec}ວິ ($attempt/$maxRetries)...');
+          await Future.delayed(Duration(seconds: waitSec));
+          continue;
+        }
+        break;
       }
 
-      // 4. Concatenate pcmBuffers into a single flat Uint8List
-      final flatBuilder = BytesBuilder();
-      for (final buffer in pcmBuffers) {
-        flatBuilder.add(buffer);
+      if (response == null) {
+        return 'Gemini TTS: ບໍ່ສາມາດເຊື່ອມຕໍ່ໄດ້';
       }
-      final flatPcmBytes = flatBuilder.toBytes();
 
-      // Perform mixing on flatPcmBytes if autoSyncSfx is active
-      if (autoSyncSfx && outputSfxWavPath != null && sfxBlocks != null) {
-        final popSfx = AudioSynth.generatePop(sampleRate);
-        final dingSfx = AudioSynth.generateDing(sampleRate);
-        final swooshSfx = AudioSynth.generateSwoosh(sampleRate);
-        final chimeSfx = AudioSynth.generateChime(sampleRate);
-        final drumSfx = AudioSynth.generateDrum(sampleRate);
-        final beepSfx = AudioSynth.generateBeep(sampleRate);
-        final bubbleSfx = AudioSynth.generateBubble(sampleRate);
-        final clickSfx = AudioSynth.generateClick(sampleRate);
-        final whooshSfx = AudioSynth.generateWhoosh(sampleRate);
-        final tadaSfx = AudioSynth.generateTada(sampleRate);
-        final bounceSfx = AudioSynth.generateBounce(sampleRate);
-        final glitchSfx = AudioSynth.generateGlitch(sampleRate);
-        
-        final bytesPerMs = (sampleRate * channels * bytesPerSample) ~/ 1000;
-        
-        // Create a separate array of zeros for the SFX track
-        final sfxPcmBytes = Uint8List(flatPcmBytes.length);
+      if (response.statusCode != 200) {
+        final statusCode = response.statusCode;
+        String details = response.body;
+        try {
+          final json = jsonDecode(response.body);
+          details = json['error']?['message'] ?? response.body;
+        } catch (_) {}
 
-        for (final block in sfxBlocks) {
-          final startMs = block.startTime.inMilliseconds;
-          final offset = startMs * bytesPerMs;
-          if (block.type == SfxType.pop) {
-            _mixPcm(sfxPcmBytes, popSfx, offset);
-          } else if (block.type == SfxType.ding) {
-            _mixPcm(sfxPcmBytes, dingSfx, offset);
-          } else if (block.type == SfxType.swoosh) {
-            _mixPcm(sfxPcmBytes, swooshSfx, offset);
-          } else if (block.type == SfxType.chime) {
-            _mixPcm(sfxPcmBytes, chimeSfx, offset);
-          } else if (block.type == SfxType.drum) {
-            _mixPcm(sfxPcmBytes, drumSfx, offset);
-          } else if (block.type == SfxType.beep) {
-            _mixPcm(sfxPcmBytes, beepSfx, offset);
-          } else if (block.type == SfxType.bubble) {
-            _mixPcm(sfxPcmBytes, bubbleSfx, offset);
-          } else if (block.type == SfxType.click) {
-            _mixPcm(sfxPcmBytes, clickSfx, offset);
-          } else if (block.type == SfxType.whoosh) {
-            _mixPcm(sfxPcmBytes, whooshSfx, offset);
-          } else if (block.type == SfxType.tada) {
-            _mixPcm(sfxPcmBytes, tadaSfx, offset);
-          } else if (block.type == SfxType.bounce) {
-            _mixPcm(sfxPcmBytes, bounceSfx, offset);
-          } else if (block.type == SfxType.glitch) {
-            _mixPcm(sfxPcmBytes, glitchSfx, offset);
+        if (statusCode == 400) {
+          return 'Gemini TTS Error (400): Key ບໍ່ຖືກຕ້ອງ ຫຼື ຄຳຮ້ອງຜິດ. ກວດສອບ Gemini Key.';
+        } else if (statusCode == 403) {
+          return 'Gemini TTS Error (403): Key ບໍ່ມີສິດໃຊ້ TTS.';
+        } else if (statusCode == 429) {
+          return 'Gemini TTS (429): $details';
+        }
+        return 'Gemini TTS Error $statusCode: $details';
+      }
+
+      onProgress?.call('ກຳລັງປະມວນຜົນສຽງ...');
+      String? b64;
+      try {
+        final json = jsonDecode(response.body);
+        final parts = json['candidates']?[0]?['content']?['parts'] as List?;
+        if (parts != null) {
+          for (final pt in parts) {
+            final inline = pt['inlineData'] ?? pt['inline_data'];
+            if (inline != null && inline['data'] != null) {
+              b64 = inline['data'] as String;
+              break;
+            }
           }
         }
+      } catch (_) {}
 
-        // Save the SFX track separately
-        final sfxOutputFile = File(outputSfxWavPath);
-        final sfxWaveHeader = _buildWavHeader(
-          totalPcmSize: sfxPcmBytes.length,
+      if (b64 == null || b64.isEmpty) {
+        String shortBody = response.body.length > 300 ? response.body.substring(0, 300) + '...' : response.body;
+        return 'Gemini TTS ບໍ່ສົ່ງສຽງກັບມາ. Response: $shortBody';
+      }
+
+      final rawPcmBytes = base64Decode(b64);
+      
+      final isAlreadyWav = rawPcmBytes.length >= 4 &&
+          rawPcmBytes[0] == 82 && // 'R'
+          rawPcmBytes[1] == 73 && // 'I'
+          rawPcmBytes[2] == 70 && // 'F'
+          rawPcmBytes[3] == 70;   // 'F'
+
+      final Uint8List wavBytes;
+      if (isAlreadyWav) {
+        wavBytes = rawPcmBytes;
+      } else {
+        const sampleRate = 24000;
+        const channels = 1;
+        const bitsPerSample = 16;
+        
+        final header = _buildWavHeader(
+          totalPcmSize: rawPcmBytes.length,
           channels: channels,
           sampleRate: sampleRate,
           bitsPerSample: bitsPerSample,
         );
-        final sfxOutputBytes = BytesBuilder();
-        sfxOutputBytes.add(sfxWaveHeader);
-        sfxOutputBytes.add(sfxPcmBytes);
-        await sfxOutputFile.writeAsBytes(sfxOutputBytes.toBytes());
+
+        final wavBuilder = BytesBuilder();
+        wavBuilder.add(header);
+        wavBuilder.add(rawPcmBytes);
+        wavBytes = wavBuilder.toBytes();
       }
 
-      // Create output WAV file and write 44-byte WAV header (Main TTS only)
       final outputFile = File(outputWavPath);
-      final waveHeader = _buildWavHeader(
-        totalPcmSize: flatPcmBytes.length,
-        channels: channels,
-        sampleRate: sampleRate,
-        bitsPerSample: bitsPerSample,
-      );
+      await outputFile.writeAsBytes(wavBytes);
 
-      final outputBytes = BytesBuilder();
-      outputBytes.add(waveHeader);
-      outputBytes.add(flatPcmBytes);
-
-      await outputFile.writeAsBytes(outputBytes.toBytes());
-
-      // 5. Clean up temporary chunk files
-      for (final chunk in chunks) {
-        try {
-          if (chunk.file.existsSync()) {
-            chunk.file.deleteSync();
-          }
-        } catch (_) {}
-      }
+      onProgress?.call('ພາກສຽງ AI ສຳເລັດ! ✅');
 
       return null; // Success!
     } catch (e) {
-      // Cleanup temp files on error
-      for (final chunk in chunks) {
-        try {
-          if (chunk.file.existsSync()) {
-            chunk.file.deleteSync();
-          }
-        } catch (_) {}
-      }
       return 'ເກີດຂໍ້ຜິດພາດໃນການພາກສຽງ: ${e.toString()}';
     }
   }
 
-  void _mixPcm(Uint8List mainPcm, Uint8List sfxPcm, int startOffset) {
-    final mainData = ByteData.view(mainPcm.buffer, mainPcm.offsetInBytes, mainPcm.lengthInBytes);
-    final sfxData = ByteData.view(sfxPcm.buffer, sfxPcm.offsetInBytes, sfxPcm.lengthInBytes);
-    
-    final numSamples = sfxPcm.length ~/ 2;
-    for (int i = 0; i < numSamples; i++) {
-      final mainIdx = startOffset + i * 2;
-      if (mainIdx + 1 >= mainPcm.length) break;
-      
-      final sfxSample = sfxData.getInt16(i * 2, Endian.little);
-      final mainSample = mainData.getInt16(mainIdx, Endian.little);
-      
-      // Linear mix and clamp
-      int mixed = mainSample + sfxSample;
-      if (mixed > 32767) mixed = 32767;
-      if (mixed < -32768) mixed = -32768;
-      
-      mainData.setInt16(mainIdx, mixed, Endian.little);
-    }
-  }
 
   Uint8List _buildWavHeader({
     required int totalPcmSize,

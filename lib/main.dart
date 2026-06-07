@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'theme/app_theme.dart';
+import 'i18n/i18n.dart';
 import 'providers/project_provider.dart';
 import 'screens/home_screen.dart';
 import 'services/custom_font_service.dart';
@@ -21,6 +22,8 @@ void main() {
       return true; // prevent crash, keep app alive
     };
 
+    // Load the saved UI language (Lao / Thai) before the first frame.
+    await I18n.init();
     // Bring up Firebase (no-op / local-only if not configured yet).
     await FirebaseService.init();
     // If a user is already signed in, refresh their PRO status from the cloud.
@@ -47,23 +50,27 @@ class SubtitleApp extends StatelessWidget {
       providers: [
         ChangeNotifierProvider(create: (_) => ProjectProvider()),
       ],
-      child: MaterialApp(
-        title: 'KarnSub',
-        debugShowCheckedModeBanner: false,
-        theme: AppTheme.dark,
-        // Lock the UI text size so it looks identical on every device,
-        // regardless of the user's system font-size setting (which is what
-        // makes the layout look oversized / overflow on some phones).
-        // We pin textScaler to 1.0 (ignore the OS font scale) like CapCut/TikTok.
-        builder: (context, child) {
-          return MediaQuery(
-            data: MediaQuery.of(context).copyWith(
-              textScaler: TextScaler.noScaling,
-            ),
-            child: child!,
-          );
-        },
-        home: const AppLoader(),
+      // Rebuild the whole app when the UI language toggles (Lao ↔ Thai).
+      child: ValueListenableBuilder<String>(
+        valueListenable: I18n.lang,
+        builder: (context, _, __) => MaterialApp(
+          title: 'KarnSub',
+          debugShowCheckedModeBanner: false,
+          theme: AppTheme.dark,
+          // Lock the UI text size so it looks identical on every device,
+          // regardless of the user's system font-size setting (which is what
+          // makes the layout look oversized / overflow on some phones).
+          // We pin textScaler to 1.0 (ignore the OS font scale) like CapCut/TikTok.
+          builder: (context, child) {
+            return MediaQuery(
+              data: MediaQuery.of(context).copyWith(
+                textScaler: TextScaler.noScaling,
+              ),
+              child: child!,
+            );
+          },
+          home: const AppLoader(),
+        ),
       ),
     );
   }
@@ -160,9 +167,9 @@ class _SplashScreen extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 6),
-            const Text(
-              'ສ້າງຊັບພາສາລາວ ອັດຕະໂນມັດ',
-              style: TextStyle(color: AppColors.textHint, fontSize: 12),
+            Text(
+              tr('app.tagline'),
+              style: const TextStyle(color: AppColors.textHint, fontSize: 12),
             ),
           ],
         ),

@@ -1,3 +1,4 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:google_sign_in/google_sign_in.dart';
@@ -6,6 +7,9 @@ import 'firebase_service.dart';
 
 /// Result of a sign-in attempt.
 enum SignInResult { success, cancelled, notConfigured, failed }
+
+/// Result of an account-deletion attempt.
+enum DeleteResult { success, needsReauth, notConfigured, failed }
 
 /// Google Sign-In → Firebase Auth bridge (google_sign_in 7.x API).
 ///
@@ -65,6 +69,41 @@ class AuthService {
     } catch (e) {
       debugPrint('[AuthService] sign-in failed: $e');
       return SignInResult.failed;
+    }
+  }
+
+  /// Permanently delete the user's account and their cloud data.
+  ///
+  /// Removes the Firestore `users/{uid}` document, then deletes the Firebase
+  /// Auth user. If Firebase requires a fresh login it returns [needsReauth] —
+  /// the caller should re-run [signInWithGoogle] and call this again.
+  /// Required by Google Play policy for any app with account creation.
+  static Future<DeleteResult> deleteAccount() async {
+    if (!FirebaseService.available) return DeleteResult.notConfigured;
+    final user = _auth.currentUser;
+    if (user == null) return DeleteResult.notConfigured;
+    try {
+      // Best-effort: remove cloud profile (PRO/trial expiry, email) first.
+      try {
+        await FirebaseFirestore.instance
+            .collection('users')
+            .doc(user.uid)
+            .delete();
+      } catch (e) {
+        debugPrint('[AuthService] user doc delete failed: $e');
+      }
+      await user.delete();
+      try {
+        if (_gsiInitialized) await GoogleSignIn.instance.signOut();
+      } catch (_) {/* ignore */}
+      return DeleteResult.success;
+    } on FirebaseAuthException catch (e) {
+      if (e.code == 'requires-recent-login') return DeleteResult.needsReauth;
+      debugPrint('[AuthService] delete failed: ${e.code}');
+      return DeleteResult.failed;
+    } catch (e) {
+      debugPrint('[AuthService] delete failed: $e');
+      return DeleteResult.failed;
     }
   }
 

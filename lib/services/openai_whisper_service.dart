@@ -7,6 +7,7 @@ import 'package:uuid/uuid.dart';
 import '../models/subtitle_style_model.dart';
 import 'lao_word_service.dart';
 import 'wav_chunker.dart';
+import 'audio_preprocess.dart';
 
 class OpenAIWhisperException implements Exception {
   final String message;
@@ -28,6 +29,7 @@ class OpenAIWhisperService {
     String videoPath, {
     String language = 'lo',
     WordSplit wordSplit = WordSplit.none,
+    String hint = '',
     void Function(String)? onProgress,
   }) async {
     // Step 1: Extract audio
@@ -49,6 +51,7 @@ class OpenAIWhisperService {
     if (!wavFile.existsSync()) {
       throw OpenAIWhisperException('ໄຟລ໌ audio ສ້າງບໍ່ສຳເລັດ');
     }
+    await AudioPreprocess.processFile(wavPath); // high-pass + normalize
 
     onProgress?.call('ກໍາລັງແບ່ງທ່ອນສຽງ...');
     final chunks = await WavChunker.splitWav(wavPath, chunkDurationSeconds: 15.0);
@@ -64,10 +67,15 @@ class OpenAIWhisperService {
         final request = http.MultipartRequest('POST', Uri.parse(_endpoint));
         request.headers['Authorization'] = 'Bearer $apiKey';
         request.fields['model'] = 'whisper-1';
-        if (language == 'lo' || language == 'th') {
-          request.fields['language'] = 'th'; // Force Thai for both 'th' and 'lo' to get perfect timestamps
+        final h = hint.trim();
+        if (language == 'lo') {
+          // Do not send 'language' because the API validator rejects 'lo'.
+          // The underlying model supports it, so we let it auto-detect and guide it with a Lao prompt.
+          request.fields['prompt'] =
+              'ນີ້ແມ່ນພາສາລາວ. ກະລຸນາພິມເປັນພາສາລາວທີ່ຖືກຕ້ອງ. ສະບາຍດີ, ຍິນດີຕ້ອນຮັບ. ວິດີໂອ, ການຕັດຕໍ່, ສຽງ, ຂໍ້ຄວາມ, ໂທລະສັບ.${h.isNotEmpty ? ' $h' : ''}';
         } else {
           request.fields['language'] = language;
+          if (h.isNotEmpty) request.fields['prompt'] = h;
         }
         request.fields['response_format'] = 'verbose_json';
         request.fields['timestamp_granularities[]'] = 'word';
@@ -155,6 +163,7 @@ class OpenAIWhisperService {
     }
     final wavFile = File(wavPath);
     if (!wavFile.existsSync()) return empty;
+    await AudioPreprocess.processFile(wavPath); // high-pass + normalize
     if (await wavFile.length() > 25 * 1024 * 1024) {
       // OpenAI caps uploads at 25MB — skip (caller falls back to energy VAD).
       try {

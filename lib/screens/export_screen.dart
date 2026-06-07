@@ -121,19 +121,20 @@ class _ExportScreenState extends State<ExportScreen> {
     } on ExportException catch (e) {
       if (mounted) {
         setState(() => _isExporting = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.message), backgroundColor: AppColors.accent),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(e.message),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 10),
+        ));
       }
     } catch (e) {
       if (mounted) {
         setState(() => _isExporting = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('ຜິດພາດ: $e'),
-            backgroundColor: AppColors.accent,
-          ),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('ຜິດພາດ: $e'),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 10),
+        ));
       }
     }
   }
@@ -683,6 +684,11 @@ class _ExportScreenState extends State<ExportScreen> {
               'ຄຸນນະພາບ',
               _quality == ExportQuality.fhd1080 ? '1080p FHD' : '720p HD',
             ),
+          if (_exportType == ExportType.videoWithSubtitle) ...[
+            _summaryRow('ສຽງຫຼັກວິດີໂອ', (project?.originalMuted ?? false) ? 'ປິດສຽງ' : 'ເປີດສຽງ'),
+            _summaryRow('ສຽງ SFX', (project?.sfxBlocks.isNotEmpty ?? false) ? 'ມີສຽງ' : 'ບໍ່ມີສຽງ'),
+            _summaryRow('ສຽງພາກ AI', (project?.aiVoicePath != null) ? 'ມີສຽງ' : 'ບໍ່ມີສຽງ'),
+          ],
           _summaryRow('ສໄຕລ໌', project?.selectedStyle.name ?? '-'),
         ],
       ),

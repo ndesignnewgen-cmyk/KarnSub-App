@@ -282,6 +282,166 @@ class AudioSyncService {
     }
   }
 
+  /// DTW (Dynamic Time Warping) forced alignment — the accurate aligner.
+  ///
+  /// Instead of mapping "Gemini's Nth word → Whisper's Nth onset" proportionally
+  /// (which drifts when the two engines split words differently), this aligns
+  /// Gemini's word-TIME sequence to Whisper's real onsets with DTW, so each word
+  /// lands on the correct onset. Then it sets every block's END to the next
+  /// word's real onset (B) so block length matches the actual speech span.
+  /// Falls back to [forcedAlignToWhisper] for very long inputs. Mutates [segs].
+  static void dtwAlignToWhisper(
+    List<SubtitleSegment> segs,
+    List<int> whisperStartsMs,
+    int whisperEndMs,
+  ) {
+    if (segs.isEmpty || whisperStartsMs.length < 2) return;
+    final w = [...whisperStartsMs]..sort();
+    final m = w.length;
+
+    // 1. Flatten Gemini word-start times G (per word), and word-count per segment.
+    final segWordCount = <int>[];
+    final g = <int>[];
+    for (final s in segs) {
+      final units = (s.words != null && s.words!.isNotEmpty)
+          ? s.words!.where((x) => x.trim().isNotEmpty).toList()
+          : <String>[s.text];
+      final n = units.isEmpty ? 1 : units.length;
+      segWordCount.add(n);
+      final st = s.startTime.inMilliseconds;
+      final en = s.endTime.inMilliseconds > st
+          ? s.endTime.inMilliseconds
+          : st + n * 250;
+      final hasT = s.wordTimings != null && s.wordTimings!.length == n;
+      for (int k = 0; k < n; k++) {
+        g.add(hasT ? s.wordTimings![k].inMilliseconds : st + (en - st) * k ~/ n);
+      }
+    }
+    final nWords = g.length;
+    if (nWords < 1) return;
+    for (int i = 1; i < nWords; i++) {
+      if (g[i] < g[i - 1]) g[i] = g[i - 1]; // monotonic
+    }
+
+    // Guard: huge DP → fall back to the proportional aligner.
+    if (nWords * m > 400000) {
+      forcedAlignToWhisper(segs, whisperStartsMs, whisperEndMs);
+      return;
+    }
+
+    int nearest(int t) {
+      if (t <= w.first) return w.first;
+      if (t >= w.last) return w.last;
+      int lo = 0, hi = m - 1;
+      while (lo <= hi) {
+        final mid = (lo + hi) >> 1;
+        if (w[mid] == t) return t;
+        if (w[mid] < t) {
+          lo = mid + 1;
+        } else {
+          hi = mid - 1;
+        }
+      }
+      final a = w[hi], b = w[lo];
+      return (t - a) <= (b - t) ? a : b;
+    }
+
+    // 2. Remove global median shift so DTW cost is meaningful.
+    final deltas = <int>[];
+    for (final t in g) {
+      final nn = nearest(t);
+      if ((nn - t).abs() <= 4000) deltas.add(nn - t);
+    }
+    int shift = 0;
+    if (deltas.isNotEmpty) {
+      deltas.sort();
+      shift = deltas[deltas.length ~/ 2];
+    }
+    final gs = [for (final t in g) t + shift];
+
+    int min3(int a, int b, int c) {
+      final ab = a < b ? a : b;
+      return ab < c ? ab : c;
+    }
+
+    // 3. DTW cost matrix.
+    final d = List.generate(nWords, (_) => List<int>.filled(m, 0));
+    for (int i = 0; i < nWords; i++) {
+      for (int j = 0; j < m; j++) {
+        final c = (gs[i] - w[j]).abs();
+        if (i == 0 && j == 0) {
+          d[i][j] = c;
+        } else if (i == 0) {
+          d[i][j] = c + d[i][j - 1];
+        } else if (j == 0) {
+          d[i][j] = c + d[i - 1][j];
+        } else {
+          d[i][j] = c + min3(d[i - 1][j], d[i - 1][j - 1], d[i][j - 1]);
+        }
+      }
+    }
+
+    // 4. Backtrack → each word's mapped onset (earliest onset on its path cell).
+    final mapped = List<int>.filled(nWords, 0);
+    int ii = nWords - 1, jj = m - 1;
+    while (ii >= 0 && jj >= 0) {
+      mapped[ii] = w[jj];
+      if (ii == 0 && jj == 0) break;
+      if (ii == 0) {
+        jj--;
+      } else if (jj == 0) {
+        ii--;
+      } else {
+        final diag = d[ii - 1][jj - 1], up = d[ii - 1][jj], left = d[ii][jj - 1];
+        final mn = min3(diag, up, left);
+        if (mn == diag) {
+          ii--;
+          jj--;
+        } else if (mn == up) {
+          ii--;
+        } else {
+          jj--;
+        }
+      }
+    }
+    // 5. Monotonic non-decreasing.
+    for (int k = 1; k < nWords; k++) {
+      if (mapped[k] < mapped[k - 1]) mapped[k] = mapped[k - 1];
+    }
+
+    // 6. Assign back + set block ends to the next real onset (B).
+    int gi = 0;
+    for (int si = 0; si < segs.length; si++) {
+      final s = segs[si];
+      final n = segWordCount[si];
+      final startMs = mapped[gi];
+      if (s.words != null && s.words!.isNotEmpty) {
+        final units = s.words!.where((x) => x.trim().isNotEmpty).toList();
+        s.wordTimings = List.generate(units.length,
+            (k) => Duration(milliseconds: (gi + k < nWords ? mapped[gi + k] : startMs)));
+      }
+      final lastWord = mapped[(gi + n - 1).clamp(0, nWords - 1)];
+      int endMs;
+      if (si == segs.length - 1) {
+        endMs = whisperEndMs > lastWord ? whisperEndMs : lastWord + 600;
+      } else {
+        endMs = mapped[(gi + n).clamp(0, nWords - 1)]; // next word's onset
+        final cap = lastWord + 1800; // don't linger across long silence
+        if (endMs > cap) endMs = cap;
+      }
+      if (endMs < startMs + 250) endMs = startMs + 250;
+      s.startTime = Duration(milliseconds: startMs < 0 ? 0 : startMs);
+      s.endTime = Duration(milliseconds: endMs);
+      gi += n;
+    }
+    // No overlap.
+    for (int k = 0; k < segs.length - 1; k++) {
+      if (segs[k].endTime > segs[k + 1].startTime) {
+        segs[k].endTime = segs[k + 1].startTime;
+      }
+    }
+  }
+
   /// Normalised audio amplitude (0..1) sampled every [waveformStepMs] ms.
   static const int waveformStepMs = 20;
   static Future<List<double>> waveform(String videoPath) async {
@@ -710,5 +870,76 @@ class AudioSyncService {
       }
     }
     return out;
+  }
+
+  /// Snap every subtitle START and every karaoke WORD timing to the nearest
+  /// REAL Whisper word onset ([onsets], acoustically exact) within [window] ms,
+  /// keeping order monotonic. This corrects the within-region *proportional*
+  /// estimates from [resegmentByRegions] so each subtitle — and each highlighted
+  /// word — appears exactly when the voice starts, not on a character-count guess.
+  /// Only snaps when a real onset is close (≤ window); otherwise the original
+  /// estimate is kept. Mutates [segs] in place. Safe no-op without enough onsets.
+  static void snapToOnsets(
+    List<SubtitleSegment> segs,
+    List<int> onsets, {
+    int window = 220,
+  }) {
+    if (segs.isEmpty || onsets.length < 2) return;
+    final o = [...onsets]..sort();
+    final n = o.length;
+
+    int nearest(int t) {
+      if (t <= o.first) return o.first;
+      if (t >= o.last) return o.last;
+      int lo = 0, hi = n - 1;
+      while (lo <= hi) {
+        final mid = (lo + hi) >> 1;
+        if (o[mid] == t) return t;
+        if (o[mid] < t) {
+          lo = mid + 1;
+        } else {
+          hi = mid - 1;
+        }
+      }
+      final a = o[hi], b = o[lo];
+      return (t - a) <= (b - t) ? a : b;
+    }
+
+    int prevStart = 0;
+    for (int si = 0; si < segs.length; si++) {
+      final s = segs[si];
+      int st = s.startTime.inMilliseconds;
+      final ns = nearest(st);
+      if ((ns - st).abs() <= window && ns >= prevStart) st = ns;
+      if (st < prevStart) st = prevStart;
+
+      if (s.wordTimings != null && s.wordTimings!.isNotEmpty) {
+        final wt = <Duration>[];
+        int wprev = st;
+        for (int k = 0; k < s.wordTimings!.length; k++) {
+          int t = k == 0 ? st : s.wordTimings![k].inMilliseconds;
+          final nt = nearest(t);
+          if ((nt - t).abs() <= window && nt >= wprev) t = nt;
+          if (t < wprev) t = wprev;
+          wt.add(Duration(milliseconds: t));
+          wprev = t;
+        }
+        s.wordTimings = wt;
+        st = wt.first.inMilliseconds;
+      }
+
+      int en = s.endTime.inMilliseconds;
+      if (en < st + 150) en = st + 150;
+      s.startTime = Duration(milliseconds: st < 0 ? 0 : st);
+      s.endTime = Duration(milliseconds: en);
+      prevStart = st;
+    }
+
+    // Keep order / no overlap.
+    for (int i = 0; i < segs.length - 1; i++) {
+      if (segs[i].endTime > segs[i + 1].startTime) {
+        segs[i].endTime = segs[i + 1].startTime;
+      }
+    }
   }
 }

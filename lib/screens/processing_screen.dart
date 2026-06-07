@@ -3,6 +3,7 @@ import 'package:flutter_animate/flutter_animate.dart';
 import 'package:percent_indicator/percent_indicator.dart';
 import 'package:provider/provider.dart';
 import '../theme/app_theme.dart';
+import '../i18n/i18n.dart';
 import '../models/subtitle_style_model.dart';
 import '../providers/project_provider.dart';
 import '../services/gemini_speech_service.dart';
@@ -17,11 +18,13 @@ import 'settings_screen.dart';
 class ProcessingScreen extends StatefulWidget {
   final String videoPath;
   final String aiEngine;
+  final bool isReTranscribing;
 
   const ProcessingScreen({
     super.key,
     required this.videoPath,
     this.aiEngine = 'gemini',
+    this.isReTranscribing = false,
   });
 
   @override
@@ -30,7 +33,7 @@ class ProcessingScreen extends StatefulWidget {
 
 class _ProcessingScreenState extends State<ProcessingScreen> {
   double _progress = 0;
-  String _statusText = 'ກຳລັງກຽມໄຟລ໌...';
+  String _statusText = tr('proc.preparing');
   bool _hasError = false;
   String _errorMessage = '';
 
@@ -62,36 +65,38 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
     final didTranscribeInSource = transcribeLang == project.sourceLanguage;
     final willTranslate = isTranslating && didTranscribeInSource;
 
-    final langLabel = transcribeLang == 'lo' 
-        ? 'ພາສາລາວ' 
-        : (transcribeLang == 'th' ? 'ພາສາໄທ' : 'English');
+    final langLabel = transcribeLang == 'lo'
+        ? tr('lang.name.lo')
+        : (transcribeLang == 'th' ? tr('lang.name.th') : 'English');
 
     final targetLabel = project.language == 'lo'
-        ? 'ພາສາລາວ'
-        : (project.language == 'th' ? 'ພາສາໄທ' : 'English');
-    
+        ? tr('lang.name.lo')
+        : (project.language == 'th' ? tr('lang.name.th') : 'English');
+
     if (mounted) {
       setState(() {
         final List<_StepItem> steps = [
-          _StepItem(Icons.audio_file_outlined, 'ດຶງສຽງຈາກວິດີໂອ'),
+          _StepItem(Icons.audio_file_outlined, tr('proc.extractAudio')),
         ];
-        
+
         if (_actualEngine == 'gemini') {
-          steps.add(_StepItem(Icons.hearing, 'Gemini ຖອດສຽງ$langLabel'));
+          steps.add(_StepItem(Icons.hearing,
+              tr('proc.transcribeWith', {'engine': 'Gemini', 'lang': langLabel})));
           if (willTranslate) {
-            steps.add(_StepItem(Icons.translate, 'Gemini ແປເປັນ$targetLabel'));
+            steps.add(_StepItem(Icons.translate, tr('proc.translateTo', {'lang': targetLabel})));
           } else if (project.language == 'lo' && hasWhisperTiming) {
-            steps.add(_StepItem(Icons.auto_awesome, 'Whisper ຈັບເວລາໃຫ້ຕົງ'));
+            steps.add(_StepItem(Icons.auto_awesome, tr('proc.whisperAlign')));
           } else {
-            steps.add(_StepItem(Icons.subtitles, 'ສ້າງ Subtitle'));
+            steps.add(_StepItem(Icons.subtitles, tr('proc.createSubtitle')));
           }
         } else {
-          final engineName = _actualEngine == 'groq' ? 'Groq (ໄວ)' : 'Whisper';
-          steps.add(_StepItem(Icons.hearing, '$engineName ຖອດສຽງ$langLabel'));
+          final engineName = _actualEngine == 'groq' ? tr('proc.groqFast') : 'Whisper';
+          steps.add(_StepItem(Icons.hearing,
+              tr('proc.transcribeWith', {'engine': engineName, 'lang': langLabel})));
           if (willTranslate) {
-            steps.add(_StepItem(Icons.translate, 'Gemini ແປເປັນ$targetLabel'));
+            steps.add(_StepItem(Icons.translate, tr('proc.translateTo', {'lang': targetLabel})));
           } else {
-            steps.add(_StepItem(Icons.subtitles, 'ສ້າງ Subtitle'));
+            steps.add(_StepItem(Icons.subtitles, tr('proc.createSubtitle')));
           }
         }
         
@@ -108,7 +113,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
       if (openAiKey == null || openAiKey.isEmpty) {
         setState(() {
           _hasError = true;
-          _errorMessage = 'ยັງບໍ່ໄດ້ໃສ່ OpenAI API Key';
+          _errorMessage = tr('proc.noOpenAiKey');
         });
         return;
       }
@@ -118,7 +123,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
       if (groqKey == null || groqKey.isEmpty) {
         setState(() {
           _hasError = true;
-          _errorMessage = 'ຍັງບໍ່ໄດ້ໃສ່ Groq API Key';
+          _errorMessage = tr('proc.noGroqKey');
         });
         return;
       }
@@ -128,7 +133,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
       if (apiKey == null || apiKey.isEmpty) {
         setState(() {
           _hasError = true;
-          _errorMessage = 'ຍັງບໍ່ໄດ້ໃສ່ Gemini API Key';
+          _errorMessage = tr('proc.noGeminiKey');
         });
         return;
       }
@@ -143,7 +148,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
       setState(() {
         _currentStep = 0;
         _progress = 0.05;
-        _statusText = 'ກຳລັງກຽມໄຟລ໌...';
+        _statusText = tr('proc.preparing');
       });
 
       // Determine the language to transcribe the audio in.
@@ -161,12 +166,14 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
 
       List<SubtitleSegment> segments;
 
+      final hint = project.transcriptionHint;
       if (_actualEngine == 'whisper') {
         final service = OpenAIWhisperService(apiKey: apiKey);
         segments = await service.transcribe(
           widget.videoPath,
           language: transcribeLang,
           wordSplit: project.wordSplit,
+          hint: hint,
           onProgress: _onTranscriptionProgress,
         );
       } else if (_actualEngine == 'groq') {
@@ -175,6 +182,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
           widget.videoPath,
           language: transcribeLang,
           wordSplit: project.wordSplit,
+          hint: hint,
           onProgress: _onTranscriptionProgress,
         );
       } else {
@@ -183,6 +191,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
           widget.videoPath,
           language: transcribeLang,
           wordSplit: project.wordSplit,
+          hint: hint,
           onProgress: _onTranscriptionProgress,
         );
       }
@@ -210,7 +219,32 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
             keepOriginalAsBilingual: isBilingual,
           );
         } else {
-          throw GeminiSpeechException('ບໍ່ພົບ Gemini API Key ສຳລັບການແປພາສາ. ກະລຸນາໃສ່ໃນໜ້າຕັ້ງຄ່າ');
+          throw GeminiSpeechException(tr('proc.noGeminiKeyTranslate'));
+        }
+      }
+
+      // Optional 2nd pass: Gemini proofread to fix spelling/consistency using
+      // full context. Skipped when translating (the translate pass already
+      // produces clean target text). Best-effort — never blocks the result.
+      if (project.proofread &&
+          segments.isNotEmpty &&
+          !(isTranslating && didTranscribeInSource)) {
+        final gKey = await ApiConfig.getApiKey();
+        if (gKey != null && gKey.isNotEmpty) {
+          setState(() {
+            _currentStep = 2;
+            _progress = 0.9;
+          });
+          try {
+            await GeminiSpeechService(apiKey: gKey).proofreadSegments(
+              segments: segments,
+              language: project.language,
+              hint: project.transcriptionHint,
+              onProgress: (s) {
+                if (mounted) setState(() => _statusText = s);
+              },
+            );
+          } catch (_) {}
         }
       }
 
@@ -220,7 +254,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
         setState(() {
           _currentStep = 2;
           _progress = 0.95;
-          _statusText = 'ກຳລັງຈັດໃຫ້ຕົງສຽງ...';
+          _statusText = tr('proc.aligning');
         });
         // Ensure word-level units first (forced-align maps onto word onsets).
         try {
@@ -239,7 +273,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
 
         if (hasGroq || hasOpenAi) {
           try {
-            setState(() => _statusText = 'Whisper ກຳລັງຈັບເວລາ (ໃຫ້ຕົງສຽງ)...');
+            setState(() => _statusText = tr('proc.whisperAligning'));
             final alignLang = project.language == 'lo' ? 'th' : project.language;
             final wt = hasGroq
                 ? await GroqSpeechService(
@@ -263,9 +297,15 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
                 wt.regions,
                 maxWords: maxWords,
               );
+              // DTW-align the re-cut blocks to real onsets (accurate start + end).
+              if (wt.startsMs.length >= 3) {
+                AudioSyncService.dtwAlignToWhisper(segments, wt.startsMs, wt.endMs);
+              } else {
+                AudioSyncService.snapToOnsets(segments, wt.startsMs);
+              }
               aligned = true;
             } else if (wt.startsMs.length >= 3) {
-              AudioSyncService.forcedAlignToWhisper(
+              AudioSyncService.dtwAlignToWhisper(
                 segments,
                 wt.startsMs,
                 wt.endMs,
@@ -297,17 +337,37 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
       setState(() {
         _currentStep = 3;
         _progress = 1.0;
-        _statusText = 'ສຳເລັດແລ້ວ! ✅';
+        _statusText = tr('proc.done');
       });
+
+      // Auto-pick a script-matching default font so Thai text isn't rendered
+      // with a Lao font (which would show as boxes). Only switches the built-in
+      // defaults — never overrides a custom or manually-chosen font.
+      final needThai = project.language == 'th' ||
+          (project.translateMode == TranslateMode.bilingual &&
+              project.sourceLanguage == 'th');
+      const laoDefaults = {'NotoSansLao', 'NotoSerifLao', 'NotoSansLaoLooped'};
+      const thaiDefaults = {'NotoSansThai', 'NotoSerifThai', 'NotoSansThaiLooped'};
+      if (needThai && laoDefaults.contains(project.fontFamily)) {
+        project.fontFamily = 'NotoSansThai';
+      } else if (!needThai &&
+          project.language == 'lo' &&
+          thaiDefaults.contains(project.fontFamily)) {
+        project.fontFamily = 'NotoSansLao';
+      }
 
       context.read<ProjectProvider>().updateSegments(segments);
 
       await Future.delayed(const Duration(milliseconds: 700));
       if (mounted) {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(builder: (_) => const EditorScreen()),
-        );
+        if (widget.isReTranscribing) {
+          Navigator.pop(context);
+        } else {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(builder: (_) => const EditorScreen()),
+          );
+        }
       }
     } on GeminiSpeechException catch (e) {
       if (mounted) {
@@ -322,8 +382,8 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
         setState(() {
           _hasError = true;
           _errorMessage = msg.contains('TimeoutException')
-              ? 'ວິດີໂອຍາວເກີນໄປ ຫຼື ເນັດຊ້າ — ກາລຸນາໃຊ້ວິດີໂອສັ້ນກວ່າ 10 ນາທີ ຫຼື ລອງໃໝ່'
-              : 'ເກີດຂໍ້ຜິດພາດ: $msg';
+              ? tr('proc.errorLong')
+              : tr('proc.errorGeneric', {'msg': msg});
         });
       }
     }
@@ -356,7 +416,8 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
   }
 
   Widget _buildErrorView() {
-    final isNoKey = _errorMessage.contains('ຍັງບໍ່ໄດ້ໃສ່');
+    final isNoKey = _errorMessage.contains('ຍັງບໍ່ໄດ້ໃສ່') ||
+        _errorMessage.contains('ยังไม่ได้ใส่');
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
@@ -377,9 +438,9 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
         Text(
           isNoKey
               ? (_errorMessage.contains('OpenAI')
-                  ? 'ຍັງບໍ່ໄດ້ຕັ້ງ OpenAI API Key'
-                  : 'ຍັງບໍ່ໄດ້ຕັ້ງ Gemini API Key')
-              : 'ເກີດຂໍ້ຜິດພາດ',
+                  ? tr('proc.noOpenAiTitle')
+                  : tr('proc.noGeminiTitle'))
+              : tr('proc.errorTitle'),
           style: const TextStyle(
             color: AppColors.textPrimary,
             fontSize: 20,
@@ -402,8 +463,8 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
             icon: const Icon(Icons.key, size: 18),
             label: Text(
               _errorMessage.contains('OpenAI')
-                  ? 'ໄປຕັ້ງ OpenAI API Key'
-                  : 'ໄປຕັ້ງ Gemini API Key',
+                  ? tr('proc.goSetOpenAi')
+                  : tr('proc.goSetGemini'),
             ),
           )
         else
@@ -416,14 +477,14 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
               _start();
             },
             icon: const Icon(Icons.refresh, size: 18),
-            label: const Text('ລອງໃໝ່'),
+            label: Text(tr('proc.retry')),
           ),
         const SizedBox(height: 12),
         TextButton(
           onPressed: () => Navigator.pop(context),
-          child: const Text(
-            'ກັບໄປ',
-            style: TextStyle(color: AppColors.textSecondary),
+          child: Text(
+            tr('proc.back'),
+            style: const TextStyle(color: AppColors.textSecondary),
           ),
         ),
       ],

@@ -6,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 import '../models/subtitle_style_model.dart';
 import 'wav_chunker.dart';
+import 'audio_preprocess.dart';
 
 class GroqSpeechException implements Exception {
   final String message;
@@ -27,6 +28,7 @@ class GroqSpeechService {
     String videoPath, {
     String language = 'lo',
     WordSplit wordSplit = WordSplit.none,
+    String hint = '',
     void Function(String)? onProgress,
   }) async {
     onProgress?.call('ດຶງສຽງຈາກວິດີໂອ...');
@@ -47,6 +49,7 @@ class GroqSpeechService {
     if (!wavFile.existsSync()) {
       throw GroqSpeechException('ໄຟລ໌ audio ສ້າງບໍ່ສໍາເລັດ');
     }
+    await AudioPreprocess.processFile(wavPath); // high-pass + normalize
 
     onProgress?.call('ກໍາລັງແບ່ງທ່ອນສຽງ...');
     final chunks = await WavChunker.splitWav(wavPath, chunkDurationSeconds: 15.0);
@@ -64,6 +67,7 @@ class GroqSpeechService {
         request.fields['model'] = 'whisper-large-v3';
         request.fields['response_format'] = 'verbose_json';
         request.fields['timestamp_granularities[]'] = 'segment';
+        if (hint.trim().isNotEmpty) request.fields['prompt'] = hint.trim();
         if (language == 'lo' || language == 'th') {
           request.fields['language'] = 'th'; // Force Thai for both 'th' and 'lo' to get perfect timestamps
         } else {
@@ -149,6 +153,7 @@ class GroqSpeechService {
     }
     final wavFile = File(wavPath);
     if (!wavFile.existsSync()) return empty;
+    await AudioPreprocess.processFile(wavPath); // high-pass + normalize
     if (await wavFile.length() > 25 * 1024 * 1024) {
       // Groq caps uploads at 25MB — skip (caller falls back to energy VAD).
       try {

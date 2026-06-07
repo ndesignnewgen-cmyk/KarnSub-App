@@ -1,14 +1,20 @@
+import 'dart:io';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../theme/app_theme.dart';
+import '../i18n/i18n.dart';
 import '../services/api_config.dart';
 import '../services/auth_service.dart';
 import '../services/firebase_service.dart';
+import '../config/build_config.dart';
 import '../services/free_quota_service.dart';
 import '../services/license_service.dart';
 import '../services/subscription_service.dart';
+import '../services/payment_config.dart';
+import '../services/slip_verify_service.dart';
 import '../widgets/gradient_button.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -22,15 +28,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _apiKeyCtrl = TextEditingController();
   final _groqKeyCtrl = TextEditingController();
   final _openAiKeyCtrl = TextEditingController();
-  final _elevenLabsKeyCtrl = TextEditingController();
+  final _tenorKeyCtrl = TextEditingController();
+  final _freesoundKeyCtrl = TextEditingController();
   bool _obscure = true;
   bool _groqObscure = true;
   bool _openAiObscure = true;
-  bool _elevenLabsObscure = true;
+  bool _tenorObscure = true;
+  bool _freesoundObscure = true;
   bool _groqSaved = false;
   bool _isSaved = false;
   bool _openAiSaved = false;
-  bool _elevenLabsSaved = false;
+  bool _tenorSaved = false;
+  bool _freesoundSaved = false;
   bool _isLoading = true;
   bool _isPro = false;
   DateTime? _proExpiry;
@@ -50,7 +59,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final key = await ApiConfig.getApiKey();
     final groqKey = await ApiConfig.getGroqKey();
     final openAiKey = await ApiConfig.getOpenAiKey();
-    final elevenLabsKey = await ApiConfig.getElevenLabsKey();
+    final tenorKey = await ApiConfig.getTenorKey();
+    final freesoundKey = await ApiConfig.getFreesoundKey();
     // If signed in, pull the latest PRO state from the cloud first.
     if (AuthService.currentUser != null) {
       await SubscriptionService.refresh();
@@ -61,12 +71,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (key != null) _apiKeyCtrl.text = key;
     if (groqKey != null) _groqKeyCtrl.text = groqKey;
     if (openAiKey != null) _openAiKeyCtrl.text = openAiKey;
-    if (elevenLabsKey != null) _elevenLabsKeyCtrl.text = elevenLabsKey;
+    if (tenorKey != null) _tenorKeyCtrl.text = tenorKey;
+    if (freesoundKey != null) _freesoundKeyCtrl.text = freesoundKey;
     setState(() {
       _user = AuthService.currentUser;
       _isPro = pro;
       _proExpiry = expiry;
       _isLoading = false;
+      _tenorSaved = tenorKey != null && tenorKey.isNotEmpty;
+      _freesoundSaved = freesoundKey != null && freesoundKey.isNotEmpty;
     });
   }
 
@@ -93,13 +106,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
       await _refreshPro();
       if (!mounted) return;
       setState(() => _user = AuthService.currentUser);
-      _showSuccess('ເຂົ້າສູ່ລະບົບສຳເລັດ — PRO ຈະຕິດຕາມບັນຊີນີ້');
+      _showSuccess(tr('set.signedIn'));
     } else if (result == SignInResult.cancelled) {
       // user backed out — say nothing
     } else if (result == SignInResult.notConfigured) {
-      _showError('ຍັງບໍ່ໄດ້ຕັ້ງຄ່າ Firebase — ຕິດຕໍ່ຜູ້ພັດທະນາ');
+      _showError(tr('set.firebaseNotSet'));
     } else {
-      _showError('ເຂົ້າສູ່ລະບົບບໍ່ສຳເລັດ — ລອງໃໝ່');
+      _showError(tr('set.signInFailed'));
     }
     if (mounted) setState(() => _isSyncing = false);
   }
@@ -114,7 +127,69 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _user = null;
       _isSyncing = false;
     });
-    _showSuccess('ອອກຈາກລະບົບແລ້ວ');
+    _showSuccess(tr('set.signedOut'));
+  }
+
+  Future<void> _deleteAccount() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(children: [
+          const Icon(Icons.warning_amber_rounded,
+              color: AppColors.accent, size: 22),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(tr('set.deleteAccount'),
+                style: const TextStyle(
+                    color: AppColors.textPrimary,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16)),
+          ),
+        ]),
+        content: Text(tr('set.deleteConfirm'),
+            style: const TextStyle(color: AppColors.textSecondary, fontSize: 13)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text(tr('common.cancel'),
+                style: const TextStyle(color: AppColors.textSecondary)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.accent, foregroundColor: Colors.white),
+            child: Text(tr('set.deleteConfirmYes')),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    setState(() => _isSyncing = true);
+    var res = await AuthService.deleteAccount();
+    // Firebase may require a fresh login before deletion — re-auth and retry once.
+    if (res == DeleteResult.needsReauth) {
+      final si = await AuthService.signInWithGoogle();
+      if (si == SignInResult.success) {
+        res = await AuthService.deleteAccount();
+      }
+    }
+    if (!mounted) return;
+    if (res == DeleteResult.success) {
+      await FreeQuotaService.clearCloud();
+      await _refreshPro();
+      if (!mounted) return;
+      setState(() {
+        _user = null;
+        _isSyncing = false;
+      });
+      _showSuccess(tr('set.accountDeleted'));
+    } else {
+      setState(() => _isSyncing = false);
+      _showError(tr('set.deleteFailed'));
+    }
   }
 
   Future<void> _manualSync() async {
@@ -125,15 +200,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _isSyncing = false);
     _showSuccess(
       _isPro
-          ? 'ອັບເດດແລ້ວ — PRO ໃຊ້ໄດ້ຮອດ ${_proExpiry != null ? _fmtDate(_proExpiry!) : ''}'
-          : 'ອັບເດດແລ້ວ — ຍັງບໍ່ມີ PRO ໃນບັນຊີນີ້',
+          ? tr('set.updatedProUntil', {'date': _proExpiry != null ? _fmtDate(_proExpiry!) : ''})
+          : tr('set.updatedNoPro'),
     );
   }
 
   Future<void> _save() async {
     final key = _apiKeyCtrl.text.trim();
     if (key.isEmpty) {
-      _showError('ກາລຸນາໃສ່ API Key ກ່ອນ');
+      _showError(tr('set.enterKeyFirst'));
       return;
     }
     await ApiConfig.saveApiKey(key);
@@ -181,45 +256,250 @@ class _SettingsScreenState extends State<SettingsScreen> {
     });
   }
 
-  Future<void> _saveElevenLabs() async {
-    final key = _elevenLabsKeyCtrl.text.trim();
+  Future<void> _clearGroq() async {
+    await ApiConfig.clearGroqKey();
+    _groqKeyCtrl.clear();
+    setState(() {});
+  }
+
+  Future<void> _saveTenor() async {
+    final key = _tenorKeyCtrl.text.trim();
     if (key.isEmpty) {
-      await ApiConfig.clearElevenLabsKey();
+      await ApiConfig.clearTenorKey();
     } else {
-      await ApiConfig.saveElevenLabsKey(key);
+      await ApiConfig.saveTenorKey(key);
     }
-    setState(() => _elevenLabsSaved = true);
+    setState(() => _tenorSaved = true);
     Future.delayed(const Duration(seconds: 2), () {
-      if (mounted) setState(() => _elevenLabsSaved = false);
+      if (mounted) setState(() => _tenorSaved = false);
     });
   }
 
-  Future<void> _clearElevenLabs() async {
-    await ApiConfig.clearElevenLabsKey();
-    _elevenLabsKeyCtrl.clear();
+  Future<void> _clearTenor() async {
+    await ApiConfig.clearTenorKey();
+    _tenorKeyCtrl.clear();
+    setState(() {});
+  }
+
+  Future<void> _saveFreesound() async {
+    final key = _freesoundKeyCtrl.text.trim();
+    if (key.isEmpty) {
+      await ApiConfig.clearFreesoundKey();
+    } else {
+      await ApiConfig.saveFreesoundKey(key);
+    }
+    setState(() => _freesoundSaved = true);
+    Future.delayed(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _freesoundSaved = false);
+    });
+  }
+
+  Future<void> _clearFreesound() async {
+    await ApiConfig.clearFreesoundKey();
+    _freesoundKeyCtrl.clear();
     setState(() {});
   }
 
   // PRO pricing + seller contact.
-  static const String proPrice = '39,000 ກີບ/ເດືອນ';
+  static String get proPrice => tr('set.priceMonth');
   // WhatsApp: 020 9552 4699 → international format 856 20 9552 4699.
   static const String _whatsappNumber = '8562095524699';
 
   Future<void> _openWhatsApp() async {
     final uid = _user?.uid ?? '';
     final msg = Uri.encodeComponent(
-      'ສະບາຍດີ ຢາກສະມັກ KarnSub PRO (39,000 ກີບ/ເດືອນ).'
+      '${tr('set.waMsg')}'
       '${uid.isNotEmpty ? '\nAccount ID: $uid' : ''}',
     );
     final uri = Uri.parse('https://wa.me/$_whatsappNumber?text=$msg');
     try {
       final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
       if (!ok && mounted) {
-        _showError('ເປີດ WhatsApp ບໍ່ໄດ້ — ໂທ/add: 020 9552 4699');
+        _showError(tr('set.waFail'));
       }
     } catch (_) {
-      if (mounted) _showError('ເປີດ WhatsApp ບໍ່ໄດ້ — ໂທ/add: 020 9552 4699');
+      if (mounted) _showError(tr('set.waFail'));
     }
+  }
+
+  /// Auto PRO top-up: show QR + price, let the user upload a paid slip, verify
+  /// it with Gemini, then redeem (anti-reuse) and unlock PRO instantly.
+  Future<void> _openAutoTopUp() async {
+    // Must be signed in (we key payments by uid).
+    if (AuthService.currentUser == null) {
+      _showError(tr('set.signInFirst'));
+      return;
+    }
+    if (!mounted) return;
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppColors.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        bool busy = false;
+        String? status;
+        return StatefulBuilder(
+          builder: (ctx, setSheet) {
+            Future<void> uploadSlip() async {
+              final picked = await FilePicker.platform
+                  .pickFiles(type: FileType.image);
+              if (picked == null || picked.files.single.path == null) return;
+              setSheet(() {
+                busy = true;
+                status = tr('set.checkingSlip');
+              });
+              final res =
+                  await SlipVerifyService.verifySlip(File(picked.files.single.path!));
+              if (!res.ok) {
+                setSheet(() {
+                  busy = false;
+                  status = '❌ ${res.error}';
+                });
+                return;
+              }
+              setSheet(() => status = tr('set.openingPro'));
+              final redeem = await SubscriptionService.redeemBySlip(
+                refId: res.refId,
+                amountKip: res.amountKip,
+                bank: res.bank,
+              );
+              switch (redeem) {
+                case RedeemResult.success:
+                  if (ctx.mounted) Navigator.pop(ctx);
+                  await _loadAll();
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                      content: Text(tr('set.proSuccess')),
+                      backgroundColor: const Color(0xFF2E7D32),
+                    ));
+                  }
+                  break;
+                case RedeemResult.alreadyUsed:
+                  setSheet(() {
+                    busy = false;
+                    status = tr('set.slipUsed');
+                  });
+                  break;
+                case RedeemResult.notLoggedIn:
+                  setSheet(() {
+                    busy = false;
+                    status = tr('set.signInFirst2');
+                  });
+                  break;
+                case RedeemResult.error:
+                  setSheet(() {
+                    busy = false;
+                    final d = SubscriptionService.lastError;
+                    status = d == null
+                        ? tr('set.errorRetry')
+                        : '❌ ${d.contains('PERMISSION_DENIED') ? tr('set.firestoreDenied') : d}';
+                  });
+                  break;
+              }
+            }
+
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 18, 20, 24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(tr('set.autoTopupTitle'),
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 4),
+                    Text(tr('set.priceMonth'),
+                        style: const TextStyle(
+                            color: AppColors.primary,
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 14),
+                    // QR — fills the framed box (white card behind it).
+                    Container(
+                      width: 280,
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      padding: const EdgeInsets.all(6),
+                      child: Image.asset(
+                        PaymentConfig.qrAssetPath,
+                        fit: BoxFit.fitWidth,
+                        errorBuilder: (_, __, ___) => const SizedBox(
+                          height: 200,
+                          child: Center(
+                            child: Icon(Icons.qr_code_2,
+                                size: 120, color: Colors.black54),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      '${tr('set.transferTo', {'name': PaymentConfig.merchantName})}\n'
+                      '${tr('set.account', {'acc': PaymentConfig.merchantAccount})}',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                          color: Colors.white70, fontSize: 12, height: 1.5),
+                    ),
+                    const SizedBox(height: 14),
+                    if (status != null)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 10),
+                        child: Text(status!,
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                                color: status!.startsWith('❌')
+                                    ? Colors.redAccent
+                                    : AppColors.primary,
+                                fontSize: 12.5)),
+                      ),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 46,
+                      child: ElevatedButton.icon(
+                        onPressed: busy ? null : uploadSlip,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: AppColors.primary,
+                          foregroundColor: Colors.white,
+                          disabledBackgroundColor: AppColors.surfaceLight,
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12)),
+                        ),
+                        icon: busy
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                    strokeWidth: 2, color: Colors.white))
+                            : const Icon(Icons.upload_file, size: 18),
+                        label: Text(
+                          busy ? tr('set.checking') : tr('set.paidUpload'),
+                          style: const TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 14),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      tr('set.slipHint'),
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.white38, fontSize: 11),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
   }
 
   /// Format DateTime as DD/MM/YYYY.
@@ -248,7 +528,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _apiKeyCtrl.dispose();
     _groqKeyCtrl.dispose();
     _openAiKeyCtrl.dispose();
-    _elevenLabsKeyCtrl.dispose();
+    _tenorKeyCtrl.dispose();
+    _freesoundKeyCtrl.dispose();
     super.dispose();
   }
 
@@ -256,7 +537,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.background,
-      appBar: AppBar(title: const Text('ຕັ້ງຄ່າ')),
+      appBar: AppBar(title: Text(tr('set.title'))),
       body: _isLoading
           ? const Center(
               child: CircularProgressIndicator(color: AppColors.primary),
@@ -271,20 +552,435 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     const SizedBox(height: 16),
                     _buildAccountSection(),
                   ],
+                  const SizedBox(height: 26),
+                  _buildApiKeysSection(),
+                  const SizedBox(height: 26),
+                  _buildLanguageSection(),
                   const SizedBox(height: 24),
-                  _buildApiKeySection(),
-                  const SizedBox(height: 24),
-                  _buildOpenAiKeySection(),
-                  const SizedBox(height: 24),
-                  _buildElevenLabsKeySection(),
-                  const SizedBox(height: 24),
-                  _buildGroqKeySection(),
-                  const SizedBox(height: 24),
-                  _buildHowToGetKey(),
-                  const SizedBox(height: 20),
                 ],
               ),
             ),
+    );
+  }
+
+  // ── AI Keys (consolidated, collapsible) ──────────────────────────────────
+
+  Widget _sectionHeader(String title, String subtitle) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 2, bottom: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title,
+              style: const TextStyle(
+                  color: AppColors.textPrimary,
+                  fontSize: 17,
+                  fontWeight: FontWeight.bold)),
+          const SizedBox(height: 2),
+          Text(subtitle,
+              style: const TextStyle(color: AppColors.textHint, fontSize: 12)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildApiKeysSection() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _sectionHeader(tr('set.aiKeys'), tr('set.aiKeysDesc')),
+        _keyTile(
+          icon: Icons.auto_awesome,
+          accent: AppColors.primary,
+          title: 'Gemini',
+          subtitle: tr('set.geminiSub'),
+          badge: tr('set.required'),
+          badgeColor: AppColors.accent,
+          controller: _apiKeyCtrl,
+          obscure: _obscure,
+          onToggleObscure: () => setState(() => _obscure = !_obscure),
+          saved: _isSaved,
+          hint: 'AIzaSy...',
+          onSave: _save,
+          onClear: _clear,
+          from: tr('set.fromAistudio'),
+          steps: [
+            tr('set.howGemini1'),
+            tr('set.howGemini2'),
+            tr('set.howGemini3'),
+            tr('set.howGemini4'),
+          ],
+          info: tr('set.geminiInfo'),
+        ),
+        const SizedBox(height: 10),
+        _keyTile(
+          icon: Icons.bolt,
+          accent: const Color(0xFF00BFA5),
+          title: 'Groq',
+          subtitle: tr('set.groqSub'),
+          badge: tr('set.recommended'),
+          badgeColor: const Color(0xFF00BFA5),
+          controller: _groqKeyCtrl,
+          obscure: _groqObscure,
+          onToggleObscure: () => setState(() => _groqObscure = !_groqObscure),
+          saved: _groqSaved,
+          hint: 'gsk_...',
+          onSave: _saveGroq,
+          onClear: _clearGroq,
+          from: 'console.groq.com',
+          steps: [
+            tr('set.howGroq1'),
+            tr('set.howGroq2'),
+            tr('set.howGroq3'),
+            tr('set.howGroq4'),
+          ],
+          info: tr('set.groqInfo2'),
+        ),
+        const SizedBox(height: 10),
+        _keyTile(
+          icon: Icons.graphic_eq,
+          accent: const Color(0xFF10A37F),
+          title: 'OpenAI',
+          subtitle: tr('set.openaiSub'),
+          badge: tr('set.optional'),
+          badgeColor: AppColors.textSecondary,
+          controller: _openAiKeyCtrl,
+          obscure: _openAiObscure,
+          onToggleObscure: () => setState(() => _openAiObscure = !_openAiObscure),
+          saved: _openAiSaved,
+          hint: 'sk-...',
+          onSave: _saveOpenAi,
+          onClear: _clearOpenAi,
+          from: tr('set.fromOpenai'),
+          steps: [
+            tr('set.howOpenai1'),
+            tr('set.howOpenai2'),
+            tr('set.howOpenai3'),
+            tr('set.howOpenai4'),
+          ],
+          info: tr('set.openaiInfo'),
+        ),
+        const SizedBox(height: 10),
+        _keyTile(
+          icon: Icons.gif_box_outlined,
+          accent: const Color(0xFFEA4C89),
+          title: 'Tenor',
+          subtitle: tr('set.tenorSub'),
+          badge: tr('set.optional'),
+          badgeColor: AppColors.textSecondary,
+          controller: _tenorKeyCtrl,
+          obscure: _tenorObscure,
+          onToggleObscure: () => setState(() => _tenorObscure = !_tenorObscure),
+          saved: _tenorSaved,
+          hint: 'AIza... / tenor key',
+          onSave: _saveTenor,
+          onClear: _clearTenor,
+          from: tr('set.fromTenor'),
+          steps: [
+            tr('set.howTenor1'),
+            tr('set.howTenor2'),
+            tr('set.howTenor3'),
+            tr('set.howTenor4'),
+          ],
+          info: tr('set.tenorInfo'),
+        ),
+        _keyTile(
+          icon: Icons.library_music,
+          accent: const Color(0xFF00BFA5),
+          title: 'Freesound',
+          subtitle: tr('set.freesoundSub'),
+          badge: tr('set.optional'),
+          badgeColor: AppColors.textSecondary,
+          controller: _freesoundKeyCtrl,
+          obscure: _freesoundObscure,
+          onToggleObscure: () =>
+              setState(() => _freesoundObscure = !_freesoundObscure),
+          saved: _freesoundSaved,
+          hint: 'freesound token',
+          onSave: _saveFreesound,
+          onClear: _clearFreesound,
+          from: tr('set.fromFreesound'),
+          steps: [
+            tr('set.howFs1'),
+            tr('set.howFs2'),
+            tr('set.howFs3'),
+          ],
+          info: tr('set.freesoundInfo'),
+        ),
+      ],
+    );
+  }
+
+  Widget _keyTile({
+    required IconData icon,
+    required Color accent,
+    required String title,
+    required String subtitle,
+    required String badge,
+    required Color badgeColor,
+    required TextEditingController controller,
+    required bool obscure,
+    required VoidCallback onToggleObscure,
+    required bool saved,
+    required String hint,
+    required Future<void> Function() onSave,
+    required Future<void> Function() onClear,
+    required String from,
+    required List<String> steps,
+    required String info,
+  }) {
+    final isSet = controller.text.trim().isNotEmpty;
+    return Container(
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+            color: isSet ? accent.withValues(alpha: 0.45) : AppColors.border),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Theme(
+        data: Theme.of(context)
+            .copyWith(dividerColor: Colors.transparent, splashColor: Colors.transparent),
+        child: ExpansionTile(
+          initiallyExpanded: !isSet && title == 'Gemini',
+          tilePadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+          childrenPadding: const EdgeInsets.fromLTRB(14, 0, 14, 16),
+          iconColor: AppColors.textHint,
+          collapsedIconColor: AppColors.textHint,
+          leading: Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: accent.withValues(alpha: 0.15),
+              borderRadius: BorderRadius.circular(11),
+            ),
+            child: Icon(icon, color: accent, size: 21),
+          ),
+          title: Row(
+            children: [
+              Text(title,
+                  style: const TextStyle(
+                      color: AppColors.textPrimary,
+                      fontSize: 15,
+                      fontWeight: FontWeight.bold)),
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                decoration: BoxDecoration(
+                  color: badgeColor.withValues(alpha: 0.16),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(badge,
+                    style: TextStyle(
+                        color: badgeColor, fontSize: 10, fontWeight: FontWeight.w600)),
+              ),
+            ],
+          ),
+          subtitle: Padding(
+            padding: const EdgeInsets.only(top: 3),
+            child: Row(
+              children: [
+                Icon(isSet ? Icons.check_circle : Icons.radio_button_unchecked,
+                    size: 13, color: isSet ? AppColors.success : AppColors.textHint),
+                const SizedBox(width: 5),
+                Text(isSet ? tr('set.keySet') : tr('set.keyNotSet'),
+                    style: TextStyle(
+                        color: isSet ? AppColors.success : AppColors.textHint,
+                        fontSize: 11.5)),
+                Expanded(
+                  child: Text('  ·  $subtitle',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: AppColors.textHint, fontSize: 11.5)),
+                ),
+              ],
+            ),
+          ),
+          children: [
+            // Key input
+            TextField(
+              controller: controller,
+              obscureText: obscure,
+              onChanged: (_) => setState(() {}),
+              style: const TextStyle(
+                  color: AppColors.textPrimary, fontFamily: 'monospace', fontSize: 13),
+              decoration: InputDecoration(
+                hintText: hint,
+                hintStyle: const TextStyle(color: AppColors.textHint),
+                filled: true,
+                fillColor: AppColors.surfaceLight,
+                border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(color: AppColors.border)),
+                enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(color: AppColors.border)),
+                focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: accent, width: 1.5)),
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                suffixIcon: Row(mainAxisSize: MainAxisSize.min, children: [
+                  IconButton(
+                    icon: Icon(obscure ? Icons.visibility_off : Icons.visibility,
+                        color: AppColors.textHint, size: 19),
+                    onPressed: onToggleObscure,
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.copy, color: AppColors.textHint, size: 17),
+                    onPressed: () {
+                      Clipboard.setData(ClipboardData(text: controller.text));
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                          content: Text(tr('set.copied')),
+                          duration: const Duration(seconds: 1)));
+                    },
+                  ),
+                ]),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Row(children: [
+              Expanded(
+                child: SizedBox(
+                  height: 44,
+                  child: ElevatedButton.icon(
+                    onPressed: () async => onSave(),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: saved ? AppColors.success : accent,
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12)),
+                    ),
+                    icon: Icon(saved ? Icons.check : Icons.save_outlined, size: 17),
+                    label: Text(saved ? tr('set.saved') : tr('set.save'),
+                        style: const TextStyle(fontWeight: FontWeight.bold)),
+                  ),
+                ),
+              ),
+              if (isSet) ...[
+                const SizedBox(width: 10),
+                OutlinedButton(
+                  onPressed: () async => onClear(),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.accent,
+                    side: const BorderSide(color: AppColors.accent),
+                    minimumSize: const Size(0, 44),
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                  ),
+                  child: Text(tr('set.delete')),
+                ),
+              ],
+            ]),
+            const SizedBox(height: 12),
+            // How-to (compact)
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: accent.withValues(alpha: 0.07),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: accent.withValues(alpha: 0.22)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(from,
+                      style: TextStyle(
+                          color: accent, fontSize: 11.5, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  for (int i = 0; i < steps.length; i++)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 5),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('${i + 1}. ',
+                              style: TextStyle(
+                                  color: accent,
+                                  fontSize: 11.5,
+                                  fontWeight: FontWeight.bold)),
+                          Expanded(
+                            child: Text(steps[i],
+                                style: const TextStyle(
+                                    color: AppColors.textSecondary,
+                                    fontSize: 11.5,
+                                    height: 1.4)),
+                          ),
+                        ],
+                      ),
+                    ),
+                  const SizedBox(height: 4),
+                  Text(info,
+                      style: const TextStyle(
+                          color: AppColors.textHint, fontSize: 11, height: 1.4)),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ── App language (Lao / Thai) ────────────────────────────────────────────
+
+  Widget _buildLanguageSection() {
+    Widget chip(String code, String label) {
+      final selected = I18n.lang.value == code;
+      return Expanded(
+        child: GestureDetector(
+          onTap: () {
+            if (!selected) {
+              I18n.set(code);
+              setState(() {}); // refresh this screen immediately
+            }
+          },
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            margin: const EdgeInsets.only(right: 8),
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: selected
+                  ? AppColors.primary.withValues(alpha: 0.15)
+                  : AppColors.surface,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: selected ? AppColors.primary : AppColors.border,
+                width: selected ? 1.8 : 1,
+              ),
+            ),
+            child: Text(
+              label,
+              style: TextStyle(
+                color: selected ? AppColors.primary : AppColors.textPrimary,
+                fontWeight: selected ? FontWeight.bold : FontWeight.w500,
+                fontSize: 14,
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          tr('lang.section'),
+          style: const TextStyle(
+            color: AppColors.textPrimary,
+            fontSize: 15,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            chip('lo', '🇱🇦 ${tr('lang.lo')}'),
+            chip('th', '🇹🇭 ${tr('lang.th')}'),
+          ],
+        ),
+      ],
     );
   }
 
@@ -325,7 +1021,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      signedIn ? 'ບັນຊີ' : 'ເຊື່ອມ PRO ກັບບັນຊີ',
+                      signedIn ? tr('set.account.section') : tr('set.linkPro'),
                       style: const TextStyle(
                         color: AppColors.textPrimary,
                         fontWeight: FontWeight.bold,
@@ -334,8 +1030,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                     Text(
                       signedIn
-                          ? (_user!.email ?? 'ເຂົ້າສູ່ລະບົບແລ້ວ')
-                          : 'ລ໋ອກອິນ → PRO ຕິດຕາມບັນຊີ ແມ້ປ່ຽນເຄື່ອງ',
+                          ? (_user!.email ?? tr('set.loggedIn'))
+                          : tr('set.loginBenefit'),
                       style: const TextStyle(
                         color: AppColors.textSecondary,
                         fontSize: 12,
@@ -369,7 +1065,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             ),
                           )
                         : const Icon(Icons.sync_rounded, size: 18),
-                    label: const Text('ອັບເດດ PRO'),
+                    label: Text(tr('set.updatePro')),
                   ),
                 ),
                 const SizedBox(width: 10),
@@ -381,9 +1077,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     minimumSize: const Size(0, 44),
                     padding: const EdgeInsets.symmetric(horizontal: 16),
                   ),
-                  child: const Text('ອອກ'),
+                  child: Text(tr('set.signOut')),
                 ),
               ],
+            ),
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: _isSyncing ? null : _deleteAccount,
+                style: TextButton.styleFrom(
+                  foregroundColor: AppColors.accent,
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                ),
+                icon: const Icon(Icons.delete_forever_rounded, size: 16),
+                label: Text(tr('set.deleteAccount'),
+                    style: const TextStyle(fontSize: 12)),
+              ),
             ),
           ] else ...[
             SizedBox(
@@ -408,9 +1118,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ),
                       )
                     : const Icon(Icons.login_rounded, size: 18),
-                label: const Text(
-                  'ເຂົ້າສູ່ລະບົບ ດ້ວຍ Google',
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                label: Text(
+                  tr('set.signInGoogle'),
+                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
                 ),
               ),
             ),
@@ -457,93 +1167,268 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  Widget _buildProActive() {
-    return Column(
+  // ── Shared PRO building blocks ────────────────────────────────────────────
+
+  /// Card header: icon + title + subtitle + status pill.
+  Widget _proHeader({
+    required IconData icon,
+    required Color color,
+    required String subtitle,
+    required String pill,
+  }) {
+    return Row(
       children: [
-        Row(
-          children: [
-            Container(
-              width: 44,
-              height: 44,
-              decoration: BoxDecoration(
-                color: const Color(0xFFFFD700).withOpacity(0.2),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: const Icon(
-                Icons.star_rounded,
-                color: Color(0xFFFFD700),
-                size: 24,
-              ),
-            ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'KarnSub PRO',
-                    style: TextStyle(
-                      color: Color(0xFFFFD700),
+        Container(
+          width: 44,
+          height: 44,
+          decoration: BoxDecoration(
+            color: color.withOpacity(0.18),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Icon(icon, color: color, size: 24),
+        ),
+        const SizedBox(width: 14),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('KarnSub PRO',
+                  style: TextStyle(
+                      color: AppColors.textPrimary,
                       fontWeight: FontWeight.bold,
-                      fontSize: 17,
-                    ),
-                  ),
-                  Text(
-                    _proExpiry != null
-                        ? 'ໃຊ້ໄດ້ຮອດ ${_fmtDate(_proExpiry!)}'
-                        : 'Activated — ທຸກ features ໃຊ້ໄດ້ເຕັມ',
-                    style: const TextStyle(
-                      color: Color(0xFFFFB300),
-                      fontSize: 12,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              decoration: BoxDecoration(
-                color: const Color(0xFFFFD700).withOpacity(0.15),
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(
-                  color: const Color(0xFFFFD700).withOpacity(0.5),
-                ),
-              ),
-              child: const Text(
-                'PRO ✓',
-                style: TextStyle(
-                  color: Color(0xFFFFD700),
-                  fontWeight: FontWeight.bold,
-                  fontSize: 12,
-                ),
-              ),
-            ),
-          ],
+                      fontSize: 17)),
+              Text(subtitle,
+                  style: TextStyle(color: color, fontSize: 12)),
+            ],
+          ),
         ),
-        const SizedBox(height: 16),
-        const Divider(color: Color(0xFF3D2E00), height: 1),
-        const SizedBox(height: 14),
-        _proFeatureRow(
-          Icons.all_inclusive_rounded,
-          'Export ບໍ່ຈຳກັດ — ບໍ່ຕິດ watermark',
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          decoration: BoxDecoration(
+            color: color.withOpacity(0.15),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: color.withOpacity(0.5)),
+          ),
+          child: Text(pill,
+              style: TextStyle(
+                  color: color, fontWeight: FontWeight.bold, fontSize: 12)),
         ),
-        const SizedBox(height: 8),
-        _proFeatureRow(Icons.highlight, 'Karaoke Highlight'),
-        const SizedBox(height: 8),
-        _proFeatureRow(Icons.translate, 'ຊັບສອງພາສາ (Bilingual)'),
       ],
     );
   }
 
-  Widget _proFeatureRow(IconData icon, String label) {
-    return Row(
-      children: [
-        Icon(icon, color: const Color(0xFFFFD700), size: 16),
-        const SizedBox(width: 10),
-        Text(
-          label,
-          style: const TextStyle(color: Color(0xFFFFB300), fontSize: 12.5),
+  /// Feature chips shown in a compact wrap (no long sentences).
+  Widget _proFeatureChips() {
+    Widget chip(IconData i, String t) => Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: const Color(0xFFFFD700).withOpacity(0.10),
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(i, color: const Color(0xFFFFD700), size: 14),
+            const SizedBox(width: 6),
+            Text(t,
+                style: const TextStyle(
+                    color: Color(0xFFFFD700), fontSize: 11.5)),
+          ]),
+        );
+    return Wrap(spacing: 8, runSpacing: 8, children: [
+      chip(Icons.block, tr('set.feat.noWatermark')),
+      chip(Icons.highlight, 'Karaoke'),
+      chip(Icons.translate, tr('set.feat.bilingual')),
+      chip(Icons.record_voice_over, tr('set.feat.aiVoice')),
+    ]);
+  }
+
+  /// Primary "pay with QR" button (big, the main CTA).
+  Widget _payQrButton(String label) {
+    return SizedBox(
+      width: double.infinity,
+      height: 50,
+      child: ElevatedButton.icon(
+        onPressed: _openAutoTopUp,
+        style: ElevatedButton.styleFrom(
+          backgroundColor: AppColors.primary,
+          foregroundColor: Colors.white,
+          elevation: 0,
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
         ),
+        icon: const Icon(Icons.qr_code_2_rounded, size: 20),
+        label: Text(label,
+            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+      ),
+    );
+  }
+
+  /// Small secondary "other ways" link (WhatsApp / manual).
+  Widget _otherWaysLink() {
+    return Center(
+      child: TextButton(
+        onPressed: _showBuyInfo,
+        child: Text(tr('set.otherChannels'),
+            style: const TextStyle(color: AppColors.textSecondary, fontSize: 12)),
+      ),
+    );
+  }
+
+  /// "Enter license key" button — the ONLY unlock path on the Play Store build
+  /// (where selling in-app is not allowed), but also offered everywhere else.
+  Widget _redeemKeyButton({bool primary = false}) {
+    final child = primary
+        ? SizedBox(
+            width: double.infinity,
+            height: 50,
+            child: ElevatedButton.icon(
+              onPressed: _showRedeemKey,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.primary,
+                foregroundColor: Colors.white,
+                elevation: 0,
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14)),
+              ),
+              icon: const Icon(Icons.vpn_key_rounded, size: 20),
+              label: Text(tr('set.redeemKey'),
+                  style: const TextStyle(
+                      fontWeight: FontWeight.bold, fontSize: 15)),
+            ),
+          )
+        : Center(
+            child: TextButton.icon(
+              onPressed: _showRedeemKey,
+              icon: const Icon(Icons.vpn_key_rounded,
+                  size: 16, color: AppColors.textSecondary),
+              label: Text(tr('set.haveKey'),
+                  style: const TextStyle(
+                      color: AppColors.textSecondary, fontSize: 12)),
+            ),
+          );
+    return child;
+  }
+
+  /// Dialog: paste a PRO key → validate + claim (single-use) → unlock.
+  Future<void> _showRedeemKey() async {
+    final ctrl = TextEditingController();
+    bool busy = false;
+    String? err;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          backgroundColor: AppColors.surface,
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: Row(children: [
+            const Icon(Icons.vpn_key_rounded, color: AppColors.primary, size: 20),
+            const SizedBox(width: 8),
+            Text(tr('set.redeemKey'),
+                style: const TextStyle(
+                    color: AppColors.textPrimary,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16)),
+          ]),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(tr('set.redeemKeyHint'),
+                  style:
+                      const TextStyle(color: AppColors.textHint, fontSize: 12)),
+              const SizedBox(height: 12),
+              TextField(
+                controller: ctrl,
+                autofocus: true,
+                textCapitalization: TextCapitalization.characters,
+                style: const TextStyle(
+                    color: AppColors.textPrimary,
+                    fontSize: 16,
+                    letterSpacing: 1.5),
+                decoration: InputDecoration(
+                  hintText: 'KARN-XXXX-XXXX-XXXX',
+                  hintStyle: const TextStyle(color: AppColors.textHint),
+                  filled: true,
+                  fillColor: AppColors.surfaceLight,
+                  border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none),
+                  errorText: err,
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: busy ? null : () => Navigator.pop(ctx),
+              child: Text(tr('common.close'),
+                  style: const TextStyle(color: AppColors.textSecondary)),
+            ),
+            ElevatedButton(
+              onPressed: busy
+                  ? null
+                  : () async {
+                      setD(() {
+                        busy = true;
+                        err = null;
+                      });
+                      final res =
+                          await LicenseService.activateWithKey(ctrl.text);
+                      if (res == ActivationResult.success) {
+                        if (ctx.mounted) Navigator.pop(ctx);
+                        await _loadAll();
+                        _showSuccess(tr('set.keyOk'));
+                        return;
+                      }
+                      setD(() {
+                        busy = false;
+                        err = switch (res) {
+                          ActivationResult.invalid => tr('set.keyInvalid'),
+                          ActivationResult.expired => tr('set.keyExpired'),
+                          ActivationResult.alreadyUsed => tr('set.keyUsed'),
+                          ActivationResult.needsInternet =>
+                            tr('set.keyNeedNet'),
+                          _ => tr('set.keyInvalid'),
+                        };
+                      });
+                    },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.primary,
+                foregroundColor: Colors.white,
+              ),
+              child: busy
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Colors.white))
+                  : Text(tr('set.activate')),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildProActive() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _proHeader(
+          icon: Icons.star_rounded,
+          color: const Color(0xFFFFD700),
+          subtitle: _proExpiry != null
+              ? tr('set.proUntil', {'date': _fmtDate(_proExpiry!)})
+              : tr('set.proFull'),
+          pill: 'PRO ✓',
+        ),
+        const SizedBox(height: 16),
+        _proFeatureChips(),
+        const SizedBox(height: 16),
+        if (!kPlayStoreBuild)
+          _payQrButton(tr('set.renewPro'))
+        else
+          _redeemKeyButton(primary: true),
       ],
     );
   }
@@ -552,98 +1437,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            Container(
-              width: 44,
-              height: 44,
-              decoration: BoxDecoration(
-                color: const Color(0xFFCC4444).withOpacity(0.2),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: const Icon(
-                Icons.star_rounded,
-                color: Color(0xFFCC4444),
-                size: 24,
-              ),
-            ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'KarnSub PRO',
-                    style: TextStyle(
-                      color: Color(0xFFCC4444),
-                      fontWeight: FontWeight.bold,
-                      fontSize: 17,
-                    ),
-                  ),
-                  Text(
-                    'ໝົດອາຍຸ ${_proExpiry != null ? _fmtDate(_proExpiry!) : ''}',
-                    style: const TextStyle(
-                      color: Color(0xFFAA3333),
-                      fontSize: 12,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              decoration: BoxDecoration(
-                color: const Color(0xFFCC4444).withOpacity(0.15),
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(
-                  color: const Color(0xFFCC4444).withOpacity(0.5),
-                ),
-              ),
-              child: const Text(
-                'ໝົດ',
-                style: TextStyle(
-                  color: Color(0xFFCC4444),
-                  fontWeight: FontWeight.bold,
-                  fontSize: 12,
-                ),
-              ),
-            ),
-          ],
+        _proHeader(
+          icon: Icons.star_rounded,
+          color: const Color(0xFFCC4444),
+          subtitle: tr('set.expiredOn', {'date': _proExpiry != null ? _fmtDate(_proExpiry!) : ''}),
+          pill: tr('set.expired'),
         ),
-        const SizedBox(height: 14),
-        const Divider(color: Color(0xFF3D1010), height: 1),
-        const SizedBox(height: 14),
-        const Text(
-          'ຕໍ່ອາຍຸ PRO:',
-          style: TextStyle(
-            color: AppColors.textPrimary,
-            fontWeight: FontWeight.w600,
-            fontSize: 14,
-          ),
-        ),
-        const SizedBox(height: 8),
-        Text(
-          'ຈ່າຍຕໍ່ເດືອນ ($proPrice) ທາງ WhatsApp → ແລ້ວກົດ "ອັບເດດ PRO" ໃນກາດບັນຊີດ້ານລຸ່ມ',
-          style: const TextStyle(
-            color: AppColors.textSecondary,
-            fontSize: 12.5,
-          ),
-        ),
-        const SizedBox(height: 12),
-        Center(
-          child: GestureDetector(
-            onTap: _showBuyInfo,
-            child: const Text(
-              'ວິທີຊື້ PRO →',
-              style: TextStyle(
-                color: AppColors.primary,
-                fontSize: 12,
-                decoration: TextDecoration.underline,
-                decorationColor: AppColors.primary,
-              ),
-            ),
-          ),
-        ),
+        const SizedBox(height: 16),
+        _proFeatureChips(),
+        const SizedBox(height: 16),
+        if (!kPlayStoreBuild) ...[
+          _payQrButton(tr('set.renewProPrice', {'price': proPrice})),
+          const SizedBox(height: 6),
+          _otherWaysLink(),
+          const SizedBox(height: 2),
+          _redeemKeyButton(),
+        ] else
+          _redeemKeyButton(primary: true),
       ],
     );
   }
@@ -652,206 +1462,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Header with FREE badge
-        Row(
-          children: [
-            Container(
-              width: 44,
-              height: 44,
-              decoration: BoxDecoration(
-                color: AppColors.primary.withOpacity(0.1),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: const Icon(
-                Icons.star_border_rounded,
-                color: AppColors.textSecondary,
-                size: 24,
-              ),
-            ),
-            const SizedBox(width: 14),
-            const Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'KarnSub PRO',
-                    style: TextStyle(
-                      color: AppColors.textPrimary,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 16,
-                    ),
-                  ),
-                  Text(
-                    'Upgrade ເພື່ອໃຊ້ງານເຕັມ',
-                    style: TextStyle(
-                      color: AppColors.textSecondary,
-                      fontSize: 12,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              decoration: BoxDecoration(
-                color: AppColors.surface,
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: AppColors.border),
-              ),
-              child: const Text(
-                'FREE',
-                style: TextStyle(
-                  color: AppColors.textSecondary,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 12,
-                ),
-              ),
-            ),
-          ],
+        _proHeader(
+          icon: Icons.star_border_rounded,
+          color: AppColors.textSecondary,
+          subtitle: tr('set.upgradeFull'),
+          pill: 'FREE',
         ),
-        const SizedBox(height: 16),
-
-        // Free tier limits
-        _limitRow(
-          Icons.branding_watermark_outlined,
-          'Export video → ຕິດ watermark (ຟຣີ)',
-        ),
-        const SizedBox(height: 6),
-        _limitRow(Icons.hd_rounded, 'Export ບໍ່ຕິດ watermark → 1 ຄັ້ງ/ມື້'),
-        const SizedBox(height: 6),
-        _limitRow(Icons.lock_rounded, 'Karaoke + Bilingual → PRO only'),
-
-        const SizedBox(height: 16),
-        const Divider(color: AppColors.border, height: 1),
-        const SizedBox(height: 16),
-
-        // PRO features teaser
-        const Text(
-          'PRO ໄດ້ຫຍັງ?',
-          style: TextStyle(
-            color: Color(0xFFFFD700),
-            fontWeight: FontWeight.w600,
-            fontSize: 13,
-          ),
-        ),
-        const SizedBox(height: 10),
-        _proTeaseRow(
-          Icons.all_inclusive_rounded,
-          'Export ບໍ່ຈຳກັດ — ບໍ່ຕິດ watermark',
-        ),
-        const SizedBox(height: 6),
-        _proTeaseRow(Icons.highlight, 'Karaoke Highlight'),
-        const SizedBox(height: 6),
-        _proTeaseRow(Icons.translate, 'ຊັບສອງພາສາ (Bilingual)'),
-        const SizedBox(height: 10),
+        const SizedBox(height: 8),
         Text(
-          'ພຽງ $proPrice',
+          tr('set.unlockAll', {'price': proPrice}),
           style: const TextStyle(
-            color: Color(0xFFFFD700),
-            fontWeight: FontWeight.bold,
-            fontSize: 14,
-          ),
+              color: Color(0xFFFFD700),
+              fontWeight: FontWeight.bold,
+              fontSize: 14),
         ),
-
-        const SizedBox(height: 16),
-        // Subscribe via WhatsApp (one-tap deep link)
-        SizedBox(
-          width: double.infinity,
-          height: 46,
-          child: ElevatedButton.icon(
-            onPressed: _openWhatsApp,
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF25D366), // WhatsApp green
-              foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
-            ),
-            icon: const Icon(Icons.chat_rounded, size: 18),
-            label: const Text(
-              'ສະມັກ PRO ທາງ WhatsApp',
-              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-            ),
-          ),
-        ),
-
-        const SizedBox(height: 16),
-        const Divider(color: AppColors.border, height: 1),
-        const SizedBox(height: 16),
-
-        // How to get PRO (cloud subscription model)
-        Container(
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: const Color(0xFFFFD700).withOpacity(0.06),
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(
-              color: const Color(0xFFFFD700).withOpacity(0.25),
-            ),
-          ),
-          child: const Row(
-            children: [
-              Icon(
-                Icons.workspace_premium_rounded,
-                color: Color(0xFFFFD700),
-                size: 18,
-              ),
-              SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  'ຂັ້ນຕອນ: login Google → ສະມັກທາງ WhatsApp → ກົດ "ອັບເດດ PRO"',
-                  style: TextStyle(color: Color(0xFFFFD700), fontSize: 12),
-                ),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 12),
-        Center(
-          child: GestureDetector(
-            onTap: _showBuyInfo,
-            child: const Text(
-              'ວິທີຊື້ PRO →',
-              style: TextStyle(
-                color: AppColors.primary,
-                fontSize: 12,
-                decoration: TextDecoration.underline,
-                decorationColor: AppColors.primary,
-              ),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _limitRow(IconData icon, String label) {
-    return Row(
-      children: [
-        Icon(icon, color: AppColors.textHint, size: 14),
-        const SizedBox(width: 8),
-        Expanded(
-          child: Text(
-            label,
-            style: const TextStyle(
-              color: AppColors.textSecondary,
-              fontSize: 12,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _proTeaseRow(IconData icon, String label) {
-    return Row(
-      children: [
-        Icon(icon, color: const Color(0xFFFFD700), size: 14),
-        const SizedBox(width: 8),
-        Text(
-          label,
-          style: const TextStyle(color: AppColors.textPrimary, fontSize: 12.5),
-        ),
+        const SizedBox(height: 14),
+        _proFeatureChips(),
+        const SizedBox(height: 18),
+        if (!kPlayStoreBuild) ...[
+          _payQrButton(tr('set.subscribeQr')),
+          const SizedBox(height: 6),
+          _otherWaysLink(),
+          const SizedBox(height: 2),
+          _redeemKeyButton(),
+        ] else
+          _redeemKeyButton(primary: true),
       ],
     );
   }
@@ -862,9 +1497,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       builder: (_) => AlertDialog(
         backgroundColor: AppColors.surface,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text(
-          'ຊື້ KarnSub PRO',
-          style: TextStyle(
+        title: Text(
+          tr('set.buyPro'),
+          style: const TextStyle(
             color: AppColors.textPrimary,
             fontWeight: FontWeight.bold,
           ),
@@ -873,10 +1508,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _buyStep('1', 'ເຂົ້າສູ່ລະບົບ ດ້ວຍ Google ໃນແອັບກ່ອນ'),
-            _buyStep('2', 'ກົດ "ສະມັກ PRO ທາງ WhatsApp" → ໂອນ $proPrice'),
-            _buyStep('3', 'ສົ່ງ screenshot ການໂອນ (ບອກ Gmail/Account ID ນຳ)'),
-            _buyStep('4', 'ລໍຖ້າເປີດ PRO → ກົດ "ອັບເດດ PRO" ໃນ Settings'),
+            _buyStep('1', tr('set.buyFast')),
+            _buyStep('2', tr('set.buyWa', {'price': proPrice})),
+            _buyStep('3', tr('set.loginRequired')),
             const SizedBox(height: 12),
             Container(
               padding: const EdgeInsets.all(12),
@@ -897,7 +1531,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      'PRO $proPrice — ໝົດເດືອນ ກັບຄືນ FREE ເອງ',
+                      tr('set.proNote', {'price': proPrice}),
                       style: const TextStyle(
                         color: Color(0xFFFFD700),
                         fontSize: 12,
@@ -912,10 +1546,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text(
-              'ປິດ',
-              style: TextStyle(color: AppColors.textSecondary),
+            child: Text(
+              tr('common.close'),
+              style: const TextStyle(color: AppColors.textSecondary),
             ),
+          ),
+          ElevatedButton.icon(
+            onPressed: () {
+              Navigator.pop(context);
+              _openAutoTopUp();
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.primary,
+              foregroundColor: Colors.white,
+            ),
+            icon: const Icon(Icons.qr_code_2_rounded, size: 16),
+            label: Text(tr('set.payQrAuto')),
           ),
           ElevatedButton.icon(
             onPressed: () {
@@ -999,21 +1645,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     color: Color(0xFF00BFA5), size: 20),
               ),
               const SizedBox(width: 12),
-              const Expanded(
+              Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Groq Key (ໃຫ້ຕົງສຽງ)',
-                      style: TextStyle(
+                      tr('set.groqKeyLabel'),
+                      style: const TextStyle(
                         color: AppColors.textPrimary,
                         fontWeight: FontWeight.bold,
                         fontSize: 15,
                       ),
                     ),
                     Text(
-                      'ທາງເລືອກ — Whisper ຈັບເວລາທຸກຄຳໃຫ້ຕົງສຽງ (console.groq.com)',
-                      style: TextStyle(
+                      tr('set.groqKeyDesc'),
+                      style: const TextStyle(
                           color: AppColors.textSecondary, fontSize: 11),
                     ),
                   ],
@@ -1031,7 +1677,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               fontSize: 13,
             ),
             decoration: InputDecoration(
-              hintText: 'gsk_xxxxxxxxxxxxxxxxxxxx (ໃສ່ ຫຼື ບໍ່ໃສ່ກໍ່ໄດ້)',
+              hintText: tr('set.groqHint2'),
               hintStyle: const TextStyle(color: AppColors.textHint),
               filled: true,
               fillColor: AppColors.surfaceLight,
@@ -1075,15 +1721,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
               icon: Icon(_groqSaved ? Icons.check : Icons.save_outlined,
                   size: 18),
-              label: Text(_groqSaved ? 'ບັນທຶກແລ້ວ!' : 'ບັນທຶກ Groq Key'),
+              label: Text(_groqSaved ? tr('set.saved') : tr('set.saveGroqKey')),
             ),
           ),
           const SizedBox(height: 10),
-          const Text(
-            '💡 ໃສ່ Groq key ແລ້ວ ການຖອດສຽງ/Auto Sync ຈະໃຊ້ Whisper ຈັບເວລາ '
-            'ໃຫ້ຕົງສຽງທຸກຄຳ (ຂໍຟຣີໄດ້ທີ່ console.groq.com). ບໍ່ໃສ່ກໍ່ໄດ້ — '
-            'ຈະໃຊ້ການ sync ແບບປົກກະຕິ.',
-            style: TextStyle(
+          Text(
+            tr('set.groqInfo'),
+            style: const TextStyle(
                 color: AppColors.textHint, fontSize: 11, height: 1.5),
           ),
         ],
@@ -1120,10 +1764,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
               ),
               const SizedBox(width: 12),
-              const Column(
+              Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
+                  const Text(
                     'Gemini API Key',
                     style: TextStyle(
                       color: AppColors.textPrimary,
@@ -1132,8 +1776,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                   ),
                   Text(
-                    'ຈາກ aistudio.google.com',
-                    style: TextStyle(
+                    tr('set.fromAistudio'),
+                    style: const TextStyle(
                       color: AppColors.textSecondary,
                       fontSize: 12,
                     ),
@@ -1195,9 +1839,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     onPressed: () {
                       Clipboard.setData(ClipboardData(text: _apiKeyCtrl.text));
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('ຄັດລອກແລ້ວ'),
-                          duration: Duration(seconds: 1),
+                        SnackBar(
+                          content: Text(tr('set.copied')),
+                          duration: const Duration(seconds: 1),
                         ),
                       );
                     },
@@ -1211,7 +1855,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             children: [
               Expanded(
                 child: GradientButton(
-                  label: _isSaved ? 'ບັນທຶກແລ້ວ!' : 'ບັນທຶກ',
+                  label: _isSaved ? tr('set.saved') : tr('set.save'),
                   icon: _isSaved ? Icons.check : Icons.save_outlined,
                   height: 48,
                   solidColor: _isSaved ? AppColors.success : null,
@@ -1227,7 +1871,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   minimumSize: const Size(0, 48),
                   padding: const EdgeInsets.symmetric(horizontal: 16),
                 ),
-                child: const Text('ລຶບ'),
+                child: Text(tr('set.delete')),
               ),
             ],
           ),
@@ -1265,10 +1909,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
               ),
               const SizedBox(width: 12),
-              const Column(
+              Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
+                  const Text(
                     'OpenAI API Key',
                     style: TextStyle(
                       color: AppColors.textPrimary,
@@ -1277,8 +1921,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                   ),
                   Text(
-                    'ຈາກ platform.openai.com',
-                    style: TextStyle(
+                    tr('set.fromOpenai'),
+                    style: const TextStyle(
                       color: AppColors.textSecondary,
                       fontSize: 12,
                     ),
@@ -1340,9 +1984,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     onPressed: () {
                       Clipboard.setData(ClipboardData(text: _openAiKeyCtrl.text));
                       ScaffoldMessenger.of(context).showSnackBar(
-                         const SnackBar(
-                           content: Text('ຄັດລອກແລ້ວ'),
-                           duration: Duration(seconds: 1),
+                         SnackBar(
+                           content: Text(tr('set.copied')),
+                           duration: const Duration(seconds: 1),
                          ),
                       );
                     },
@@ -1356,7 +2000,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             children: [
               Expanded(
                 child: GradientButton(
-                  label: _openAiSaved ? 'ບັນທຶກແລ້ວ!' : 'ບັນທຶກ',
+                  label: _openAiSaved ? tr('set.saved') : tr('set.save'),
                   icon: _openAiSaved ? Icons.check : Icons.save_outlined,
                   height: 48,
                   solidColor: _openAiSaved ? AppColors.success : null,
@@ -1372,7 +2016,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   minimumSize: const Size(0, 48),
                   padding: const EdgeInsets.symmetric(horizontal: 16),
                 ),
-                child: const Text('ລຶບ'),
+                child: Text(tr('set.delete')),
               ),
             ],
           ),
@@ -1381,7 +2025,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  Widget _buildHowToGetKey() {
+  Widget _buildHowToGetGeminiKey() {
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
@@ -1392,19 +2036,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'ວິທີຂໍ Gemini API Key',
-            style: TextStyle(
+          Text(
+            tr('set.howGemini'),
+            style: const TextStyle(
               color: AppColors.textPrimary,
               fontWeight: FontWeight.bold,
               fontSize: 15,
             ),
           ),
           const SizedBox(height: 14),
-          _buildStep('1', 'ໄປ aistudio.google.com → ລ໋ອກອິນ Gmail'),
-          _buildStep('2', 'ກົດ "Get API key" → "Create API key"'),
-          _buildStep('3', 'ຄັດລອກ Key (ຂຶ້ນຕົ້ນ AIzaSy...)'),
-          _buildStep('4', 'ວາງ key ໃສ່ຊ່ອງດ້ານເທິງ → ກົດ ບັນທຶກ'),
+          _buildStep('1', tr('set.howGemini1')),
+          _buildStep('2', tr('set.howGemini2')),
+          _buildStep('3', tr('set.howGemini3')),
+          _buildStep('4', tr('set.howGemini4')),
           const SizedBox(height: 12),
           Container(
             padding: const EdgeInsets.all(12),
@@ -1413,14 +2057,114 @@ class _SettingsScreenState extends State<SettingsScreen> {
               borderRadius: BorderRadius.circular(10),
               border: Border.all(color: AppColors.primary.withOpacity(0.3)),
             ),
-            child: const Row(
+            child: Row(
               children: [
-                Icon(Icons.info_outline, color: AppColors.primary, size: 18),
-                SizedBox(width: 8),
+                const Icon(Icons.info_outline, color: AppColors.primary, size: 18),
+                const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    'Gemini 2.5 Flash — ຖອດສຽງລາວໄດ້ດີທີ່ສຸດ\nມີຊັ້ນຟຣີ (Free tier) ໃຫ້ໃຊ້ໄດ້',
-                    style: TextStyle(color: AppColors.primary, fontSize: 12),
+                    tr('set.geminiInfo'),
+                    style: const TextStyle(color: AppColors.primary, fontSize: 12),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHowToGetOpenAiKey() {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            tr('set.howOpenai'),
+            style: const TextStyle(
+              color: AppColors.textPrimary,
+              fontWeight: FontWeight.bold,
+              fontSize: 15,
+            ),
+          ),
+          const SizedBox(height: 14),
+          _buildStep('1', tr('set.howOpenai1')),
+          _buildStep('2', tr('set.howOpenai2')),
+          _buildStep('3', tr('set.howOpenai3')),
+          _buildStep('4', tr('set.howOpenai4')),
+          const SizedBox(height: 12),
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: const Color(0xFF10A37F).withOpacity(0.1),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: const Color(0xFF10A37F).withOpacity(0.3)),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.info_outline, color: Color(0xFF10A37F), size: 18),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    tr('set.openaiInfo'),
+                    style: const TextStyle(color: Color(0xFF10A37F), fontSize: 12),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHowToGetGroqKey() {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            tr('set.howGroq'),
+            style: const TextStyle(
+              color: AppColors.textPrimary,
+              fontWeight: FontWeight.bold,
+              fontSize: 15,
+            ),
+          ),
+          const SizedBox(height: 14),
+          _buildStep('1', tr('set.howGroq1')),
+          _buildStep('2', tr('set.howGroq2')),
+          _buildStep('3', tr('set.howGroq3')),
+          _buildStep('4', tr('set.howGroq4')),
+          const SizedBox(height: 12),
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: const Color(0xFF00BFA5).withOpacity(0.1),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: const Color(0xFF00BFA5).withOpacity(0.3)),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.info_outline, color: Color(0xFF00BFA5), size: 18),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    tr('set.groqInfo2'),
+                    style: const TextStyle(color: Color(0xFF00BFA5), fontSize: 12),
                   ),
                 ),
               ],
@@ -1470,161 +2214,4 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  // ── ElevenLabs TTS (Premium Online) Key Section ───────────────────────
-
-  Widget _buildElevenLabsKeySection() {
-    return Container(
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: AppColors.border),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 38,
-                height: 38,
-                decoration: BoxDecoration(
-                  color: AppColors.primary.withOpacity(0.15),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: const Icon(
-                  Icons.record_voice_over,
-                  color: AppColors.primary,
-                  size: 20,
-                ),
-              ),
-              const SizedBox(width: 12),
-              const Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'ElevenLabs API Key',
-                      style: TextStyle(
-                        color: AppColors.textPrimary,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 15,
-                      ),
-                    ),
-                    Text(
-                      'ສຽງພາກລະດັບ Premium (elevenlabs.io)',
-                      style: TextStyle(
-                        color: AppColors.textSecondary,
-                        fontSize: 11,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          TextField(
-            controller: _elevenLabsKeyCtrl,
-            obscureText: _elevenLabsObscure,
-            style: const TextStyle(
-              color: AppColors.textPrimary,
-              fontFamily: 'monospace',
-              fontSize: 13,
-            ),
-            decoration: InputDecoration(
-              hintText: 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-              hintStyle: const TextStyle(color: AppColors.textHint),
-              filled: true,
-              fillColor: AppColors.surfaceLight,
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: const BorderSide(color: AppColors.border),
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: const BorderSide(color: AppColors.border),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: const BorderSide(
-                  color: AppColors.primary,
-                  width: 1.5,
-                ),
-              ),
-              contentPadding: const EdgeInsets.symmetric(
-                horizontal: 14,
-                vertical: 14,
-              ),
-              suffixIcon: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  IconButton(
-                    icon: Icon(
-                      _elevenLabsObscure ? Icons.visibility_off : Icons.visibility,
-                      color: AppColors.textHint,
-                      size: 20,
-                    ),
-                    onPressed: () => setState(() => _elevenLabsObscure = !_elevenLabsObscure),
-                  ),
-                  IconButton(
-                    icon: const Icon(
-                      Icons.copy,
-                      color: AppColors.textHint,
-                      size: 18,
-                    ),
-                    onPressed: () {
-                      Clipboard.setData(ClipboardData(text: _elevenLabsKeyCtrl.text));
-                      ScaffoldMessenger.of(context).showSnackBar(
-                         const SnackBar(
-                           content: Text('ຄັດລອກແລ້ວ'),
-                           duration: Duration(seconds: 1),
-                         ),
-                      );
-                    },
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: 14),
-          Row(
-            children: [
-              Expanded(
-                child: GradientButton(
-                  label: _elevenLabsSaved ? '...ບັນທຶກແລ້ວ!' : 'ບັນທຶກ',
-                  icon: _elevenLabsSaved ? Icons.check : Icons.save_outlined,
-                  height: 48,
-                  solidColor: _elevenLabsSaved ? AppColors.success : null,
-                  onTap: _saveElevenLabs,
-                ),
-              ),
-              const SizedBox(width: 10),
-              OutlinedButton(
-                onPressed: _clearElevenLabs,
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: AppColors.accent,
-                  side: const BorderSide(color: AppColors.accent),
-                  minimumSize: const Size(0, 48),
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                ),
-                child: const Text('ລຶບ'),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          const Text(
-            '💡 ວິທີຂໍ Key: ໄປທີ່ elevenlabs.io → ລ໋ອກອິນບັນຊີຂອງທ່ານ '
-            '→ ກົດທີ່ໂປຣໄຟລ໌ (Profile) ດ້ານຂວາລຸ່ມ → ເລືອກ My Account → '
-            'ຄັດລອກ API Key ແລ້ວນຳມາວາງໃສ່ບ່ອນນີ້.',
-            style: TextStyle(
-              color: AppColors.textHint,
-              fontSize: 11,
-              height: 1.5,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 }
