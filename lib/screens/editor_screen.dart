@@ -664,13 +664,15 @@ class _EditorScreenState extends State<EditorScreen>
     try {
       final flatList = await ExportService.detectSpeechRegions(project.videoPath!);
       final durMs = _duration.inMilliseconds > 0 ? _duration.inMilliseconds : 10000;
-      _keptRegions = computeKeptRegions(flatList, durMs);
+      _keptRegions =
+          computeKeptRegions(flatList, durMs, mergeGapMs: project.autoCutGapMs);
     } catch (e) {
       debugPrint('Failed to load kept regions: $e');
     }
   }
 
-  List<List<int>> computeKeptRegions(List<int> speechFlatList, int totalDurationMs) {
+  List<List<int>> computeKeptRegions(List<int> speechFlatList, int totalDurationMs,
+      {int mergeGapMs = 300}) {
     if (speechFlatList.isEmpty) return [];
     final List<List<int>> rawRegions = [];
     for (int i = 0; i < speechFlatList.length; i += 2) {
@@ -687,7 +689,7 @@ class _EditorScreenState extends State<EditorScreen>
     for (int i = 1; i < rawRegions.length; i++) {
       final rStart = rawRegions[i][0];
       final rEnd = rawRegions[i][1];
-      if (rStart - curEnd <= 300) {
+      if (rStart - curEnd <= mergeGapMs) {
         curEnd = rEnd;
       } else {
         merged.add([curStart, curEnd]);
@@ -721,28 +723,73 @@ class _EditorScreenState extends State<EditorScreen>
       setState(() {});
       return;
     }
-    
-    if (_keptRegions.isEmpty) {
+    // Turning ON → let the user choose how aggressively to cut silence.
+    _showAutoCutSheet(provider);
+  }
+
+  /// Sensitivity picker for Auto-Cut. gap = the minimum silence (ms) that gets
+  /// cut: bigger = gentler (keeps natural pauses), smaller = tighter.
+  void _showAutoCutSheet(ProjectProvider provider) {
+    _pauseForEdit();
+    Future<void> apply(int gap) async {
+      Navigator.pop(context);
+      final project = provider.currentProject;
+      if (project == null || project.videoPath == null) return;
       setState(() => _analyzingAudio = true);
       try {
         final flatList = await ExportService.detectSpeechRegions(project.videoPath!);
         final durMs = _duration.inMilliseconds > 0 ? _duration.inMilliseconds : 10000;
-        _keptRegions = computeKeptRegions(flatList, durMs);
+        _keptRegions = computeKeptRegions(flatList, durMs, mergeGapMs: gap);
       } catch (e) {
         _toast(tr('ed.analyzeFail', {'e': e.toString()}));
       } finally {
         setState(() => _analyzingAudio = false);
       }
+      if (_keptRegions.isNotEmpty) {
+        project.autoCutGapMs = gap;
+        project.isAutoCut = true;
+        provider.updateProject(project);
+        _toast(tr('ed.autoCutOn'));
+        setState(() {});
+      } else {
+        _toast(tr('ed.noSpeech'));
+      }
     }
-    
-    if (_keptRegions.isNotEmpty) {
-      project.isAutoCut = true;
-      provider.updateProject(project);
-      _toast(tr('ed.autoCutOn'));
-      setState(() {});
-    } else {
-      _toast(tr('ed.noSpeech'));
-    }
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppColors.surface,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) {
+        Widget opt(IconData ic, String label, String sub, int gap) => ListTile(
+              leading: Icon(ic, color: const Color(0xFFE040FB)),
+              title: Text(label,
+                  style: const TextStyle(
+                      color: AppColors.textPrimary,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600)),
+              subtitle: Text(sub,
+                  style: const TextStyle(color: AppColors.textHint, fontSize: 11)),
+              onTap: () => apply(gap),
+            );
+        return SafeArea(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const SizedBox(height: 12),
+            Text(tr('ed.autoCutLevel'),
+                style: const TextStyle(
+                    color: AppColors.textPrimary,
+                    fontSize: 15,
+                    fontWeight: FontWeight.bold)),
+            const SizedBox(height: 6),
+            opt(Icons.spa_outlined, tr('ed.cutGentle'), tr('ed.cutGentleSub'), 700),
+            opt(Icons.tune, tr('ed.cutMedium'), tr('ed.cutMediumSub'), 300),
+            opt(Icons.cut, tr('ed.cutTight'), tr('ed.cutTightSub'), 150),
+            const SizedBox(height: 12),
+          ]),
+        );
+      },
+    );
   }
 
   // ── Manual video cut ──────────────────────────────────────────────────────
@@ -761,6 +808,28 @@ class _EditorScreenState extends State<EditorScreen>
       }
     }
     return out;
+  }
+
+  /// Easing curve applied to a keyframe interval. 0 linear, 1 in, 2 out,
+  /// 3 in-out, 4 cubic-in, 5 cubic-out. Mirrors the native ease().
+  double _ease(int mode, double t) {
+    switch (mode) {
+      case 1:
+        return t * t;
+      case 2:
+        return 1 - (1 - t) * (1 - t);
+      case 3:
+        if (t < 0.5) return 2 * t * t;
+        final u = -2 * t + 2;
+        return 1 - (u * u) / 2;
+      case 4:
+        return t * t * t;
+      case 5:
+        final u = 1 - t;
+        return 1 - u * u * u;
+      default:
+        return t;
+    }
   }
 
   /// Live zoom scale + focal point at [ms] for the PREVIEW (mirrors native).
@@ -785,7 +854,7 @@ class _EditorScreenState extends State<EditorScreen>
         }
         final a = kfs[i], b = kfs[i + 1];
         final span = (b.timeMs - a.timeMs).clamp(1, 1 << 31);
-        final t = ((ms - a.timeMs) / span).clamp(0.0, 1.0);
+        final t = _ease(a.easing, ((ms - a.timeMs) / span).clamp(0.0, 1.0));
         return (
           a.scale + (b.scale - a.scale) * t,
           a.focusX + (b.focusX - a.focusX) * t,
@@ -822,7 +891,7 @@ class _EditorScreenState extends State<EditorScreen>
     }
     final a = kfs[i], b = kfs[i + 1];
     final span = (b.timeMs - a.timeMs).clamp(1, 1 << 31);
-    final t = ((ms - a.timeMs) / span).clamp(0.0, 1.0);
+    final t = _ease(a.easing, ((ms - a.timeMs) / span).clamp(0.0, 1.0));
     double l(double p, double q) => p + (q - p) * t;
     return (
       x: l(a.x, b.x),
@@ -872,6 +941,8 @@ class _EditorScreenState extends State<EditorScreen>
       id: const Uuid().v4(),
       startTime: Duration(milliseconds: clip.start),
       endTime: Duration(milliseconds: clip.end),
+      fromScale: 1.0,
+      toScale: 1.0, // start with NO zoom (the default 1.3 caused a slight zoom-in)
       keyframes: [],
     );
     project.zoomEffects.add(z); // direct (history handled by caller)
@@ -1540,8 +1611,14 @@ class _EditorScreenState extends State<EditorScreen>
         }
         if (!inKept) {
           if (nextStartMs != null) {
-            _videoController!.seekTo(Duration(milliseconds: nextStartMs));
-            return;
+            // Only seek over a SIZEABLE silence. Tiny gaps (natural speech pauses)
+            // are played through instead of seeked — each seek flushes the decoder
+            // and causes a visible stutter. Export still trims every gap.
+            if (nextStartMs - posMs > 450) {
+              _videoController!.seekTo(Duration(milliseconds: nextStartMs));
+              return;
+            }
+            // small gap → fall through and keep playing (smooth)
           } else {
             // Past the last kept region (trailing silence) → end of content.
             // Pause cleanly instead of snapping to the raw end (which froze it).
@@ -4234,7 +4311,10 @@ class _EditorScreenState extends State<EditorScreen>
                   height: 22,
                   child: GestureDetector(
                     behavior: HitTestBehavior.opaque,
-                    onTap: () => _seekTo(Duration(milliseconds: kf.timeMs)),
+                    onTap: () {
+                      _seekTo(Duration(milliseconds: kf.timeMs));
+                      _scrollTimelineToPosition();
+                    },
                     onLongPress: () {
                       provider.pushHistory();
                       z.keyframes.remove(kf);
@@ -4270,7 +4350,10 @@ class _EditorScreenState extends State<EditorScreen>
                           width: 11,
                           height: 11,
                           decoration: BoxDecoration(
-                            color: const Color(0xFFFFB703),
+                            color:
+                              ((kf.timeMs - _position.inMilliseconds).abs() <= 120)
+                                  ? Colors.redAccent
+                                  : const Color(0xFFFFB703),
                             borderRadius: BorderRadius.circular(2),
                             border: Border.all(color: Colors.white, width: 1.2),
                             boxShadow: const [
@@ -4406,12 +4489,38 @@ class _EditorScreenState extends State<EditorScreen>
                   tr('ed.opacity'),
                   () => _showOverlayOpacitySheet(provider, _selectedImageId!),
                 ),
-                item(
-                  Icons.diamond_outlined,
-                  tr('ed.kfAdd'),
-                  () => _captureOverlayKeyframe(provider, _selectedImageId!),
-                  customColor: const Color(0xFFFFB703),
-                ),
+                () {
+                  final ov = provider.currentProject?.imageOverlays
+                      .where((e) => e.id == _selectedImageId)
+                      .firstOrNull;
+                  final onKf = ov != null && _overlayKfAtPlayhead(ov) != null;
+                  return item(
+                    onKf ? Icons.diamond : Icons.diamond_outlined,
+                    tr(onKf ? 'ed.kfRemove' : 'ed.kfAdd'),
+                    () => _toggleOverlayKeyframe(provider, _selectedImageId!),
+                    customColor:
+                        onKf ? Colors.redAccent : const Color(0xFFFFB703),
+                  );
+                }(),
+                () {
+                  final ov = provider.currentProject?.imageOverlays
+                      .where((e) => e.id == _selectedImageId)
+                      .firstOrNull;
+                  final kf = ov != null ? _overlayKfAtPlayhead(ov) : null;
+                  if (kf == null) return const SizedBox.shrink();
+                  return item(
+                    Icons.show_chart,
+                    tr('ed.curve'),
+                    () => _showEasingSheet(kf.easing, (e) {
+                      provider.pushHistory();
+                      kf.easing = e;
+                      provider.commit();
+                      setState(() {});
+                      _toast(tr('ed.curveSet'));
+                    }),
+                    customColor: const Color(0xFF00BFA5),
+                  );
+                }(),
                 item(
                   Icons.delete_outline,
                   tr('ed.deleteImage'),
@@ -4432,6 +4541,32 @@ class _EditorScreenState extends State<EditorScreen>
                   () => _showZoomSheet(provider),
                   customColor: const Color(0xFFFFB703),
                 ),
+                () {
+                  final onKf = _clipZoomKfAtPlayhead(project) != null;
+                  return item(
+                    onKf ? Icons.diamond : Icons.diamond_outlined,
+                    tr(onKf ? 'ed.kfRemove' : 'ed.kfAdd'),
+                    () => _toggleClipKeyframe(provider),
+                    customColor:
+                        onKf ? Colors.redAccent : const Color(0xFF00BFA5),
+                  );
+                }(),
+                () {
+                  final kf = _clipZoomKfAtPlayhead(project);
+                  if (kf == null) return const SizedBox.shrink();
+                  return item(
+                    Icons.show_chart,
+                    tr('ed.curve'),
+                    () => _showEasingSheet(kf.easing, (e) {
+                      provider.pushHistory();
+                      kf.easing = e;
+                      provider.commit();
+                      setState(() {});
+                      _toast(tr('ed.curveSet'));
+                    }),
+                    customColor: const Color(0xFF00BFA5),
+                  );
+                }(),
                 item(
                   Icons.gradient_rounded,
                   tr('ed.fade'),
@@ -4526,10 +4661,10 @@ class _EditorScreenState extends State<EditorScreen>
                     : null,
               ),
               
-              // 2. Auto ✨ Button
+              // 2. Auto Emoji Button (emoji + highlight + matching SFX)
               item(
                 Icons.auto_awesome,
-                'Auto ✨',
+                tr('ed.autoEmojiBtn'),
                 _autoSyncing ? () {} : () => _autoEmoji(provider),
                 customColor: const Color(0xFFFFB703),
               ),
@@ -4574,12 +4709,12 @@ class _EditorScreenState extends State<EditorScreen>
               item(Icons.image_search, tr('ed.webImage'),
                   () => _showWebImageSheet(provider),
                   customColor: const Color(0xFF00BFA5)),
-              item(Icons.gif_box, tr('ed.autoMeme'),
-                  () => _autoMeme(provider),
-                  customColor: const Color(0xFFEA4C89)),
-              item(Icons.movie_filter, tr('ed.autoBroll'),
-                  () => _autoBroll(provider),
+              item(Icons.auto_awesome_motion, tr('ed.autoVisual'),
+                  () => _showAutoVisualSheet(provider),
                   customColor: const Color(0xFF7C4DFF)),
+              item(Icons.tag, tr('ed.autoHook'),
+                  () => _autoHook(provider),
+                  customColor: const Color(0xFFFFB703)),
               item(Icons.library_music, tr('ed.webSfx'),
                   () => _showWebSfxSheet(provider),
                   customColor: const Color(0xFF00BFA5)),
@@ -4821,7 +4956,10 @@ class _EditorScreenState extends State<EditorScreen>
                 height: 18,
                 child: GestureDetector(
                   behavior: HitTestBehavior.opaque,
-                  onTap: () => _seekTo(Duration(milliseconds: kf.timeMs)),
+                  onTap: () {
+                    _seekTo(Duration(milliseconds: kf.timeMs));
+                    _scrollTimelineToPosition();
+                  },
                   onLongPress: () {
                     provider.pushHistory();
                     ov.keyframes.remove(kf);
@@ -4836,7 +4974,10 @@ class _EditorScreenState extends State<EditorScreen>
                         width: 9,
                         height: 9,
                         decoration: BoxDecoration(
-                          color: const Color(0xFFFFB703),
+                          color:
+                              ((kf.timeMs - _position.inMilliseconds).abs() <= 120)
+                                  ? Colors.redAccent
+                                  : const Color(0xFFFFB703),
                           border: Border.all(color: Colors.white, width: 1),
                           borderRadius: BorderRadius.circular(2),
                         ),
@@ -5568,7 +5709,11 @@ Widget _buildTimelineTab() {
                                   Positioned.fill(
                                     child: GestureDetector(
                                       behavior: HitTestBehavior.translucent,
-                                      onTapDown: (d) {
+                                      // onTapUp (not onTapDown) so a tap that lands
+                                      // on a keyframe diamond / block on top wins
+                                      // the gesture arena and this doesn't clear
+                                      // the selection or hijack the seek.
+                                      onTapUp: (d) {
                                         _pauseForEdit();
                                         final ms =
                                             ((d.localPosition.dx - leftPad) /
@@ -6081,6 +6226,7 @@ Widget _buildTimelineTab() {
     ProjectProvider provider,
     String apiKey, {
     void Function(int i, int n)? onStep,
+    bool photoOnly = false,
   }) async {
     final project = provider.currentProject;
     if (project == null || project.segments.isEmpty) return 0;
@@ -6107,10 +6253,12 @@ Widget _buildTimelineTab() {
       onStep?.call(k + 1, idxs.length);
       String? path;
       bool isVid = false;
-      final vids = await ImageSearchService.searchVideo(q, limit: 4);
-      if (vids.isNotEmpty) {
-        path = await ImageSearchService.downloadVideo(vids.first);
-        isVid = path != null;
+      if (!photoOnly) {
+        final vids = await ImageSearchService.searchVideo(q, limit: 4);
+        if (vids.isNotEmpty) {
+          path = await ImageSearchService.downloadVideo(vids.first);
+          isVid = path != null;
+        }
       }
       if (path == null) {
         final imgs = await ImageSearchService.search(q, limit: 3);
@@ -6292,7 +6440,174 @@ Widget _buildTimelineTab() {
   /// Auto B-roll: AI reads the transcript, picks photogenic moments, finds a
   /// matching royalty-free photo (Pixabay) and drops it as a large full-width
   /// overlay above the subtitle for that line's duration — like a B-roll cut.
-  Future<void> _autoBroll(ProjectProvider provider) async {
+  /// Auto Hook + caption + hashtags: AI writes a viral post kit from the
+  /// transcript and shows it with copy buttons.
+  Future<void> _autoHook(ProjectProvider provider) async {
+    final project = provider.currentProject;
+    if (project == null || project.segments.isEmpty) {
+      _toast(tr('ed.noSubtitle'));
+      return;
+    }
+    if (!_isPro) {
+      _showProFeatureDialog(tr('ed.autoHookPro'));
+      return;
+    }
+    final apiKey = await ApiConfig.getApiKey();
+    if (apiKey == null || apiKey.isEmpty) {
+      _toast(tr('proc.noGeminiKey'));
+      return;
+    }
+    _pauseForEdit();
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => const Center(
+          child: CircularProgressIndicator(color: AppColors.primary)),
+    );
+    Map<String, String> kit = {};
+    try {
+      kit = await GeminiSpeechService(apiKey: apiKey).generateHookKit(
+        project.segments.map((s) => s.text).toList(),
+        language: project.language,
+      );
+    } catch (_) {}
+    if (mounted) Navigator.of(context, rootNavigator: true).pop();
+    if (!mounted) return;
+    if (kit.isEmpty || (kit['hook'] ?? '').isEmpty && (kit['caption'] ?? '').isEmpty) {
+      _toast(tr('ed.autoHookNone'));
+      return;
+    }
+
+    Widget block(String title, String value) {
+      if (value.isEmpty) return const SizedBox.shrink();
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 12),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Text(title,
+                style: const TextStyle(
+                    color: AppColors.textHint,
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold)),
+            const Spacer(),
+            InkWell(
+              onTap: () {
+                Clipboard.setData(ClipboardData(text: value));
+                _toast(tr('ed.copied'));
+              },
+              child: const Padding(
+                padding: EdgeInsets.all(4),
+                child: Icon(Icons.copy, size: 15, color: AppColors.primary),
+              ),
+            ),
+          ]),
+          const SizedBox(height: 2),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+                color: AppColors.surfaceLight,
+                borderRadius: BorderRadius.circular(8)),
+            child: Text(value,
+                style: const TextStyle(color: AppColors.textPrimary, fontSize: 13)),
+          ),
+        ]),
+      );
+    }
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(children: [
+          const Icon(Icons.tag, color: Color(0xFFFFB703), size: 20),
+          const SizedBox(width: 8),
+          Text(tr('ed.autoHook'),
+              style: const TextStyle(color: AppColors.textPrimary, fontSize: 16)),
+        ]),
+        content: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            block(tr('ed.hookLabel'), kit['hook'] ?? ''),
+            block(tr('ed.captionLabel'), kit['caption'] ?? ''),
+            block(tr('ed.hashtagLabel'), kit['hashtags'] ?? ''),
+          ]),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              final all = [
+                kit['hook'] ?? '',
+                '',
+                kit['caption'] ?? '',
+                '',
+                kit['hashtags'] ?? '',
+              ].join('\n').trim();
+              Clipboard.setData(ClipboardData(text: all));
+              Navigator.pop(ctx);
+              _toast(tr('ed.copiedAll'));
+            },
+            child: Text(tr('ed.copyAll'),
+                style: const TextStyle(color: AppColors.primary)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text(tr('common.close'),
+                style: const TextStyle(color: AppColors.textHint)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Auto Visual hub: pick what to auto-insert — funny GIF (meme), stock video
+  /// B-roll, or stock photo B-roll.
+  void _showAutoVisualSheet(ProjectProvider provider) {
+    _pauseForEdit();
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppColors.surface,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) {
+        Widget opt(IconData ic, Color c, String label, String sub, VoidCallback onTap) =>
+            ListTile(
+              leading: Icon(ic, color: c),
+              title: Text(label,
+                  style: const TextStyle(
+                      color: AppColors.textPrimary,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600)),
+              subtitle: Text(sub,
+                  style: const TextStyle(color: AppColors.textHint, fontSize: 11)),
+              onTap: () {
+                Navigator.pop(ctx);
+                onTap();
+              },
+            );
+        return SafeArea(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const SizedBox(height: 12),
+            Text(tr('ed.autoVisual'),
+                style: const TextStyle(
+                    color: AppColors.textPrimary,
+                    fontSize: 15,
+                    fontWeight: FontWeight.bold)),
+            const SizedBox(height: 6),
+            opt(Icons.movie_creation, const Color(0xFF7C4DFF), tr('ed.avVideo'),
+                tr('ed.avVideoSub'), () => _autoBroll(provider)),
+            opt(Icons.image, const Color(0xFF00BFA5), tr('ed.avPhoto'),
+                tr('ed.avPhotoSub'), () => _autoBroll(provider, photoOnly: true)),
+            opt(Icons.gif_box, const Color(0xFFEA4C89), tr('ed.avMeme'),
+                tr('ed.avMemeSub'), () => _autoMeme(provider)),
+            const SizedBox(height: 12),
+          ]),
+        );
+      },
+    );
+  }
+
+  Future<void> _autoBroll(ProjectProvider provider, {bool photoOnly = false}) async {
     final project = provider.currentProject;
     if (project == null || project.segments.isEmpty) {
       _toast(tr('ed.noSubtitle'));
@@ -6364,10 +6679,12 @@ Widget _buildTimelineTab() {
         // Prefer a stock VIDEO clip (real moving B-roll); fall back to a photo.
         String? path;
         bool isVid = false;
-        final vids = await ImageSearchService.searchVideo(q, limit: 4);
-        if (vids.isNotEmpty) {
-          path = await ImageSearchService.downloadVideo(vids.first);
-          isVid = path != null;
+        if (!photoOnly) {
+          final vids = await ImageSearchService.searchVideo(q, limit: 4);
+          if (vids.isNotEmpty) {
+            path = await ImageSearchService.downloadVideo(vids.first);
+            isVid = path != null;
+          }
         }
         if (path == null) {
           final imgs = await ImageSearchService.search(q, limit: 3);
@@ -6559,7 +6876,8 @@ Widget _buildTimelineTab() {
               final durMs = _duration.inMilliseconds > 0
                   ? _duration.inMilliseconds
                   : 10000;
-              _keptRegions = computeKeptRegions(flat, durMs);
+              _keptRegions = computeKeptRegions(flat, durMs,
+                  mergeGapMs: project.autoCutGapMs);
             }
             if (_keptRegions.isNotEmpty) {
               project.isAutoCut = true;
@@ -8165,18 +8483,161 @@ Widget _buildTimelineTab() {
     _toast(tr(o.cover ? 'ed.coverOnDone' : 'ed.coverOffDone'));
   }
 
-  /// Add a keyframe at the playhead capturing the overlay's current state
-  /// (turns on keyframe mode — later edits on the preview auto-keyframe).
-  void _captureOverlayKeyframe(ProjectProvider provider, String id) {
+  /// Overlay keyframe at the playhead (within tolerance), or null.
+  OverlayKeyframe? _overlayKfAtPlayhead(ImageOverlay o, {int tolMs = 120}) {
+    final ms = _position.inMilliseconds;
+    for (final k in o.keyframes) {
+      if ((k.timeMs - ms).abs() <= tolMs) return k;
+    }
+    return null;
+  }
+
+  /// CapCut-style toggle: if a keyframe sits at the playhead → delete it;
+  /// otherwise add one capturing the current state.
+  void _toggleOverlayKeyframe(ProjectProvider provider, String id) {
     final o = provider.currentProject?.imageOverlays
         .where((e) => e.id == id)
         .firstOrNull;
     if (o == null) return;
+    final hit = _overlayKfAtPlayhead(o);
     provider.pushHistory();
-    _overlayKeyframeAtPlayhead(o);
-    provider.commit();
-    setState(() {});
-    _toast(tr('ed.kfCaptured'));
+    if (hit != null) {
+      o.keyframes.remove(hit);
+      provider.commit();
+      setState(() {});
+      _toast(tr('ed.kfDeleted'));
+    } else {
+      _overlayKeyframeAtPlayhead(o);
+      provider.commit();
+      setState(() {});
+      _toast(tr('ed.kfCaptured'));
+    }
+  }
+
+  /// Zoom keyframe (on the selected clip) at the playhead, or null.
+  ZoomKeyframe? _clipZoomKfAtPlayhead(SubtitleProject project, {int tolMs = 120}) {
+    if (_selectedClipIndex == null) return null;
+    final clips = _videoClips(project);
+    if (_selectedClipIndex! >= clips.length) return null;
+    final clip = clips[_selectedClipIndex!];
+    final ms = _position.inMilliseconds;
+    for (final z in project.zoomEffects) {
+      if (clip.start < z.endTime.inMilliseconds &&
+          z.startTime.inMilliseconds < clip.end) {
+        for (final k in z.keyframes) {
+          if ((k.timeMs - ms).abs() <= tolMs) return k;
+        }
+      }
+    }
+    return null;
+  }
+
+  /// CapCut-style toggle for the selected clip's zoom keyframe at the playhead.
+  void _toggleClipKeyframe(ProjectProvider provider) {
+    final project = provider.currentProject;
+    if (project == null || _selectedClipIndex == null) return;
+    final clips = _videoClips(project);
+    if (_selectedClipIndex! >= clips.length) return;
+    final clip = clips[_selectedClipIndex!];
+    final ms = _position.inMilliseconds;
+    ZoomEffect? z;
+    for (final e in project.zoomEffects) {
+      if (clip.start < e.endTime.inMilliseconds &&
+          e.startTime.inMilliseconds < clip.end) {
+        z = e;
+        break;
+      }
+    }
+    ZoomKeyframe? hit;
+    if (z != null) {
+      for (final k in z.keyframes) {
+        if ((k.timeMs - ms).abs() <= 120) {
+          hit = k;
+          break;
+        }
+      }
+    }
+    provider.pushHistory();
+    if (hit != null && z != null) {
+      z.keyframes.remove(hit);
+      if (z.keyframes.isEmpty) project.zoomEffects.remove(z);
+      provider.commit();
+      setState(() {});
+      _toast(tr('ed.kfDeleted'));
+    } else {
+      final zz = z ?? _ensureZoomForSelectedClip(provider);
+      if (zz == null) return;
+      _keyframeAtPlayhead(zz);
+      provider.commit();
+      setState(() {});
+      _toast(tr('ed.kfCaptured'));
+    }
+  }
+
+  /// Curve (easing) picker for the keyframe at the playhead. [current] = current
+  /// easing index; [onPick] receives the chosen one (0..5).
+  void _showEasingSheet(int current, void Function(int) onPick) {
+    _pauseForEdit();
+    final items = <(int, IconData, String)>[
+      (0, Icons.trending_flat, 'ed.easeLinear'),
+      (1, Icons.north_east, 'ed.easeIn'),
+      (2, Icons.south_east, 'ed.easeOut'),
+      (3, Icons.waves, 'ed.easeInOut'),
+      (4, Icons.keyboard_double_arrow_up, 'ed.easeCubicIn'),
+      (5, Icons.keyboard_double_arrow_down, 'ed.easeCubicOut'),
+    ];
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppColors.surface,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  const Icon(Icons.show_chart, color: AppColors.primary, size: 20),
+                  const SizedBox(width: 8),
+                  Text(tr('ed.easeTitle'),
+                      style: const TextStyle(
+                          color: AppColors.textPrimary,
+                          fontSize: 15,
+                          fontWeight: FontWeight.bold)),
+                ]),
+                const SizedBox(height: 6),
+                ...items.map((it) {
+                  final sel = current == it.$1;
+                  return ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(it.$2,
+                        color: sel ? AppColors.primary : AppColors.textSecondary),
+                    title: Text(tr(it.$3),
+                        style: TextStyle(
+                            color: sel
+                                ? AppColors.primary
+                                : AppColors.textPrimary,
+                            fontSize: 14,
+                            fontWeight: sel ? FontWeight.bold : FontWeight.normal)),
+                    trailing: sel
+                        ? const Icon(Icons.check, color: AppColors.primary, size: 18)
+                        : null,
+                    onTap: () {
+                      onPick(it.$1);
+                      Navigator.pop(ctx);
+                    },
+                  );
+                }),
+              ],
+            ),
+          ),
+        );
+      },
+    );
   }
 
   /// Opacity slider for the selected overlay. In keyframe mode it writes to the

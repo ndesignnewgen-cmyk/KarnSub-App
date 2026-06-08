@@ -55,7 +55,7 @@ class MainActivity : FlutterActivity() {
     )
     private data class OvKf(
         val timeUs: Long, val x: Float, val y: Float,
-        val scale: Float, val rotation: Float, val opacity: Float,
+        val scale: Float, val rotation: Float, val opacity: Float, val easing: Int = 0,
     )
     private data class OvState(
         val x: Float, val y: Float, val scale: Float, val rotation: Float, val opacity: Float)
@@ -75,7 +75,8 @@ class MainActivity : FlutterActivity() {
         while (i < kfs.size - 1 && kfs[i + 1].timeUs < presentUs) i++
         val a = kfs[i]; val b = kfs[i + 1]
         val span = (b.timeUs - a.timeUs).coerceAtLeast(1L)
-        val t = ((presentUs - a.timeUs).toFloat() / span).coerceIn(0f, 1f)
+        val t = ease(a.easing,
+            ((presentUs - a.timeUs).toFloat() / span).coerceIn(0f, 1f))
         return OvState(
             a.x + (b.x - a.x) * t,
             a.y + (b.y - a.y) * t,
@@ -106,6 +107,7 @@ class MainActivity : FlutterActivity() {
                     scale = (k["scale"] as? Number)?.toFloat() ?: 0.5f,
                     rotation = (k["rotation"] as? Number)?.toFloat() ?: 0f,
                     opacity = (k["opacity"] as? Number)?.toFloat() ?: 1f,
+                    easing = (k["easing"] as? Number)?.toInt() ?: 0,
                 ))
             } catch (_: Exception) {}
         }
@@ -194,7 +196,19 @@ class MainActivity : FlutterActivity() {
     }
 
     // ── Zoom / Ken-Burns effects on the video frame ───────────────────────────
-    private data class ZoomKf(val timeUs: Long, val scale: Float, val fx: Float, val fy: Float)
+    private data class ZoomKf(val timeUs: Long, val scale: Float, val fx: Float, val fy: Float, val easing: Int = 0)
+
+    /// Easing curve for a keyframe interval (mirrors the Dart _ease).
+    private fun ease(mode: Int, t: Float): Float {
+        return when (mode) {
+            1 -> t * t
+            2 -> 1f - (1f - t) * (1f - t)
+            3 -> if (t < 0.5f) 2f * t * t else { val u = -2f * t + 2f; 1f - (u * u) / 2f }
+            4 -> t * t * t
+            5 -> { val u = 1f - t; 1f - u * u * u }
+            else -> t
+        }
+    }
     private data class ZoomFx(
         val startUs: Long,
         val endUs: Long,
@@ -220,6 +234,7 @@ class MainActivity : FlutterActivity() {
                         scale = (k["scale"] as? Number)?.toFloat() ?: 1f,
                         fx = (k["focusX"] as? Number)?.toFloat() ?: 0.5f,
                         fy = (k["focusY"] as? Number)?.toFloat() ?: 0.5f,
+                        easing = (k["easing"] as? Number)?.toInt() ?: 0,
                     ))
                 }
                 kfs.sortBy { it.timeUs }
@@ -258,7 +273,8 @@ class MainActivity : FlutterActivity() {
                         while (i < kfs.size - 1 && kfs[i + 1].timeUs < presentUs) i++
                         val a = kfs[i]; val b = kfs[i + 1]
                         val span = (b.timeUs - a.timeUs).coerceAtLeast(1L)
-                        val t = ((presentUs - a.timeUs).toFloat() / span).coerceIn(0f, 1f)
+                        val t = ease(a.easing,
+                            ((presentUs - a.timeUs).toFloat() / span).coerceIn(0f, 1f))
                         s = a.scale + (b.scale - a.scale) * t
                         fx = a.fx + (b.fx - a.fx) * t
                         fy = a.fy + (b.fy - a.fy) * t
@@ -657,7 +673,8 @@ class MainActivity : FlutterActivity() {
                         val fadeEffectsRaw = call.argument<List<Map<String, Any>>>("fadeEffects")
                         val shakeEffectsRaw = call.argument<List<Map<String, Any>>>("shakeEffects")
                         val blurBgArg = call.argument<Boolean>("bgBlur") ?: false
-                        burnSubtitles(videoPath, outputPath, fileName, segments, style, autoCut, returnTempPath, keptRegionsMs, imageOverlays, zoomEffectsRaw, fadeEffectsRaw, shakeEffectsRaw, blurBgArg, result)
+                        val autoCutGapMs = (call.argument<Int>("autoCutGapMs") ?: 300).toLong()
+                        burnSubtitles(videoPath, outputPath, fileName, segments, style, autoCut, returnTempPath, keptRegionsMs, imageOverlays, zoomEffectsRaw, fadeEffectsRaw, shakeEffectsRaw, blurBgArg, autoCutGapMs, result)
                     }
                     "detectSpeechOnsets" -> {
                         val videoPath = call.argument<String>("videoPath")
@@ -914,6 +931,7 @@ class MainActivity : FlutterActivity() {
         fadeEffectsRaw: List<Map<String, Any>>?,
         shakeEffectsRaw: List<Map<String, Any>>?,
         blurBgArg: Boolean,
+        autoCutGapMs: Long,
         result: MethodChannel.Result,
     ) {
         // Decode image overlays once (downsampled near display width).
@@ -969,7 +987,7 @@ class MainActivity : FlutterActivity() {
                         for (i in 1 until rawRegions.size) {
                             val rStart = rawRegions[i][0].toLong()
                             val rEnd = rawRegions[i][1].toLong()
-                            if (rStart - curEnd <= 300L) {
+                            if (rStart - curEnd <= autoCutGapMs) {
                                 curEnd = rEnd
                             } else {
                                 keptRegionsMs.add(Pair(curStart, curEnd))
@@ -1024,7 +1042,7 @@ class MainActivity : FlutterActivity() {
                             for (i in 1 until rawRegions.size) {
                                 val rStart = rawRegions[i][0].toLong()
                                 val rEnd = rawRegions[i][1].toLong()
-                                if (rStart - curEnd <= 300L) {
+                                if (rStart - curEnd <= autoCutGapMs) {
                                     curEnd = rEnd
                                 } else {
                                     keptRegionsMs.add(Pair(curStart, curEnd))

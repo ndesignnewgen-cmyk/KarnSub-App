@@ -775,6 +775,7 @@ class OverlayKeyframe {
   double scale;
   double rotation;
   double opacity;
+  int easing; // outgoing curve: 0 linear,1 in,2 out,3 inOut,4 cubicIn,5 cubicOut
   OverlayKeyframe({
     required this.timeMs,
     this.x = 0.5,
@@ -782,9 +783,11 @@ class OverlayKeyframe {
     this.scale = 0.5,
     this.rotation = 0.0,
     this.opacity = 1.0,
+    this.easing = 0,
   });
   OverlayKeyframe copy() => OverlayKeyframe(
-      timeMs: timeMs, x: x, y: y, scale: scale, rotation: rotation, opacity: opacity);
+      timeMs: timeMs, x: x, y: y, scale: scale, rotation: rotation,
+      opacity: opacity, easing: easing);
 }
 
 /// One keyframe of a zoom/pan animation: at [timeMs] (absolute) the video is at
@@ -795,14 +798,16 @@ class ZoomKeyframe {
   double scale;
   double focusX;
   double focusY;
+  int easing; // outgoing curve to the next kf: 0 linear,1 in,2 out,3 inOut,4 cubicIn,5 cubicOut
   ZoomKeyframe({
     required this.timeMs,
     this.scale = 1.0,
     this.focusX = 0.5,
     this.focusY = 0.5,
+    this.easing = 0,
   });
   ZoomKeyframe copy() => ZoomKeyframe(
-      timeMs: timeMs, scale: scale, focusX: focusX, focusY: focusY);
+      timeMs: timeMs, scale: scale, focusX: focusX, focusY: focusY, easing: easing);
 }
 
 /// A zoom / Ken-Burns effect on the VIDEO for a time range. If [keyframes] has
@@ -927,6 +932,7 @@ class SubtitleProject {
   SubtitleAnimation exitAnimation; // animation when the subtitle leaves
   AnimationSpeed animationSpeed; // in/out + typewriter speed
   bool isAutoCut;
+  int autoCutGapMs; // silence longer than this (ms) gets cut — sensitivity
   bool isAutoSyncSfx;
   // Audio mixer (3 tracks): original (video) / AI voice / SFX.
   // Each track has an independent volume (0.0–1.0) and mute flag.
@@ -999,6 +1005,7 @@ class SubtitleProject {
     this.exitAnimation = SubtitleAnimation.none,
     this.animationSpeed = AnimationSpeed.normal,
     this.isAutoCut = false,
+    this.autoCutGapMs = 300,
     this.isAutoSyncSfx = false,
     this.originalVolume = 1.0,
     this.aiVoiceVolume = 1.0,

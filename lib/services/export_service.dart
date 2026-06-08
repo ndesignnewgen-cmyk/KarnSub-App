@@ -300,6 +300,7 @@ class ExportService {
                           'scale': k.scale,
                           'focusX': k.focusX,
                           'focusY': k.focusY,
+                          'easing': k.easing,
                         })
                     .toList(),
             })
@@ -347,6 +348,7 @@ class ExportService {
                           'scale': k.scale,
                           'rotation': k.rotation,
                           'opacity': k.opacity,
+                          'easing': k.easing,
                         })
                     .toList(),
             })
@@ -360,6 +362,7 @@ class ExportService {
         'segments': segmentsData,
         'style': styleData,
         'autoCut': project.isAutoCut,
+        'autoCutGapMs': project.autoCutGapMs,
         if (keptRegionsMs != null) 'keptRegionsMs': keptRegionsMs,
         if (imageOverlaysData.isNotEmpty) 'imageOverlays': imageOverlaysData,
         if (zoomEffectsData.isNotEmpty) 'zoomEffects': zoomEffectsData,

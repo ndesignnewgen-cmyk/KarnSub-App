@@ -55,6 +55,7 @@ class StorageService {
         'exitAnimation': p.exitAnimation.index,
         'animationSpeed': p.animationSpeed.index,
         'isAutoCut': p.isAutoCut,
+        'autoCutGapMs': p.autoCutGapMs,
         'isAutoSyncSfx': p.isAutoSyncSfx,
         // Audio mixer (3 tracks): original / AI voice / SFX.
         'originalVolume': p.originalVolume,
@@ -119,6 +120,7 @@ class StorageService {
       exitAnimation: SubtitleAnimation.values[(j['exitAnimation'] as int? ?? 0).clamp(0, SubtitleAnimation.values.length - 1)],
       animationSpeed: AnimationSpeed.values[(j['animationSpeed'] as int? ?? 1).clamp(0, AnimationSpeed.values.length - 1)],
       isAutoCut: j['isAutoCut'] as bool? ?? false,
+      autoCutGapMs: (j['autoCutGapMs'] as num?)?.toInt() ?? 300,
       isAutoSyncSfx: j['isAutoSyncSfx'] as bool? ?? false,
       originalVolume: (j['originalVolume'] as num?)?.toDouble() ?? 1.0,
       aiVoiceVolume: (j['aiVoiceVolume'] as num?)?.toDouble() ?? 1.0,
@@ -203,6 +205,7 @@ class StorageService {
                   'scale': k.scale,
                   'rotation': k.rotation,
                   'opacity': k.opacity,
+                  'easing': k.easing,
                 })
             .toList(),
       };
@@ -234,6 +237,7 @@ class StorageService {
                   scale: (m['scale'] as num?)?.toDouble() ?? 0.5,
                   rotation: (m['rotation'] as num?)?.toDouble() ?? 0.0,
                   opacity: (m['opacity'] as num?)?.toDouble() ?? 1.0,
+                  easing: (m['easing'] as num?)?.toInt() ?? 0,
                 );
               })
               .toList() ??
@@ -256,6 +260,7 @@ class StorageService {
                     'scale': k.scale,
                     'focusX': k.focusX,
                     'focusY': k.focusY,
+                    'easing': k.easing,
                   })
               .toList(),
       };
@@ -274,6 +279,7 @@ class StorageService {
                   scale: (k['scale'] as num?)?.toDouble() ?? 1.0,
                   focusX: (k['focusX'] as num?)?.toDouble() ?? 0.5,
                   focusY: (k['focusY'] as num?)?.toDouble() ?? 0.5,
+                  easing: (k['easing'] as num?)?.toInt() ?? 0,
                 ))
             .toList(),
       );

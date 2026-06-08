@@ -1297,6 +1297,83 @@ class GeminiSpeechService {
     }
   }
 
+  /// Generate a viral "post kit" from the transcript: a punchy on-screen hook,
+  /// a post caption, and hashtags. Returns {'hook','caption','hashtags'} (empty
+  /// strings on failure).
+  Future<Map<String, String>> generateHookKit(List<String> texts,
+      {String language = 'lo'}) async {
+    if (texts.isEmpty) return {};
+    final langName = switch (language) {
+      'lo' => 'Lao (ພາສາລາວ)',
+      'th' => 'Thai (ภาษาไทย)',
+      'en' => 'English',
+      _ => 'Lao (ພາສາລາວ)',
+    };
+    final prompt =
+        'You are a viral short-form video strategist. Based on the transcript '
+        'below (in $langName), produce: (1) "hook": a punchy 3-8 word on-screen '
+        'hook for the first 3 seconds, in $langName; (2) "caption": a 1-2 '
+        'sentence engaging post caption in $langName; (3) "hashtags": 5-8 '
+        'relevant hashtags (mix $langName + English), space-separated, each '
+        'starting with #. Return ONLY a JSON object with keys hook, caption, '
+        'hashtags.\n\nTranscript:\n${texts.join(' ')}';
+    final body = jsonEncode({
+      'contents': [{'parts': [{'text': prompt}]}],
+      'generationConfig': {'temperature': 0.8},
+    });
+    String responseBody = '';
+    int statusCode = 0;
+    bool quotaFallback = false;
+    const maxAttempts = 4;
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+      final useFallback = quotaFallback || attempt == maxAttempts;
+      final uri = Uri.parse(
+          '${_endpointFor(useFallback ? _fallbackModel : _primaryModel)}?key=$apiKey');
+      http.Response resp;
+      try {
+        resp = await http
+            .post(uri, headers: {'Content-Type': 'application/json'}, body: body)
+            .timeout(const Duration(seconds: 45));
+      } catch (_) {
+        if (attempt >= maxAttempts) return {};
+        await Future.delayed(Duration(seconds: 2 * attempt));
+        continue;
+      }
+      statusCode = resp.statusCode;
+      responseBody = resp.body;
+      if (statusCode == 200) break;
+      if (statusCode == 429 && !useFallback && !quotaFallback) {
+        quotaFallback = true;
+        await Future.delayed(const Duration(seconds: 1));
+        continue;
+      }
+      if ((statusCode == 503 || statusCode == 500) && attempt < maxAttempts) {
+        await Future.delayed(Duration(seconds: 2 * attempt));
+        continue;
+      }
+      break;
+    }
+    if (statusCode != 200) return {};
+    try {
+      final data = jsonDecode(responseBody) as Map<String, dynamic>;
+      final parts = (data['candidates']?[0]?['content']
+          as Map<String, dynamic>?)?['parts'] as List<dynamic>?;
+      var raw = (parts?[0]['text'] as String? ?? '').trim();
+      raw = raw.replaceAll('```json', '').replaceAll('```', '').trim();
+      final s = raw.indexOf('{');
+      final e = raw.lastIndexOf('}');
+      if (s == -1 || e == -1) return {};
+      final m = jsonDecode(raw.substring(s, e + 1)) as Map<String, dynamic>;
+      return {
+        'hook': (m['hook'] ?? '').toString().trim(),
+        'caption': (m['caption'] ?? '').toString().trim(),
+        'hashtags': (m['hashtags'] ?? '').toString().trim(),
+      };
+    } catch (_) {
+      return {};
+    }
+  }
+
   /// Second pass: send the FULL transcript text back to Gemini to fix spelling,
   /// typos and cross-chunk consistency — WITHOUT changing meaning, order, or the
   /// number of lines (so timings stay aligned). Edits `segment.text` in place.
