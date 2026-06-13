@@ -380,6 +380,17 @@ const List<SubtitlePreset> subtitlePresets = [
     fontWeight: FontWeight.w900,
     fontSize: 23,
   ),
+  SubtitlePreset(
+    type: SubtitleStyleType.outline,
+    name: 'ສົ້ມໜາ',
+    textColor: Color(0xFFF7A823), // amber/orange fill
+    hasOutline: true,
+    outlineColor: Colors.black,
+    hasShadow: true, // soft drop shadow behind the outline
+    isPro: true,
+    fontWeight: FontWeight.w900,
+    fontSize: 23,
+  ),
 ];
 
 /// A one-tap "look" — bundles a preset + size/position + karaoke + animation so
@@ -604,19 +615,361 @@ class SubtitleSegment {
       );
 }
 
+enum SfxType {
+  pop,
+  pop2,
+  pop3,
+  pop4,
+  pop5,
+  swoosh,
+  swoosh2,
+  whoosh,
+  whoosh2,
+  whoosh3,
+  whoosh4,
+  whoosh5,
+  whoosh6,
+  whoosh7,
+  whoosh8,
+  whoosh9,
+  whoosh10,
+  ding,
+  ding2,
+  punch,
+  punch2,
+  punch3,
+  punch4,
+  punch5,
+  slap,
+  slap2,
+  wow,
+  wow2,
+  applause,
+  cameraShutter,
+  cameraShutter2,
+  cameraShutter3,
+  cashRegister,
+  cashRegister2,
+  cricket,
+  magic,
+  recordScratch,
+  recordScratch2,
+  squeak,
+  squeak2,
+  squeak3,
+  squeak4,
+  squeek,
+  badumtss,
+  badumtss2,
+  vineBoom,
+  beep,
+  correct,
+  buzzer,
+  quack,
+  boing,
+  laugh,
+  typing,
+  glitch,
+  thud,
+  airhorn,
+}
+
+class SfxBlock {
+  final String id;
+  SfxType type;
+  Duration startTime;
+  Duration? duration; // If null, uses default length of the SFX
+  Duration? trimStart; // Offset to start playing the SFX
+  double volume; // Per-block volume 0.0–1.0 (multiplied by track SFX volume)
+
+  // Custom audio support
+  bool isCustom;
+  String? customPath;
+  String? customName;
+  bool isAiVoice;
+
+  SfxBlock({
+    required this.id,
+    required this.type,
+    required this.startTime,
+    this.duration,
+    this.trimStart,
+    this.volume = 1.0,
+    this.isCustom = false,
+    this.customPath,
+    this.customName,
+    this.isAiVoice = false,
+  });
+
+  SfxBlock copy({String? newId}) => SfxBlock(
+        id: newId ?? id,
+        type: type,
+        startTime: startTime,
+        duration: duration,
+        trimStart: trimStart,
+        volume: volume,
+        isCustom: isCustom,
+        customPath: customPath,
+        customName: customName,
+        isAiVoice: isAiVoice,
+      );
+}
+
+/// An image (B-roll / meme / sticker) overlaid on the video for a time range.
+/// Position is normalised (0–1) of the display so preview and export agree.
+class ImageOverlay {
+  final String id;
+  String path; // absolute file path (copied into app support dir)
+  Duration startTime;
+  Duration endTime;
+  double x; // 0–1 centre X
+  double y; // 0–1 centre Y
+  double scale; // fraction of video width (e.g. 0.5 = half width)
+  double rotation; // degrees
+  bool flipH; // mirror horizontally
+  bool isVideo; // true = B-roll video clip (decoded frame-by-frame); false = still image/GIF
+  bool cover; // true = fill the whole frame (crop overflow), ignoring x/y/scale/rotation
+  double opacity; // 0–1 static opacity (used when there are no keyframes)
+  List<OverlayKeyframe> keyframes; // CapCut-style: animate x/y/scale/rotation/opacity
+
+  ImageOverlay({
+    required this.id,
+    required this.path,
+    required this.startTime,
+    required this.endTime,
+    this.x = 0.5,
+    this.y = 0.5,
+    this.scale = 0.5,
+    this.rotation = 0.0,
+    this.flipH = false,
+    this.isVideo = false,
+    this.cover = false,
+    this.opacity = 1.0,
+    List<OverlayKeyframe>? keyframes,
+  }) : keyframes = keyframes ?? [];
+
+  ImageOverlay copy({String? newId}) => ImageOverlay(
+        id: newId ?? id,
+        path: path,
+        startTime: startTime,
+        endTime: endTime,
+        x: x,
+        y: y,
+        scale: scale,
+        rotation: rotation,
+        flipH: flipH,
+        isVideo: isVideo,
+        cover: cover,
+        opacity: opacity,
+        keyframes: keyframes.map((k) => k.copy()).toList(),
+      );
+}
+
+/// One keyframe of an image/B-roll overlay animation. At [timeMs] the overlay is
+/// at position ([x],[y]), [scale], [rotation]° and [opacity]. Values interpolate
+/// linearly between consecutive keyframes (CapCut-style).
+class OverlayKeyframe {
+  int timeMs;
+  double x;
+  double y;
+  double scale;
+  double rotation;
+  double opacity;
+  int easing; // outgoing curve: 0 linear,1 in,2 out,3 inOut,4 cubicIn,5 cubicOut
+  OverlayKeyframe({
+    required this.timeMs,
+    this.x = 0.5,
+    this.y = 0.5,
+    this.scale = 0.5,
+    this.rotation = 0.0,
+    this.opacity = 1.0,
+    this.easing = 0,
+  });
+  OverlayKeyframe copy() => OverlayKeyframe(
+      timeMs: timeMs, x: x, y: y, scale: scale, rotation: rotation,
+      opacity: opacity, easing: easing);
+}
+
+/// One keyframe of a zoom/pan animation: at [timeMs] (absolute) the video is at
+/// [scale] around focal point ([focusX],[focusY]). Values interpolate linearly
+/// between consecutive keyframes.
+class ZoomKeyframe {
+  int timeMs;
+  double scale;
+  double focusX;
+  double focusY;
+  int easing; // outgoing curve to the next kf: 0 linear,1 in,2 out,3 inOut,4 cubicIn,5 cubicOut
+  ZoomKeyframe({
+    required this.timeMs,
+    this.scale = 1.0,
+    this.focusX = 0.5,
+    this.focusY = 0.5,
+    this.easing = 0,
+  });
+  ZoomKeyframe copy() => ZoomKeyframe(
+      timeMs: timeMs, scale: scale, focusX: focusX, focusY: focusY, easing: easing);
+}
+
+/// A zoom / Ken-Burns effect on the VIDEO for a time range. If [keyframes] has
+/// ≥2 points, the scale + focal animate across them (full keyframe mode);
+/// otherwise it falls back to a simple linear [fromScale]→[toScale] over
+/// [startTime]…[endTime] around ([focusX],[focusY]). 1.0 = no zoom.
+class ZoomEffect {
+  final String id;
+  Duration startTime;
+  Duration endTime;
+  double fromScale;
+  double toScale;
+  double focusX; // 0–1
+  double focusY; // 0–1
+  List<ZoomKeyframe> keyframes;
+
+  ZoomEffect({
+    required this.id,
+    required this.startTime,
+    required this.endTime,
+    this.fromScale = 1.0,
+    this.toScale = 1.3,
+    this.focusX = 0.5,
+    this.focusY = 0.5,
+    List<ZoomKeyframe>? keyframes,
+  }) : keyframes = keyframes ?? [];
+
+  ZoomEffect copy({String? newId}) => ZoomEffect(
+        id: newId ?? id,
+        startTime: startTime,
+        endTime: endTime,
+        fromScale: fromScale,
+        toScale: toScale,
+        focusX: focusX,
+        focusY: focusY,
+        keyframes: keyframes.map((k) => k.copy()).toList(),
+      );
+}
+
+/// A fade transition: a black overlay whose alpha animates over a time range.
+/// [toBlack] true = alpha 0→1 (fade OUT to black); false = 1→0 (fade IN from
+/// black). A cut transition = a fade-out before the cut + a fade-in after.
+class FadeEffect {
+  final String id;
+  Duration startTime;
+  Duration endTime;
+  bool toBlack;
+
+  FadeEffect({
+    required this.id,
+    required this.startTime,
+    required this.endTime,
+    this.toBlack = true,
+  });
+
+  FadeEffect copy({String? newId}) => FadeEffect(
+        id: newId ?? id,
+        startTime: startTime,
+        endTime: endTime,
+        toBlack: toBlack,
+      );
+}
+
+/// A camera-shake effect on the VIDEO for a time range. [intensity] is a
+/// fraction of the frame size (e.g. 0.02 = subtle, 0.06 = strong). The frame is
+/// scaled up slightly so the jitter never reveals black edges.
+class ShakeEffect {
+  final String id;
+  Duration startTime;
+  Duration endTime;
+  double intensity;
+
+  ShakeEffect({
+    required this.id,
+    required this.startTime,
+    required this.endTime,
+    this.intensity = 0.03,
+  });
+
+  ShakeEffect copy({String? newId}) => ShakeEffect(
+        id: newId ?? id,
+        startTime: startTime,
+        endTime: endTime,
+        intensity: intensity,
+      );
+}
+
+/// One source clip on a CapCut-style multi-clip timeline. Clips are NOT merged
+/// into a single file — they are played back-to-back (each with its own native
+/// orientation) and concatenated only at export. [trimStartMs]/[trimEndMs] are
+/// in/out points within the source (0/null = whole clip).
+class VideoClip {
+  final String id;
+  String path;
+  int trimStartMs;
+  int? trimEndMs; // null = to the end of the source
+  int? durationMs; // full source duration (cached for the timeline)
+
+  VideoClip({
+    required this.id,
+    required this.path,
+    this.trimStartMs = 0,
+    this.trimEndMs,
+    this.durationMs,
+  });
+
+  /// Length this clip contributes to the timeline (after trim).
+  int get effectiveMs {
+    final end = trimEndMs ?? durationMs ?? 0;
+    final len = end - trimStartMs;
+    return len > 0 ? len : (durationMs ?? 0);
+  }
+
+  VideoClip copy({String? newId}) => VideoClip(
+        id: newId ?? id,
+        path: path,
+        trimStartMs: trimStartMs,
+        trimEndMs: trimEndMs,
+        durationMs: durationMs,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'path': path,
+        'trimStartMs': trimStartMs,
+        if (trimEndMs != null) 'trimEndMs': trimEndMs,
+        if (durationMs != null) 'durationMs': durationMs,
+      };
+
+  static VideoClip fromJson(Map<String, dynamic> j) => VideoClip(
+        id: j['id'] as String,
+        path: j['path'] as String,
+        trimStartMs: (j['trimStartMs'] as num?)?.toInt() ?? 0,
+        trimEndMs: (j['trimEndMs'] as num?)?.toInt(),
+        durationMs: (j['durationMs'] as num?)?.toInt(),
+      );
+}
+
 class SubtitleProject {
   final String id;
   String name;
   String? videoPath;
+  // CapCut-style multi-clip timeline (ordered). Empty = single-video project
+  // (uses [videoPath] as before — fully backward compatible).
+  List<VideoClip> clips;
   String? thumbnailPath;
   AspectRatioMode aspectRatio;
   SubtitlePreset selectedStyle;
   WordSplit wordSplit;
   TranslateMode translateMode;
   List<SubtitleSegment> segments;
+  List<SfxBlock> sfxBlocks;
   Duration? videoDuration;
   DateTime createdAt;
   String language;
+  String sourceLanguage;
+  /// Optional vocabulary hint: proper nouns / brands / place names / jargon the
+  /// user expects in the audio. Fed to the transcriber to fix spelling of names.
+  String transcriptionHint;
+  /// Run a second Gemini "proofread" pass after transcription to fix spelling
+  /// and cross-chunk consistency using full context.
+  bool proofread;
   double fontSize;
   int fontWeight; // 100..900 (overrides the preset weight)
   double subtitlePositionY; // 0.0 = top, 1.0 = bottom
@@ -632,6 +985,47 @@ class SubtitleProject {
   SubtitleAnimation subtitleAnimation;
   SubtitleAnimation exitAnimation; // animation when the subtitle leaves
   AnimationSpeed animationSpeed; // in/out + typewriter speed
+  bool isAutoCut;
+  int autoCutGapMs; // silence longer than this (ms) gets cut — sensitivity
+  bool isAutoSyncSfx;
+  // Audio mixer (3 tracks): original (video) / AI voice / SFX.
+  // Each track has an independent volume (0.0–1.0) and mute flag.
+  double originalVolume;
+  double aiVoiceVolume;
+  double sfxVolume;
+  bool originalMuted;
+  bool aiVoiceMuted;
+  bool sfxMuted;
+  // Path to the stitched AI-voice WAV (timeline-aligned). null = no AI track yet.
+  String? aiVoicePath;
+  int? aiVoiceDurationMs;
+  int aiVoiceOffsetMs;
+  int aiVoiceTrimStartMs;
+  int? aiVoiceTrimEndMs;
+  double aiVoiceSpeed;
+  // Manually-cut video ranges (ms [start,end] pairs) removed from the timeline.
+  // Frames inside these ranges are dropped on export (reuses keptRegions).
+  List<List<int>> removedRanges;
+  // Split markers (ms on the ORIGINAL timeline) — divide the filmstrip into
+  // selectable clips without removing anything.
+  List<int> splitPointsMs;
+  // Image/sticker overlays placed on the video.
+  List<ImageOverlay> imageOverlays;
+  // Zoom / Ken-Burns effects on the video (per time range).
+  List<ZoomEffect> zoomEffects;
+  // Fade transitions (black overlay, per time range).
+  List<FadeEffect> fadeEffects;
+  // Camera-shake effects (per time range).
+  List<ShakeEffect> shakeEffects;
+  // Background music: a single audio track under the whole video.
+  // [bgMusicDuck] lowers the music automatically during speech segments.
+  String? bgMusicPath;
+  int? bgMusicDurationMs;
+  double bgMusicVolume;
+  bool bgMusicMuted;
+  bool bgMusicDuck;
+  // Blurred background: fit a non-9:16 video into a 9:16 frame with blurred fill.
+  bool bgBlur;
 
   SubtitleProject({
     required this.id,
@@ -643,9 +1037,13 @@ class SubtitleProject {
     this.wordSplit = WordSplit.none,
     this.translateMode = TranslateMode.none,
     List<SubtitleSegment>? segments,
+    List<SfxBlock>? sfxBlocks,
     this.videoDuration,
     DateTime? createdAt,
     this.language = 'lo',
+    this.sourceLanguage = 'th',
+    this.transcriptionHint = '',
+    this.proofread = true,
     this.fontSize = 18.0,
     this.fontWeight = 600,
     this.subtitlePositionY = 0.85,
@@ -660,6 +1058,107 @@ class SubtitleProject {
     this.subtitleAnimation = SubtitleAnimation.none,
     this.exitAnimation = SubtitleAnimation.none,
     this.animationSpeed = AnimationSpeed.normal,
+    this.isAutoCut = false,
+    this.autoCutGapMs = 300,
+    this.isAutoSyncSfx = false,
+    this.originalVolume = 1.0,
+    this.aiVoiceVolume = 1.0,
+    this.sfxVolume = 1.0,
+    this.originalMuted = false,
+    this.aiVoiceMuted = false,
+    this.sfxMuted = false,
+    this.aiVoicePath,
+    this.aiVoiceDurationMs,
+    this.aiVoiceOffsetMs = 0,
+    this.aiVoiceTrimStartMs = 0,
+    this.aiVoiceTrimEndMs,
+    this.aiVoiceSpeed = 1.0,
+    List<List<int>>? removedRanges,
+    List<int>? splitPointsMs,
+    List<ImageOverlay>? imageOverlays,
+    List<ZoomEffect>? zoomEffects,
+    List<FadeEffect>? fadeEffects,
+    List<ShakeEffect>? shakeEffects,
+    List<VideoClip>? clips,
+    this.bgMusicPath,
+    this.bgMusicDurationMs,
+    this.bgMusicVolume = 0.45,
+    this.bgMusicMuted = false,
+    this.bgMusicDuck = true,
+    this.bgBlur = false,
   })  : segments = segments ?? [],
+        sfxBlocks = sfxBlocks ?? [],
+        removedRanges = removedRanges ?? [],
+        splitPointsMs = splitPointsMs ?? [],
+        imageOverlays = imageOverlays ?? [],
+        zoomEffects = zoomEffects ?? [],
+        fadeEffects = fadeEffects ?? [],
+        shakeEffects = shakeEffects ?? [],
+        clips = clips ?? [],
         createdAt = createdAt ?? DateTime.now();
+}
+
+extension SfxTypeExtension on SfxType {
+  Duration get defaultDuration {
+    double dur;
+    switch (this) {
+      case SfxType.airhorn: dur = 1.99; break;
+      case SfxType.applause: dur = 4.44; break;
+      case SfxType.badumtss: dur = 1.94; break;
+      case SfxType.badumtss2: dur = 1.42; break;
+      case SfxType.beep: dur = 2.12; break;
+      case SfxType.boing: dur = 9.65; break;
+      case SfxType.buzzer: dur = 1.78; break;
+      case SfxType.cameraShutter: dur = 7.87; break;
+      case SfxType.cameraShutter2: dur = 0.34; break;
+      case SfxType.cameraShutter3: dur = 0.67; break;
+      case SfxType.cashRegister: dur = 1.10; break;
+      case SfxType.cashRegister2: dur = 3.19; break;
+      case SfxType.correct: dur = 1.32; break;
+      case SfxType.cricket: dur = 1.30; break;
+      case SfxType.ding: dur = 2.19; break;
+      case SfxType.ding2: dur = 2.74; break;
+      case SfxType.glitch: dur = 1.75; break;
+      case SfxType.laugh: dur = 2.48; break;
+      case SfxType.magic: dur = 4.80; break;
+      case SfxType.pop: dur = 1.02; break;
+      case SfxType.pop2: dur = 1.63; break;
+      case SfxType.pop3: dur = 0.72; break;
+      case SfxType.pop4: dur = 3.15; break;
+      case SfxType.pop5: dur = 1.97; break;
+      case SfxType.punch: dur = 1.56; break;
+      case SfxType.punch2: dur = 1.57; break;
+      case SfxType.punch3: dur = 0.72; break;
+      case SfxType.punch4: dur = 1.42; break;
+      case SfxType.punch5: dur = 1.06; break;
+      case SfxType.quack: dur = 3.12; break;
+      case SfxType.recordScratch: dur = 20.43; break;
+      case SfxType.recordScratch2: dur = 1.66; break;
+      case SfxType.slap: dur = 0.60; break;
+      case SfxType.slap2: dur = 9.69; break;
+      case SfxType.squeak: dur = 3.43; break;
+      case SfxType.squeak2: dur = 3.91; break;
+      case SfxType.squeak3: dur = 0.86; break;
+      case SfxType.squeak4: dur = 5.09; break;
+      case SfxType.squeek: dur = 3.08; break;
+      case SfxType.swoosh: dur = 0.36; break;
+      case SfxType.swoosh2: dur = 1.06; break;
+      case SfxType.thud: dur = 3.11; break;
+      case SfxType.typing: dur = 68.35; break;
+      case SfxType.vineBoom: dur = 1.31; break;
+      case SfxType.whoosh: dur = 1.92; break;
+      case SfxType.whoosh10: dur = 8.04; break;
+      case SfxType.whoosh2: dur = 7.32; break;
+      case SfxType.whoosh3: dur = 2.52; break;
+      case SfxType.whoosh4: dur = 4.03; break;
+      case SfxType.whoosh5: dur = 0.58; break;
+      case SfxType.whoosh6: dur = 2.12; break;
+      case SfxType.whoosh7: dur = 3.08; break;
+      case SfxType.whoosh8: dur = 3.03; break;
+      case SfxType.whoosh9: dur = 6.03; break;
+      case SfxType.wow: dur = 1.90; break;
+      case SfxType.wow2: dur = 1.66; break;
+    }
+    return Duration(milliseconds: (dur * 1000).round());
+  }
 }

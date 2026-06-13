@@ -1,14 +1,19 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:provider/provider.dart';
 import '../theme/app_theme.dart';
+import '../i18n/i18n.dart';
 import '../providers/project_provider.dart';
 import '../models/subtitle_style_model.dart';
 import '../services/media_info_service.dart';
+import '../services/free_quota_service.dart';
 import 'setup_screen.dart';
 import 'editor_screen.dart';
 import 'settings_screen.dart';
+
+enum _ProjectSort { newest, oldest, name }
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -19,11 +24,54 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   bool _grid = false;
+  String _query = '';
+  _ProjectSort _sort = _ProjectSort.newest;
+
+  // PRO / free-quota status shown on the home header (refreshed on resume).
+  bool _isPro = false;
+  DateTime? _proExpiry;
+  int _freeFhd = FreeQuotaService.freeFhdPerDay;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _generateThumbs());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _generateThumbs();
+      _loadStatus();
+    });
+  }
+
+  Future<void> _loadStatus() async {
+    final pro = await FreeQuotaService.isPro();
+    final expiry = await FreeQuotaService.proExpiry();
+    final fhd = await FreeQuotaService.remainingFhdExports();
+    if (!mounted) return;
+    setState(() {
+      _isPro = pro;
+      _proExpiry = expiry;
+      _freeFhd = fhd;
+    });
+  }
+
+  /// Apply the search filter + chosen sort order to the project list.
+  List<SubtitleProject> _visible(List<SubtitleProject> all) {
+    final q = _query.trim().toLowerCase();
+    final list = q.isEmpty
+        ? List<SubtitleProject>.from(all)
+        : all.where((p) => p.name.toLowerCase().contains(q)).toList();
+    switch (_sort) {
+      case _ProjectSort.newest:
+        list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+        break;
+      case _ProjectSort.oldest:
+        list.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+        break;
+      case _ProjectSort.name:
+        list.sort(
+            (a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+        break;
+    }
+    return list;
   }
 
   Future<void> _generateThumbs() async {
@@ -66,38 +114,50 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Consumer<ProjectProvider>(
           builder: (context, provider, _) {
             final projects = provider.projects;
+            final visible = _visible(projects);
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 _buildHeader(context, projects.length),
+                _buildStatusCard(context),
                 _buildHeroButton(context),
+                // Clip-editing (multi-clip) shelved until ready — entry hidden.
+                // _buildEditClipButton(context),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(20, 4, 16, 8),
                   child: Row(
                     children: [
-                      const Text(
-                        'ໂປຣເຈກຫຼ້າສຸດ',
-                        style: TextStyle(
+                      Text(
+                        tr('home.recentProjects'),
+                        style: const TextStyle(
                           color: AppColors.textPrimary,
                           fontWeight: FontWeight.bold,
                           fontSize: 15,
                         ),
                       ),
                       const Spacer(),
-                      if (projects.isNotEmpty)
+                      if (projects.isNotEmpty) ...[
+                        _sortBtn(),
+                        const SizedBox(width: 8),
                         _iconBtn(
                           _grid
                               ? Icons.view_list_rounded
                               : Icons.grid_view_rounded,
                           () => setState(() => _grid = !_grid),
                         ),
+                      ],
                     ],
                   ),
                 ),
+                if (projects.length > 5) _buildSearchBar(),
                 Expanded(
                   child: projects.isEmpty
                       ? _buildEmptyState(context)
-                      : (_grid ? _buildGrid(projects) : _buildList(projects)),
+                      : (visible.isEmpty
+                          ? _buildNoMatch()
+                          : (_grid
+                              ? _buildGrid(visible)
+                              : _buildList(visible))),
                 ),
               ],
             );
@@ -121,6 +181,223 @@ class _HomeScreenState extends State<HomeScreen> {
     ),
   );
 
+  /// PRO badge (gold) when active, else a free-quota strip with an upgrade CTA.
+  Widget _buildStatusCard(BuildContext context) {
+    void openSettings() async {
+      await Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => const SettingsScreen()),
+      );
+      _loadStatus();
+    }
+
+    if (_isPro) {
+      final until = _proExpiry != null ? _fmtDate(_proExpiry!) : '';
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 4),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          decoration: BoxDecoration(
+            gradient: const LinearGradient(
+              colors: [Color(0xFFFFD700), Color(0xFFFFB703)],
+            ),
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.workspace_premium, color: Colors.black, size: 18),
+              const SizedBox(width: 8),
+              Text(
+                tr('home.proActive'),
+                style: const TextStyle(
+                  color: Colors.black,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 13,
+                ),
+              ),
+              const Spacer(),
+              if (until.isNotEmpty)
+                Text(
+                  tr('home.proUntil', {'date': until}),
+                  style: const TextStyle(
+                    color: Colors.black87,
+                    fontSize: 11.5,
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ).animate(delay: 80.ms).fadeIn();
+    }
+
+    final out = _freeFhd <= 0;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 4),
+      child: GestureDetector(
+        onTap: openSettings,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
+          decoration: BoxDecoration(
+            color: AppColors.surface,
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(
+              color: out ? AppColors.accent : AppColors.border,
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                out ? Icons.lock_clock : Icons.bolt,
+                color: out ? AppColors.accent : AppColors.primary,
+                size: 18,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  out
+                      ? tr('home.freeQuotaOut')
+                      : tr('home.freeQuota', {'n': _freeFhd}),
+                  style: const TextStyle(
+                    color: AppColors.textSecondary,
+                    fontSize: 12.5,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  gradient: AppGradients.primary,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.workspace_premium,
+                        color: Colors.white, size: 14),
+                    const SizedBox(width: 4),
+                    Text(
+                      tr('home.upgradePro'),
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ).animate(delay: 80.ms).fadeIn(),
+    );
+  }
+
+  Widget _sortBtn() {
+    return PopupMenuButton<_ProjectSort>(
+      onSelected: (v) => setState(() => _sort = v),
+      color: AppColors.surfaceLight,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Container(
+        width: 38,
+        height: 38,
+        decoration: BoxDecoration(
+          color: AppColors.surface,
+          borderRadius: BorderRadius.circular(AppRadius.md),
+          border: Border.all(color: AppColors.border),
+        ),
+        child: const Icon(Icons.sort_rounded,
+            color: AppColors.textSecondary, size: 19),
+      ),
+      itemBuilder: (_) => [
+        _sortItem(_ProjectSort.newest, tr('home.sortNewest')),
+        _sortItem(_ProjectSort.oldest, tr('home.sortOldest')),
+        _sortItem(_ProjectSort.name, tr('home.sortName')),
+      ],
+    );
+  }
+
+  PopupMenuItem<_ProjectSort> _sortItem(_ProjectSort v, String label) {
+    final active = _sort == v;
+    return PopupMenuItem<_ProjectSort>(
+      value: v,
+      child: Row(
+        children: [
+          Icon(active ? Icons.check : Icons.remove,
+              size: 16,
+              color: active ? AppColors.primary : Colors.transparent),
+          const SizedBox(width: 8),
+          Text(label,
+              style: TextStyle(
+                color: active ? AppColors.primary : AppColors.textPrimary,
+                fontSize: 14,
+              )),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSearchBar() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
+      child: Container(
+        height: 42,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        decoration: BoxDecoration(
+          color: AppColors.surface,
+          borderRadius: BorderRadius.circular(AppRadius.md),
+          border: Border.all(color: AppColors.border),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.search, color: AppColors.textHint, size: 18),
+            const SizedBox(width: 8),
+            Expanded(
+              child: TextField(
+                style: const TextStyle(
+                    color: AppColors.textPrimary, fontSize: 14),
+                cursorColor: AppColors.primary,
+                decoration: InputDecoration(
+                  isDense: true,
+                  border: InputBorder.none,
+                  hintText: tr('home.search'),
+                  hintStyle:
+                      const TextStyle(color: AppColors.textHint, fontSize: 14),
+                ),
+                onChanged: (v) => setState(() => _query = v),
+              ),
+            ),
+            if (_query.isNotEmpty)
+              GestureDetector(
+                onTap: () => setState(() => _query = ''),
+                child: const Icon(Icons.close,
+                    color: AppColors.textHint, size: 18),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNoMatch() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Icon(Icons.search_off_rounded,
+              color: AppColors.textHint, size: 40),
+          const SizedBox(height: 12),
+          Text(
+            tr('home.noMatch'),
+            style: const TextStyle(color: AppColors.textSecondary, fontSize: 14),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildHeader(BuildContext context, int count) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 16, 16, 8),
@@ -133,7 +410,7 @@ class _HomeScreenState extends State<HomeScreen> {
               borderRadius: BorderRadius.circular(13),
               boxShadow: [
                 BoxShadow(
-                  color: AppColors.primary.withOpacity(0.35),
+                  color: AppColors.primary.withValues(alpha: 0.35),
                   blurRadius: 14,
                   offset: const Offset(0, 5),
                 ),
@@ -171,7 +448,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ),
                 Text(
-                  count == 0 ? 'ສ້າງ subtitle ໄວ ດ້ວຍ AI' : 'ມີ $count ໂປຣເຈກ',
+                  count == 0 ? tr('home.tagline') : tr('home.projectCount', {'n': count}),
                   style: const TextStyle(
                     color: AppColors.textSecondary,
                     fontSize: 12,
@@ -182,14 +459,116 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           _iconBtn(
             Icons.settings_outlined,
-            () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const SettingsScreen()),
-            ),
+            () async {
+              await Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const SettingsScreen()),
+              );
+              _loadStatus(); // PRO state may have changed in Settings
+            },
           ),
         ],
       ).animate().fadeIn(duration: 350.ms),
     );
+  }
+
+  /// Secondary entry: jump straight into the clip editor (merge/trim/cut)
+  /// WITHOUT transcribing first. Transcription can be run later inside the editor.
+  Widget _buildEditClipButton(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 14),
+      child: GestureDetector(
+        onTap: _editClip,
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
+          decoration: BoxDecoration(
+            color: AppColors.surface,
+            borderRadius: BorderRadius.circular(AppRadius.lg),
+            border: Border.all(color: const Color(0xFF7C4DFF)),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF7C4DFF).withValues(alpha: 0.18),
+                  borderRadius: BorderRadius.circular(11),
+                ),
+                child: const Icon(Icons.content_cut_rounded,
+                    color: Color(0xFF7C4DFF), size: 20),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      tr('home.editClip'),
+                      style: const TextStyle(
+                        color: AppColors.textPrimary,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 14.5,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      tr('home.editClipSub'),
+                      style: const TextStyle(
+                        color: AppColors.textSecondary,
+                        fontSize: 11.5,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Icon(Icons.chevron_right,
+                  color: AppColors.textHint, size: 20),
+            ],
+          ),
+        ),
+      ).animate(delay: 120.ms).fadeIn(),
+    );
+  }
+
+  /// Pick clip(s) → (merge if >1) → create a project → open the editor directly.
+  Future<void> _editClip() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.video,
+      allowMultiple: true,
+    );
+    if (result == null || result.files.isEmpty) return;
+    final paths = result.files.map((f) => f.path).whereType<String>().toList();
+    if (paths.isEmpty) return;
+
+    if (!mounted) return;
+    final provider = context.read<ProjectProvider>();
+    final name =
+        '${tr('home.editClip')} ${DateTime.now().day}/${DateTime.now().month}';
+    final project = provider.createProject(name);
+
+    // CapCut model: keep each pick as a SEPARATE clip (no merge) so they stay
+    // reorderable + each plays in its own native orientation (no rotation bug).
+    final clips = <VideoClip>[];
+    for (int i = 0; i < paths.length; i++) {
+      final meta = await MediaInfoService.meta(paths[i], '${project.id}_clip$i');
+      clips.add(VideoClip(
+        id: '${DateTime.now().microsecondsSinceEpoch}_$i',
+        path: paths[i],
+        durationMs: meta.durationMs > 0 ? meta.durationMs : null,
+      ));
+    }
+    project.clips = clips;
+    project.videoPath = paths.first; // preview shows clip 1 (sequential = stage 3)
+    provider.updateProject(project);
+
+    if (!mounted) return;
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const EditorScreen()),
+    );
+    _loadStatus();
   }
 
   Widget _buildHeroButton(BuildContext context) {
@@ -202,77 +581,49 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
         child: Container(
           width: double.infinity,
-          height: 110,
+          padding: const EdgeInsets.all(18),
           decoration: BoxDecoration(
             gradient: AppGradients.primary,
-            borderRadius: BorderRadius.circular(AppRadius.xl),
-            boxShadow: [
-              BoxShadow(
-                color: AppColors.primary.withOpacity(0.4),
-                blurRadius: 22,
-                offset: const Offset(0, 8),
-              ),
-            ],
+            borderRadius: BorderRadius.circular(24),
           ),
-          child: Stack(
+          child: Row(
             children: [
-              Positioned(
-                right: -16,
-                top: -16,
-                child: Container(
-                  width: 110,
-                  height: 110,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: Colors.white.withOpacity(0.07),
-                  ),
+              Container(
+                width: 46,
+                height: 46,
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.18),
+                  borderRadius: BorderRadius.circular(14),
                 ),
+                child: const Icon(Icons.add, color: Colors.white, size: 26),
               ),
-              Padding(
-                padding: const EdgeInsets.all(18),
-                child: Row(
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Container(
-                      width: 48,
-                      height: 48,
-                      decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(0.2),
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                      child: const Icon(
-                        Icons.add,
+                    Text(
+                      tr('home.newProject'),
+                      style: const TextStyle(
                         color: Colors.white,
-                        size: 28,
+                        fontSize: 17,
+                        fontWeight: FontWeight.bold,
                       ),
                     ),
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const Text(
-                            'ສ້າງໂປຣເຈກໃໝ່',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 17,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          const SizedBox(height: 3),
-                          Text(
-                            'ອັບໂຫລດ video → AI ສ້າງ subtitle',
-                            style: TextStyle(
-                              color: Colors.white.withOpacity(0.8),
-                              fontSize: 12.5,
-                            ),
-                          ),
-                        ],
+                    const SizedBox(height: 3),
+                    Text(
+                      tr('home.newProjectSub'),
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.85),
+                        fontSize: 12.5,
                       ),
                     ),
                   ],
                 ),
               ),
+              const Icon(Icons.arrow_forward_ios_rounded,
+                  color: Colors.white70, size: 16),
             ],
           ),
         ),
@@ -301,15 +652,19 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _badges(SubtitleProject p) {
     final hasTrans = p.segments.any((s) => (s.translatedText ?? '').isNotEmpty);
+    final hasBroll = p.imageOverlays.any((o) => o.isVideo);
+    final hasVoice = (p.aiVoicePath ?? '').isNotEmpty;
     final chips = <Widget>[];
-    if (hasTrans) chips.add(_chip(Icons.translate, '2 ພາສາ'));
+    if (hasTrans) chips.add(_chip(Icons.translate, tr('home.bilingualBadge')));
+    if (hasBroll) chips.add(_chip(Icons.movie_creation_outlined, tr('home.brollBadge')));
+    if (hasVoice) chips.add(_chip(Icons.graphic_eq, tr('home.voiceBadge')));
     return Wrap(spacing: 6, runSpacing: 4, children: chips);
   }
 
   Widget _chip(IconData icon, String label) => Container(
     padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
     decoration: BoxDecoration(
-      color: AppColors.primary.withOpacity(0.15),
+      color: AppColors.primary.withValues(alpha: 0.15),
       borderRadius: BorderRadius.circular(6),
     ),
     child: Row(
@@ -384,7 +739,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                     ),
                                   ),
                                   Text(
-                                    '${p.segments.length} ປ່ອນ',
+                                    '${p.segments.length} ${tr('home.segments')}',
                                     style: const TextStyle(
                                       color: AppColors.textSecondary,
                                       fontSize: 11,
@@ -460,7 +815,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                     vertical: 2,
                                   ),
                                   decoration: BoxDecoration(
-                                    color: Colors.black.withOpacity(0.6),
+                                    color: Colors.black.withValues(alpha: 0.6),
                                     borderRadius: BorderRadius.circular(6),
                                   ),
                                   child: Text(
@@ -497,7 +852,7 @@ class _HomeScreenState extends State<HomeScreen> {
                               ),
                               const SizedBox(height: 2),
                               Text(
-                                '${p.segments.length} ປ່ອນ • ${_fmtDate(p.createdAt)}',
+                                '${p.segments.length} ${tr('home.segments')} • ${_fmtDate(p.createdAt)}',
                                 style: const TextStyle(
                                   color: AppColors.textHint,
                                   fontSize: 10.5,
@@ -540,9 +895,9 @@ class _HomeScreenState extends State<HomeScreen> {
         }
       },
       itemBuilder: (_) => [
-        _menuItem('rename', Icons.edit_outlined, 'ປ່ຽນຊື່'),
-        _menuItem('dup', Icons.copy_all_outlined, 'ສຳເນົາ'),
-        _menuItem('del', Icons.delete_outline, 'ລຶບ', danger: true),
+        _menuItem('rename', Icons.edit_outlined, tr('home.rename')),
+        _menuItem('dup', Icons.copy_all_outlined, tr('home.duplicate')),
+        _menuItem('del', Icons.delete_outline, tr('common.delete'), danger: true),
       ],
     );
   }
@@ -566,12 +921,13 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  void _open(SubtitleProject p) {
+  void _open(SubtitleProject p) async {
     context.read<ProjectProvider>().setCurrentProject(p);
-    Navigator.push(
+    await Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => const EditorScreen()),
     );
+    _loadStatus(); // exporting in the editor may have consumed free quota
   }
 
   void _renameDialog(SubtitleProject p) {
@@ -581,22 +937,22 @@ class _HomeScreenState extends State<HomeScreen> {
       builder: (_) => AlertDialog(
         backgroundColor: AppColors.surface,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text(
-          'ປ່ຽນຊື່ໂປຣເຈກ',
-          style: TextStyle(color: AppColors.textPrimary, fontSize: 16),
+        title: Text(
+          tr('home.renameTitle'),
+          style: const TextStyle(color: AppColors.textPrimary, fontSize: 16),
         ),
         content: TextField(
           controller: ctrl,
           autofocus: true,
           style: const TextStyle(color: AppColors.textPrimary),
-          decoration: const InputDecoration(hintText: 'ຊື່ໂປຣເຈກ'),
+          decoration: InputDecoration(hintText: tr('home.projectNameHint')),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text(
-              'ຍົກເລີກ',
-              style: TextStyle(color: AppColors.textSecondary),
+            child: Text(
+              tr('common.cancel'),
+              style: const TextStyle(color: AppColors.textSecondary),
             ),
           ),
           ElevatedButton(
@@ -610,7 +966,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 borderRadius: BorderRadius.circular(10),
               ),
             ),
-            child: const Text('ບັນທຶກ'),
+            child: Text(tr('common.save')),
           ),
         ],
       ),
@@ -637,14 +993,30 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
           const SizedBox(height: 16),
-          const Text(
-            'ຍັງບໍ່ມີໂປຣເຈກ',
-            style: TextStyle(color: AppColors.textSecondary, fontSize: 15),
+          Text(
+            tr('home.empty'),
+            style: const TextStyle(color: AppColors.textSecondary, fontSize: 15),
           ),
           const SizedBox(height: 6),
-          const Text(
-            'ກົດ "ສ້າງໂປຣເຈກໃໝ່" ເພື່ອເລີ່ມ',
-            style: TextStyle(color: AppColors.textHint, fontSize: 13),
+          Text(
+            tr('home.emptySub'),
+            style: const TextStyle(color: AppColors.textHint, fontSize: 13),
+          ),
+          const SizedBox(height: 18),
+          ElevatedButton.icon(
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const SetupScreen()),
+            ),
+            icon: const Icon(Icons.add, size: 20),
+            label: Text(tr('home.createFirst')),
+            style: ElevatedButton.styleFrom(
+              minimumSize: const Size(0, 46),
+              padding: const EdgeInsets.symmetric(horizontal: 22),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
           ),
         ],
       ),
@@ -657,26 +1029,26 @@ class _HomeScreenState extends State<HomeScreen> {
       builder: (_) => AlertDialog(
         backgroundColor: AppColors.surface,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Row(
+        title: Row(
           children: [
-            Icon(Icons.delete_outline, color: AppColors.accent, size: 22),
-            SizedBox(width: 8),
+            const Icon(Icons.delete_outline, color: AppColors.accent, size: 22),
+            const SizedBox(width: 8),
             Text(
-              'ລຶບໂປຣເຈກ',
-              style: TextStyle(color: AppColors.textPrimary, fontSize: 16),
+              tr('home.deleteTitle'),
+              style: const TextStyle(color: AppColors.textPrimary, fontSize: 16),
             ),
           ],
         ),
         content: Text(
-          'ຕ້ອງການລຶບ "$name" ບໍ?\nຂໍ້ມູນຈະຫາຍໄປຖາວອນ',
+          tr('home.deleteBody', {'name': name}),
           style: const TextStyle(color: AppColors.textSecondary, fontSize: 14),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text(
-              'ຍົກເລີກ',
-              style: TextStyle(color: AppColors.textSecondary),
+            child: Text(
+              tr('common.cancel'),
+              style: const TextStyle(color: AppColors.textSecondary),
             ),
           ),
           ElevatedButton(
@@ -688,7 +1060,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 borderRadius: BorderRadius.circular(10),
               ),
             ),
-            child: const Text('ລຶບ', style: TextStyle(color: Colors.white)),
+            child: Text(tr('common.delete'), style: const TextStyle(color: Colors.white)),
           ),
         ],
       ),

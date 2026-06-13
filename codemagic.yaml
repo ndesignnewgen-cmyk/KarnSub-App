@@ -1,0 +1,84 @@
+# Codemagic CI/CD config for KarnSub (Flutter).
+#
+# IMPORTANT: This file is INERT. It does NOT touch any app code (Dart, Kotlin,
+# Gradle, pubspec). Your local `flutter build apk` ignores it entirely — Android
+# builds keep working exactly as before. It only runs on Codemagic's cloud
+# servers when you trigger a build there.
+#
+# Two workflows:
+#   • android-release  — build a release APK in the cloud (optional convenience)
+#   • ios-release      — build/sign an iOS app WITHOUT owning a Mac (TestFlight)
+#
+# Before the iOS workflow can succeed you must, ONE TIME, in the Codemagic UI:
+#   1. Connect this GitHub repo.
+#   2. Add an Apple Developer Program account ($99/yr) integration
+#      (Teams → Integrations → Apple Developer Portal / App Store Connect API key).
+#   3. Set up iOS code signing (automatic) with bundle id below.
+#   4. Register the bundle id in App Store Connect and create the app entry.
+# The Android workflow needs no signing to produce a debug-signed/release APK
+# (add an Android keystore in the UI later if you want a Play-Store-ready AAB).
+
+workflows:
+  # ─────────────────────────────────────────────────────────────────────────
+  android-release:
+    name: Android Release APK
+    instance_type: linux_x2
+    max_build_duration: 60
+    environment:
+      flutter: stable
+    scripts:
+      - name: Flutter packages get
+        script: flutter pub get
+      - name: Flutter analyze
+        script: flutter analyze --no-fatal-infos || true
+      - name: Build release APK (arm64)
+        script: |
+          flutter build apk --release --target-platform android-arm64
+    artifacts:
+      - build/**/outputs/**/*.apk
+    # Optional: email yourself the APK when done.
+    # publishing:
+    #   email:
+    #     recipients:
+    #       - nouchthv@gmail.com
+
+  # ─────────────────────────────────────────────────────────────────────────
+  ios-release:
+    name: iOS Release (TestFlight)
+    instance_type: mac_mini_m2          # Codemagic provides the Mac — you don't need one.
+    max_build_duration: 90
+    integrations:
+      app_store_connect: KarnSub ASC    # name of the App Store Connect API key you add in the UI
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.anniekaydee.subtitle_app
+      vars:
+        BUNDLE_ID: "com.anniekaydee.subtitle_app"
+        APP_STORE_APPLE_ID: 0000000000  # replace with your app's Apple ID from App Store Connect
+    scripts:
+      - name: Flutter packages get
+        script: flutter pub get
+      - name: Set up code signing
+        script: xcode-project use-profiles
+      - name: Install CocoaPods dependencies
+        script: |
+          find . -name "Podfile" -execdir pod install \;
+      - name: Flutter build ipa
+        script: |
+          flutter build ipa --release \
+            --export-options-plist=/Users/builder/export_options.plist
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true       # auto-upload to TestFlight after build
+        # submit_to_app_store: false     # flip on when ready for public release
+      # email:
+      #   recipients:
+      #     - nouchthv@gmail.com

@@ -1,8 +1,13 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:provider/provider.dart';
+import 'package:share_plus/share_plus.dart';
 import '../theme/app_theme.dart';
+import '../i18n/i18n.dart';
 import '../providers/project_provider.dart';
+import '../models/subtitle_style_model.dart';
 import '../services/export_service.dart';
 import '../services/free_quota_service.dart';
 import '../widgets/gradient_button.dart';
@@ -19,30 +24,41 @@ class _ExportScreenState extends State<ExportScreen> {
   ExportQuality _quality = ExportQuality.fhd1080;
   bool _isExporting = false;
   double _exportProgress = 0;
-  String _exportStatus = 'ກຳລັງ Export...';
+  String _exportStatus = '';
   // 'top' or 'bottom' — where the free-tier watermark is stamped.
   String _watermarkPosition = 'top';
   bool _isPro = false;
+  int _freeFhd = FreeQuotaService.freeFhdPerDay;
+  // Absolute path of the last successful export, used by the Share button.
+  String? _lastExportedPath;
 
   @override
   void initState() {
     super.initState();
+    _exportStatus = tr('ex.exporting');
     _loadPro();
   }
 
   Future<void> _loadPro() async {
     final pro = await FreeQuotaService.isPro();
-    if (mounted) setState(() => _isPro = pro);
+    final fhd = await FreeQuotaService.remainingFhdExports();
+    if (mounted) {
+      setState(() {
+        _isPro = pro;
+        _freeFhd = fhd;
+      });
+    }
   }
 
   Future<void> _startExport() async {
+    HapticFeedback.mediumImpact(); // big-action feedback
     final project = context.read<ProjectProvider>().currentProject;
     if (project == null) return;
 
     if (project.segments.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('ບໍ່ມີ Subtitle — ກາລຸນາຖອດສຽງກ່ອນ'),
+        SnackBar(
+          content: Text(tr('ex.noSubtitle')),
           backgroundColor: AppColors.accent,
         ),
       );
@@ -54,7 +70,7 @@ class _ExportScreenState extends State<ExportScreen> {
     if (!mounted) return;
     final bool withWatermark = !isPro;
 
-    // Free users: FHD (1080p) is capped at 1/day; HD (720p) is unlimited.
+    // Free users: FHD (1080p) is capped at 3/day; HD (720p) is unlimited.
     if (_exportType == ExportType.videoWithSubtitle &&
         !isPro &&
         _quality == ExportQuality.fhd1080) {
@@ -77,17 +93,17 @@ class _ExportScreenState extends State<ExportScreen> {
     setState(() {
       _isExporting = true;
       _exportProgress = 0;
-      _exportStatus = 'ກຳລັງກຽມ...';
+      _exportStatus = tr('ex.preparing');
     });
 
     try {
       if (_exportType == ExportType.videoWithSubtitle) {
         final videoPath = project.videoPath;
         if (videoPath == null) {
-          throw ExportException('ບໍ່ພົບໄຟລ໌ວິດີໂອ — ກາລຸນາເລືອກວິດີໂອໃໝ່');
+          throw ExportException(tr('ex.noVideo'));
         }
 
-        await ExportService.exportVideoWithSubtitles(
+        _lastExportedPath = await ExportService.exportVideoWithSubtitles(
           videoPath,
           project.segments,
           project,
@@ -105,35 +121,38 @@ class _ExportScreenState extends State<ExportScreen> {
       } else {
         setState(() {
           _exportProgress = 0.3;
-          _exportStatus = 'ກຳລັງສ້າງ SRT file...';
+          _exportStatus = tr('ex.creatingSrt');
         });
-        await ExportService.exportSrtFile(project.segments, project.name);
+        _lastExportedPath =
+            await ExportService.exportSrtFile(project.segments, project.name);
         setState(() {
           _exportProgress = 1.0;
-          _exportStatus = 'ສຳເລັດ!';
+          _exportStatus = tr('ex.done');
         });
       }
 
       if (mounted) {
         setState(() => _isExporting = false);
+        _loadPro(); // refresh remaining FHD quota
         _showSuccessDialog();
       }
     } on ExportException catch (e) {
       if (mounted) {
         setState(() => _isExporting = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.message), backgroundColor: AppColors.accent),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(e.message),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 10),
+        ));
       }
     } catch (e) {
       if (mounted) {
         setState(() => _isExporting = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('ຜິດພາດ: $e'),
-            backgroundColor: AppColors.accent,
-          ),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('${tr('ex.errPrefix')}$e'),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 10),
+        ));
       }
     }
   }
@@ -146,14 +165,14 @@ class _ExportScreenState extends State<ExportScreen> {
       builder: (_) => AlertDialog(
         backgroundColor: AppColors.surface,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-        title: const Row(
+        title: Row(
           children: [
-            Icon(Icons.info_outline, color: AppColors.primary, size: 22),
-            SizedBox(width: 8),
+            const Icon(Icons.info_outline, color: AppColors.primary, size: 22),
+            const SizedBox(width: 8),
             Expanded(
               child: Text(
-                'FHD ໝົດໂຄຕ້າມື້ນີ້',
-                style: TextStyle(
+                tr('ex.fhdLimitTitle'),
+                style: const TextStyle(
                   color: AppColors.textPrimary,
                   fontWeight: FontWeight.bold,
                   fontSize: 15,
@@ -165,23 +184,23 @@ class _ExportScreenState extends State<ExportScreen> {
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text(
-              'ຟຣີ Export FHD (1080p) ໄດ້ 1 ຄັ້ງ/ມື້ — ໝົດແລ້ວ\nເລືອກ Export HD (720p) ຫຼື Upgrade PRO',
-              style: TextStyle(color: AppColors.textSecondary, fontSize: 13),
+            Text(
+              tr('ex.fhdLimitBody'),
+              style: const TextStyle(color: AppColors.textSecondary, fontSize: 13),
             ),
             const SizedBox(height: 16),
             _exportChoice(
               icon: Icons.sd_rounded,
-              title: 'Export HD (720p)',
-              subtitle: 'ບໍ່ຈຳກັດ — ຍັງຕິດ watermark',
+              title: tr('ex.choiceHd'),
+              subtitle: tr('ex.choiceHdSub'),
               color: AppColors.primary,
               onTap: () => Navigator.pop(context, 'hd'),
             ),
             const SizedBox(height: 10),
             _exportChoice(
               icon: Icons.star_rounded,
-              title: 'Upgrade PRO',
-              subtitle: 'FHD ບໍ່ຈຳກັດ, ບໍ່ຕິດ watermark',
+              title: tr('ex.choiceUpgrade'),
+              subtitle: tr('ex.choiceUpgradeSub'),
               color: const Color(0xFFFFD700),
               onTap: () => Navigator.pop(context, 'upgrade'),
             ),
@@ -190,9 +209,9 @@ class _ExportScreenState extends State<ExportScreen> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, null),
-            child: const Text(
-              'ຍົກເລີກ',
-              style: TextStyle(color: AppColors.textSecondary),
+            child: Text(
+              tr('common.cancel'),
+              style: const TextStyle(color: AppColors.textSecondary),
             ),
           ),
         ],
@@ -212,9 +231,9 @@ class _ExportScreenState extends State<ExportScreen> {
       child: Container(
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
-          color: color.withOpacity(0.08),
+          color: color.withValues(alpha: 0.08),
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: color.withOpacity(0.4)),
+          border: Border.all(color: color.withValues(alpha: 0.4)),
         ),
         child: Row(
           children: [
@@ -259,9 +278,9 @@ class _ExportScreenState extends State<ExportScreen> {
             padding: const EdgeInsets.symmetric(vertical: 8),
             decoration: BoxDecoration(
               color: selected
-                  ? AppColors.primary.withOpacity(0.15)
+                  ? AppColors.primary.withValues(alpha: 0.15)
                   : Colors.transparent,
-              borderRadius: BorderRadius.circular(8),
+              borderRadius: BorderRadius.circular(999),
               border: Border.all(
                 color: selected ? AppColors.primary : AppColors.border,
               ),
@@ -295,16 +314,17 @@ class _ExportScreenState extends State<ExportScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
-          'ຕຳແໜ່ງລາຍນ້ຳ:',
-          style: TextStyle(color: AppColors.textHint, fontSize: 11),
+        Text(
+          tr('ex.watermarkPos'),
+          style: const TextStyle(color: AppColors.textHint, fontSize: 11),
         ),
         const SizedBox(height: 6),
         Row(
           children: [
-            opt('top', 'ສົ້ນເທິງ', Icons.vertical_align_top_rounded),
+            opt('top', tr('ex.posTop'), Icons.vertical_align_top_rounded),
             const SizedBox(width: 8),
-            opt('bottom', 'ສົ້ນລຸ່ມ', Icons.vertical_align_bottom_rounded),
+            opt('bottom', tr('ex.posBottom'),
+                Icons.vertical_align_bottom_rounded),
           ],
         ),
       ],
@@ -317,21 +337,18 @@ class _ExportScreenState extends State<ExportScreen> {
       builder: (_) => AlertDialog(
         backgroundColor: AppColors.surface,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text(
-          '✨ PRO Features',
-          style: TextStyle(color: AppColors.textPrimary),
+        title: Text(
+          tr('ex.proFeaturesTitle'),
+          style: const TextStyle(color: AppColors.textPrimary),
         ),
-        content: const Text(
-          '• Export FHD ບໍ່ຕິດ watermark (ບໍ່ຈຳກັດ)\n'
-          '• Karaoke Highlight\n'
-          '• ຊັບສອງພາສາ (Bilingual)\n\n'
-          'ພຽງ 39,000 ກີບ/ເດືອນ — ສະມັກ PRO ທາງ WhatsApp ໃນໜ້າ "ຕັ້ງຄ່າ"',
-          style: TextStyle(color: AppColors.textSecondary, fontSize: 13),
+        content: Text(
+          tr('ex.proFeaturesBody'),
+          style: const TextStyle(color: AppColors.textSecondary, fontSize: 13),
         ),
         actions: [
           ElevatedButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text('ຮັບຊາບ'),
+            child: Text(tr('ex.gotIt')),
           ),
         ],
       ),
@@ -352,7 +369,7 @@ class _ExportScreenState extends State<ExportScreen> {
               width: 72,
               height: 72,
               decoration: BoxDecoration(
-                color: AppColors.success.withOpacity(0.15),
+                color: AppColors.success.withValues(alpha: 0.15),
                 shape: BoxShape.circle,
               ),
               child: const Icon(
@@ -363,7 +380,7 @@ class _ExportScreenState extends State<ExportScreen> {
             ),
             const SizedBox(height: 16),
             Text(
-              isVideo ? 'Export ວິດີໂອສຳເລັດ!' : 'Export SRT ສຳເລັດ!',
+              isVideo ? tr('ex.successVideo') : tr('ex.successSrt'),
               style: const TextStyle(
                 color: AppColors.textPrimary,
                 fontSize: 18,
@@ -372,25 +389,49 @@ class _ExportScreenState extends State<ExportScreen> {
             ),
             const SizedBox(height: 8),
             Text(
-              isVideo
-                  ? 'ວິດີໂອຖືກບັນທຶກໃສ່ Movies/SubtitleAI ໃນ Gallery ແລ້ວ'
-                  : 'ໄຟລ໌ .srt ຖືກບັນທຶກໃສ່ Download/SubtitleAI ແລ້ວ',
+              isVideo ? tr('ex.savedVideo') : tr('ex.savedSrt'),
               style: const TextStyle(color: AppColors.textSecondary),
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 20),
             GradientButton(
-              label: 'ກັບໄປແກ້ໄຂ',
-              icon: Icons.check_rounded,
+              label: tr('ex.share'),
+              icon: Icons.ios_share_rounded,
               height: 48,
-              onTap: () {
+              onTap: _shareLastExport,
+            ),
+            const SizedBox(height: 10),
+            TextButton.icon(
+              onPressed: () {
                 Navigator.pop(context);
                 Navigator.pop(context);
               },
+              icon: const Icon(Icons.check_rounded,
+                  color: AppColors.textSecondary, size: 18),
+              label: Text(
+                tr('ex.backToEdit'),
+                style: const TextStyle(color: AppColors.textSecondary),
+              ),
             ),
           ],
         ),
       ),
+    );
+  }
+
+  /// Share the just-exported file via the system sheet (TikTok / Reels / LINE…).
+  Future<void> _shareLastExport() async {
+    final path = _lastExportedPath;
+    if (path == null || !File(path).existsSync()) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(tr('ex.errPrefix'))),
+        );
+      }
+      return;
+    }
+    await SharePlus.instance.share(
+      ShareParams(files: [XFile(path)], text: tr('ex.shareText')),
     );
   }
 
@@ -399,7 +440,7 @@ class _ExportScreenState extends State<ExportScreen> {
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(
-        title: const Text('Export'),
+        title: Text(tr('ex.title')),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new, size: 18),
           onPressed: () => Navigator.pop(context),
@@ -413,27 +454,28 @@ class _ExportScreenState extends State<ExportScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                _buildVideoThumbnail(
-                  project?.name ?? 'ວິດີໂອ',
-                  project?.segments.length ?? 0,
-                ),
+                _buildVideoThumbnail(project),
                 const SizedBox(height: 24),
-                _buildSectionLabel('ຮູບແບບ Export'),
+                _buildSectionLabel(tr('ex.format')),
                 const SizedBox(height: 12),
                 _buildExportTypeSelector(),
                 const SizedBox(height: 24),
                 if (_exportType == ExportType.videoWithSubtitle) ...[
-                  _buildSectionLabel('ຄຸນນະພາບ'),
+                  _buildSectionLabel(tr('ex.quality')),
                   const SizedBox(height: 12),
                   _buildQualitySelector(),
+                  if (!_isPro) ...[
+                    const SizedBox(height: 8),
+                    _buildFhdQuotaNote(),
+                  ],
                   const SizedBox(height: 24),
                 ],
                 if (_exportType == ExportType.videoWithSubtitle && !_isPro) ...[
-                  _buildSectionLabel('ລາຍນ້ຳ (Watermark)'),
+                  _buildSectionLabel(tr('ex.watermark')),
                   const SizedBox(height: 8),
-                  const Text(
-                    'ແບບຟຣີຈະຕິດ logo KarnSub — ເລືອກຕຳແໜ່ງ:',
-                    style: TextStyle(
+                  Text(
+                    tr('ex.watermarkNote'),
+                    style: const TextStyle(
                       color: AppColors.textSecondary,
                       fontSize: 12,
                     ),
@@ -443,6 +485,29 @@ class _ExportScreenState extends State<ExportScreen> {
                   const SizedBox(height: 24),
                 ],
                 _buildSummaryCard(project),
+                // Effects force the slower CPU render path — warn up front so a
+                // long export doesn't look like the app froze.
+                if (_exportType == ExportType.videoWithSubtitle &&
+                    project != null &&
+                    (project.imageOverlays.isNotEmpty ||
+                        project.zoomEffects.isNotEmpty ||
+                        project.fadeEffects.isNotEmpty ||
+                        project.shakeEffects.isNotEmpty ||
+                        project.bgBlur)) ...[
+                  const SizedBox(height: 10),
+                  Row(children: [
+                    const Icon(Icons.hourglass_bottom_rounded,
+                        size: 14, color: AppColors.textHint),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        tr('ex.slowEffects'),
+                        style: const TextStyle(
+                            color: AppColors.textHint, fontSize: 11.5),
+                      ),
+                    ),
+                  ]),
+                ],
                 const SizedBox(height: 32),
                 if (_isExporting)
                   _buildExportingProgress()
@@ -468,7 +533,19 @@ class _ExportScreenState extends State<ExportScreen> {
     );
   }
 
-  Widget _buildVideoThumbnail(String name, int segmentCount) {
+  String _fmtDur(Duration? d) {
+    if (d == null) return '';
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return d.inHours > 0 ? '${d.inHours}:$m:$s' : '$m:$s';
+  }
+
+  Widget _buildVideoThumbnail(SubtitleProject? project) {
+    final name = project?.name ?? '';
+    final segmentCount = project?.segments.length ?? 0;
+    final thumbPath = project?.thumbnailPath;
+    final hasThumb = thumbPath != null && File(thumbPath).existsSync();
+    final dur = _fmtDur(project?.videoDuration);
     return Container(
       width: double.infinity,
       height: 120,
@@ -479,15 +556,44 @@ class _ExportScreenState extends State<ExportScreen> {
       ),
       child: Row(
         children: [
-          Container(
-            width: 90,
-            height: double.infinity,
-            decoration: const BoxDecoration(
-              color: Colors.black,
-              borderRadius: BorderRadius.horizontal(left: Radius.circular(16)),
-            ),
-            child: const Center(
-              child: Icon(Icons.movie, color: AppColors.primary, size: 36),
+          ClipRRect(
+            borderRadius:
+                const BorderRadius.horizontal(left: Radius.circular(16)),
+            child: SizedBox(
+              width: 90,
+              height: double.infinity,
+              child: hasThumb
+                  ? Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        Image.file(File(thumbPath), fit: BoxFit.cover),
+                        if (dur.isNotEmpty)
+                          Positioned(
+                            right: 4,
+                            bottom: 4,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 5, vertical: 1),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withValues(alpha: 0.6),
+                                borderRadius: BorderRadius.circular(5),
+                              ),
+                              child: Text(
+                                dur,
+                                style: const TextStyle(
+                                    color: Colors.white, fontSize: 9),
+                              ),
+                            ),
+                          ),
+                      ],
+                    )
+                  : Container(
+                      color: Colors.black,
+                      child: const Center(
+                        child: Icon(Icons.movie,
+                            color: AppColors.primary, size: 36),
+                      ),
+                    ),
             ),
           ),
           const SizedBox(width: 16),
@@ -508,7 +614,7 @@ class _ExportScreenState extends State<ExportScreen> {
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  '$segmentCount ປ່ອນ subtitle',
+                  tr('ex.segCount', {'n': segmentCount}),
                   style: const TextStyle(
                     color: AppColors.textSecondary,
                     fontSize: 12,
@@ -523,21 +629,40 @@ class _ExportScreenState extends State<ExportScreen> {
     ).animate().fadeIn();
   }
 
+  /// Free-tier FHD quota note shown beneath the quality selector.
+  Widget _buildFhdQuotaNote() {
+    final out = _freeFhd <= 0;
+    return Row(
+      children: [
+        Icon(out ? Icons.lock_clock : Icons.bolt,
+            size: 14, color: out ? AppColors.accent : AppColors.primary),
+        const SizedBox(width: 5),
+        Text(
+          out ? tr('ex.fhdOut') : tr('ex.fhdRemaining', {'n': _freeFhd}),
+          style: TextStyle(
+            color: out ? AppColors.accent : AppColors.textSecondary,
+            fontSize: 11.5,
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildExportTypeSelector() {
     return Column(
       children: [
         _buildExportOption(
           type: ExportType.videoWithSubtitle,
           icon: Icons.movie_creation_outlined,
-          title: 'Video + Subtitle (Burn-in)',
-          subtitle: 'ຕໍ່ subtitle ເຂົ້າວິດີໂອ, Export MP4',
+          title: tr('ex.typeVideo'),
+          subtitle: tr('ex.typeVideoSub'),
         ),
         const SizedBox(height: 10),
         _buildExportOption(
           type: ExportType.srtOnly,
           icon: Icons.subtitles_outlined,
-          title: 'SRT File ເທົ່ານັ້ນ',
-          subtitle: 'Export .srt ສຳລັບ TikTok / YouTube',
+          title: tr('ex.typeSrt'),
+          subtitle: tr('ex.typeSrtSub'),
         ),
       ],
     );
@@ -557,7 +682,7 @@ class _ExportScreenState extends State<ExportScreen> {
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
           color: isSelected
-              ? AppColors.primary.withOpacity(0.12)
+              ? AppColors.primary.withValues(alpha: 0.12)
               : AppColors.surface,
           borderRadius: BorderRadius.circular(14),
           border: Border.all(
@@ -572,7 +697,7 @@ class _ExportScreenState extends State<ExportScreen> {
               height: 44,
               decoration: BoxDecoration(
                 color: isSelected
-                    ? AppColors.primary.withOpacity(0.2)
+                    ? AppColors.primary.withValues(alpha: 0.2)
                     : AppColors.surfaceLight,
                 borderRadius: BorderRadius.circular(12),
               ),
@@ -637,7 +762,7 @@ class _ExportScreenState extends State<ExportScreen> {
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
         decoration: BoxDecoration(
           color: isSelected ? AppColors.primary : AppColors.surface,
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(999),
           border: Border.all(
             color: isSelected ? AppColors.primary : AppColors.border,
           ),
@@ -664,26 +789,31 @@ class _ExportScreenState extends State<ExportScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'ສະຫຼຸບ',
-            style: TextStyle(
+          Text(
+            tr('ex.summary'),
+            style: const TextStyle(
               color: AppColors.textPrimary,
               fontWeight: FontWeight.bold,
             ),
           ),
           const SizedBox(height: 12),
           _summaryRow(
-            'ຮູບແບບ',
+            tr('ex.sumFormat'),
             _exportType == ExportType.videoWithSubtitle
                 ? 'MP4 + Subtitle'
                 : 'SRT Only',
           ),
           if (_exportType == ExportType.videoWithSubtitle)
             _summaryRow(
-              'ຄຸນນະພາບ',
+              tr('ex.sumQuality'),
               _quality == ExportQuality.fhd1080 ? '1080p FHD' : '720p HD',
             ),
-          _summaryRow('ສໄຕລ໌', project?.selectedStyle.name ?? '-'),
+          if (_exportType == ExportType.videoWithSubtitle) ...[
+            _summaryRow(tr('ex.sumOrigAudio'), (project?.originalMuted ?? false) ? tr('ex.audioOff') : tr('ex.audioOn')),
+            _summaryRow(tr('ex.sumSfx'), (project?.sfxBlocks.isNotEmpty ?? false) ? tr('ex.has') : tr('ex.none')),
+            _summaryRow(tr('ex.sumAiVoice'), (project?.aiVoicePath != null) ? tr('ex.has') : tr('ex.none')),
+          ],
+          _summaryRow(tr('ex.sumStyle'), project?.selectedStyle.name ?? '-'),
         ],
       ),
     );
@@ -760,18 +890,18 @@ class _ExportScreenState extends State<ExportScreen> {
             ),
           ),
           const SizedBox(height: 10),
-          const Row(
+          Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(
+              const Icon(
                 Icons.warning_amber_outlined,
                 color: AppColors.textHint,
                 size: 14,
               ),
-              SizedBox(width: 4),
+              const SizedBox(width: 4),
               Text(
-                'ຢ່ານອກ app ໃນຂະນະ export',
-                style: TextStyle(color: AppColors.textHint, fontSize: 12),
+                tr('ex.dontLeave'),
+                style: const TextStyle(color: AppColors.textHint, fontSize: 12),
               ),
             ],
           ),
@@ -783,8 +913,8 @@ class _ExportScreenState extends State<ExportScreen> {
   Widget _buildExportButton() {
     return GradientButton(
       label: _exportType == ExportType.videoWithSubtitle
-          ? 'Export Video'
-          : 'Export SRT',
+          ? tr('ex.exportVideoBtn')
+          : tr('ex.exportSrtBtn'),
       icon: Icons.download_rounded,
       height: 56,
       onTap: _startExport,

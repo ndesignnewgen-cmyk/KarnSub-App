@@ -23,10 +23,23 @@ class LaoFontService {
         return 'assets/fonts/NotoSerifLao.ttf';
       case 'NotoSansLaoLooped':
         return 'assets/fonts/NotoSansLaoLooped.ttf';
+      // ── Thai families ──────────────────────────────────────────────
+      case 'NotoSansThai':
+        return 'assets/fonts/NotoSansThai.ttf';
+      case 'NotoSansThaiLooped':
+        return 'assets/fonts/NotoSansThaiLooped.ttf';
+      case 'NotoSerifThai':
+        return 'assets/fonts/NotoSerifThai.ttf';
       default: // NotoSansLao / Default
         return 'assets/fonts/NotoSansLao.ttf';
     }
   }
+
+  /// True for the bundled Thai font families.
+  static bool isThaiFamily(String fontFamily) =>
+      fontFamily == 'NotoSansThai' ||
+      fontFamily == 'NotoSansThaiLooped' ||
+      fontFamily == 'NotoSerifThai';
 
   static Future<bool> _assetExists(String asset) async {
     try {
@@ -40,6 +53,32 @@ class LaoFontService {
   /// System font file the exporter would fall back to (mirrors export logic).
   static String? systemFontPath(String fontFamily) {
     final candidates = <String>[];
+    // ── Thai families → prefer Thai system fonts ──────────────────────
+    if (isThaiFamily(fontFamily)) {
+      if (fontFamily == 'NotoSerifThai') {
+        candidates.addAll([
+          '/system/fonts/NotoSerifThai-Regular.ttf',
+          '/system/fonts/NotoSerifThai.ttf',
+        ]);
+      }
+      if (fontFamily == 'NotoSansThaiLooped') {
+        candidates.addAll([
+          '/system/fonts/NotoSansThaiLooped-Regular.ttf',
+          '/system/fonts/NotoSansThaiLooped.ttf',
+        ]);
+      }
+      candidates.addAll([
+        '/system/fonts/NotoSansThai-Regular.ttf',
+        '/system/fonts/NotoSansThai.ttf',
+        '/system/fonts/NotoSansThaiUI-Regular.ttf',
+        '/system/fonts/DroidSansThai.ttf',
+        '/system/fonts/Thonburi.ttf',
+      ]);
+      for (final p in candidates) {
+        if (File(p).existsSync()) return p;
+      }
+      return null;
+    }
     if (fontFamily == 'NotoSerifLao') {
       candidates.addAll([
         '/system/fonts/NotoSerifLao-Regular.ttf',

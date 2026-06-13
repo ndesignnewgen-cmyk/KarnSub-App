@@ -29,10 +29,481 @@ import java.nio.ByteOrder
 
 class MainActivity : FlutterActivity() {
     private val CHANNEL = "com.anniekaydee.subtitle_app/audio"
-    private val TARGET_SAMPLE_RATE = 16000
+    private val TARGET_SAMPLE_RATE = 44100
     private val TARGET_CHANNELS = 1
     private var methodChannel: MethodChannel? = null
     private var lastEmittedPct = -1
+
+    // ── Image overlays (B-roll/sticker) composited onto each frame ────────────
+    private data class ImgOverlay(
+        val bitmap: Bitmap,           // static image, GIF first frame, or video first frame (ratio/fallback)
+        val startUs: Long,
+        val endUs: Long,
+        val x: Float,      // 0–1 centre
+        val y: Float,      // 0–1 centre
+        val scale: Float,  // fraction of display width
+        val rotation: Float,
+        val flipH: Boolean,
+        val movie: android.graphics.Movie? = null, // animated GIF (null = static)
+        val gifW: Int = 0,
+        val gifH: Int = 0,
+        val decoder: BrollDecoder? = null, // video B-roll sequential decoder (null = not video)
+        val srcDurUs: Long = 0L,      // source clip length (for looping)
+        val cover: Boolean = false,   // fill the whole frame (crop overflow)
+        val opacity: Float = 1f,      // static opacity (used when keyframes empty)
+        val keyframes: List<OvKf> = emptyList(), // animate x/y/scale/rotation/opacity
+    )
+    private data class OvKf(
+        val timeUs: Long, val x: Float, val y: Float,
+        val scale: Float, val rotation: Float, val opacity: Float, val easing: Int = 0,
+    )
+    private data class OvState(
+        val x: Float, val y: Float, val scale: Float, val rotation: Float, val opacity: Float)
+
+    /// Interpolate an overlay's transform + opacity at [presentUs] across its
+    /// keyframes (falls back to the static values when there are none).
+    private fun overlayStateAt(ov: ImgOverlay, presentUs: Long): OvState {
+        val kfs = ov.keyframes
+        if (kfs.isEmpty()) return OvState(ov.x, ov.y, ov.scale, ov.rotation, ov.opacity)
+        if (presentUs <= kfs.first().timeUs) {
+            val k = kfs.first(); return OvState(k.x, k.y, k.scale, k.rotation, k.opacity)
+        }
+        if (presentUs >= kfs.last().timeUs) {
+            val k = kfs.last(); return OvState(k.x, k.y, k.scale, k.rotation, k.opacity)
+        }
+        var i = 0
+        while (i < kfs.size - 1 && kfs[i + 1].timeUs < presentUs) i++
+        val a = kfs[i]; val b = kfs[i + 1]
+        val span = (b.timeUs - a.timeUs).coerceAtLeast(1L)
+        val t = ease(a.easing,
+            ((presentUs - a.timeUs).toFloat() / span).coerceIn(0f, 1f))
+        return OvState(
+            a.x + (b.x - a.x) * t,
+            a.y + (b.y - a.y) * t,
+            a.scale + (b.scale - a.scale) * t,
+            a.rotation + (b.rotation - a.rotation) * t,
+            a.opacity + (b.opacity - a.opacity) * t,
+        )
+    }
+    private var imageOverlays: List<ImgOverlay> = emptyList()
+
+    /** Release any B-roll video decoders held by overlays. */
+    private fun releaseOverlayVideos() {
+        for (ov in imageOverlays) {
+            try { ov.decoder?.release() } catch (_: Exception) {}
+        }
+    }
+
+    private fun parseOvKfs(raw: Any?): List<OvKf> {
+        @Suppress("UNCHECKED_CAST")
+        val list = raw as? List<Map<String, Any>> ?: return emptyList()
+        val out = ArrayList<OvKf>()
+        for (k in list) {
+            try {
+                out.add(OvKf(
+                    timeUs = (k["timeMs"] as Number).toLong() * 1000L,
+                    x = (k["x"] as? Number)?.toFloat() ?: 0.5f,
+                    y = (k["y"] as? Number)?.toFloat() ?: 0.5f,
+                    scale = (k["scale"] as? Number)?.toFloat() ?: 0.5f,
+                    rotation = (k["rotation"] as? Number)?.toFloat() ?: 0f,
+                    opacity = (k["opacity"] as? Number)?.toFloat() ?: 1f,
+                    easing = (k["easing"] as? Number)?.toInt() ?: 0,
+                ))
+            } catch (_: Exception) {}
+        }
+        out.sortBy { it.timeUs }
+        return out
+    }
+
+    private fun parseImageOverlays(raw: List<Map<String, Any>>?): List<ImgOverlay> {
+        if (raw == null) return emptyList()
+        val out = ArrayList<ImgOverlay>()
+        for (m in raw) {
+            try {
+                val path = m["path"] as? String ?: continue
+                if (!File(path).exists()) continue
+                val isVideo = (m["isVideo"] as? Boolean) ?: false
+                if (isVideo) {
+                    // Video B-roll: read duration + rotation + a fallback first frame
+                    // via a one-shot retriever, then stream frames with a sequential
+                    // MediaCodec decoder (BrollDecoder) for smooth export-fps playback.
+                    var durMs = 0L
+                    var rot = 0
+                    var first: Bitmap? = null
+                    val r = android.media.MediaMetadataRetriever()
+                    try {
+                        r.setDataSource(path)
+                        durMs = r.extractMetadata(
+                            android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
+                            ?.toLongOrNull() ?: 0L
+                        rot = r.extractMetadata(
+                            android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
+                            ?.toIntOrNull() ?: 0
+                        first = r.getFrameAtTime(
+                            0L, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    } catch (_: Exception) {}
+                    try { r.release() } catch (_: Exception) {}
+                    if (first == null) continue
+                    val dec = try { BrollDecoder(path, rot) } catch (_: Exception) { null }
+                    out.add(ImgOverlay(
+                        bitmap = first,
+                        startUs = (m["startMs"] as Number).toLong() * 1000L,
+                        endUs = (m["endMs"] as Number).toLong() * 1000L,
+                        x = (m["x"] as? Number)?.toFloat() ?: 0.5f,
+                        y = (m["y"] as? Number)?.toFloat() ?: 0.5f,
+                        scale = (m["scale"] as? Number)?.toFloat() ?: 0.5f,
+                        rotation = (m["rotation"] as? Number)?.toFloat() ?: 0f,
+                        flipH = (m["flipH"] as? Boolean) ?: false,
+                        decoder = dec,
+                        srcDurUs = durMs * 1000L,
+                        gifW = first.width,
+                        gifH = first.height,
+                        cover = (m["cover"] as? Boolean) ?: false,
+                        opacity = (m["opacity"] as? Number)?.toFloat() ?: 1f,
+                        keyframes = parseOvKfs(m["keyframes"]),
+                    ))
+                    continue
+                }
+                val bmp = android.graphics.BitmapFactory.decodeFile(path) ?: continue
+                // Animated GIF → also load a Movie so we can render the right frame
+                // per video time. BitmapFactory above gives the first frame (ratio).
+                var movie: android.graphics.Movie? = null
+                if (path.lowercase().endsWith(".gif")) {
+                    try {
+                        val mv = android.graphics.Movie.decodeFile(path)
+                        if (mv != null && mv.duration() > 0 && mv.width() > 0) movie = mv
+                    } catch (_: Exception) {}
+                }
+                out.add(ImgOverlay(
+                    bitmap = bmp,
+                    startUs = (m["startMs"] as Number).toLong() * 1000L,
+                    endUs = (m["endMs"] as Number).toLong() * 1000L,
+                    x = (m["x"] as? Number)?.toFloat() ?: 0.5f,
+                    y = (m["y"] as? Number)?.toFloat() ?: 0.5f,
+                    scale = (m["scale"] as? Number)?.toFloat() ?: 0.5f,
+                    rotation = (m["rotation"] as? Number)?.toFloat() ?: 0f,
+                    flipH = (m["flipH"] as? Boolean) ?: false,
+                    movie = movie,
+                    gifW = movie?.width() ?: bmp.width,
+                    gifH = movie?.height() ?: bmp.height,
+                    cover = (m["cover"] as? Boolean) ?: false,
+                    opacity = (m["opacity"] as? Number)?.toFloat() ?: 1f,
+                    keyframes = parseOvKfs(m["keyframes"]),
+                ))
+            } catch (_: Exception) {}
+        }
+        return out
+    }
+
+    // ── Zoom / Ken-Burns effects on the video frame ───────────────────────────
+    private data class ZoomKf(val timeUs: Long, val scale: Float, val fx: Float, val fy: Float, val easing: Int = 0)
+
+    /// Easing curve for a keyframe interval (mirrors the Dart _ease).
+    private fun ease(mode: Int, t: Float): Float {
+        return when (mode) {
+            1 -> t * t
+            2 -> 1f - (1f - t) * (1f - t)
+            3 -> if (t < 0.5f) 2f * t * t else { val u = -2f * t + 2f; 1f - (u * u) / 2f }
+            4 -> t * t * t
+            5 -> { val u = 1f - t; 1f - u * u * u }
+            else -> t
+        }
+    }
+    private data class ZoomFx(
+        val startUs: Long,
+        val endUs: Long,
+        val fromScale: Float,
+        val toScale: Float,
+        val focusX: Float,
+        val focusY: Float,
+        val keyframes: List<ZoomKf>,
+    )
+    private var zoomEffects: List<ZoomFx> = emptyList()
+
+    private fun parseZoomEffects(raw: List<Map<String, Any>>?): List<ZoomFx> {
+        if (raw == null) return emptyList()
+        val out = ArrayList<ZoomFx>()
+        for (m in raw) {
+            try {
+                @Suppress("UNCHECKED_CAST")
+                val kfRaw = m["keyframes"] as? List<Map<String, Any>>
+                val kfs = ArrayList<ZoomKf>()
+                kfRaw?.forEach { k ->
+                    kfs.add(ZoomKf(
+                        timeUs = (k["timeMs"] as Number).toLong() * 1000L,
+                        scale = (k["scale"] as? Number)?.toFloat() ?: 1f,
+                        fx = (k["focusX"] as? Number)?.toFloat() ?: 0.5f,
+                        fy = (k["focusY"] as? Number)?.toFloat() ?: 0.5f,
+                        easing = (k["easing"] as? Number)?.toInt() ?: 0,
+                    ))
+                }
+                kfs.sortBy { it.timeUs }
+                out.add(ZoomFx(
+                    startUs = (m["startMs"] as Number).toLong() * 1000L,
+                    endUs = (m["endMs"] as Number).toLong() * 1000L,
+                    fromScale = (m["fromScale"] as? Number)?.toFloat() ?: 1f,
+                    toScale = (m["toScale"] as? Number)?.toFloat() ?: 1f,
+                    focusX = (m["focusX"] as? Number)?.toFloat() ?: 0.5f,
+                    focusY = (m["focusY"] as? Number)?.toFloat() ?: 0.5f,
+                    keyframes = kfs,
+                ))
+            } catch (_: Exception) {}
+        }
+        return out
+    }
+
+    /// Scale + focal point active at [presentUs], or null (no zoom / scale≈1).
+    private fun zoomAt(presentUs: Long): Triple<Float, Float, Float>? {
+        for (z in zoomEffects) {
+            if (presentUs < z.startUs || presentUs > z.endUs) continue
+            val s: Float; val fx: Float; val fy: Float
+            if (z.keyframes.isNotEmpty()) {
+                // Keyframe mode: interpolate scale + focal across keyframes
+                // (a single keyframe holds its value across the whole clip).
+                val kfs = z.keyframes
+                when {
+                    presentUs <= kfs.first().timeUs -> {
+                        s = kfs.first().scale; fx = kfs.first().fx; fy = kfs.first().fy
+                    }
+                    presentUs >= kfs.last().timeUs -> {
+                        s = kfs.last().scale; fx = kfs.last().fx; fy = kfs.last().fy
+                    }
+                    else -> {
+                        var i = 0
+                        while (i < kfs.size - 1 && kfs[i + 1].timeUs < presentUs) i++
+                        val a = kfs[i]; val b = kfs[i + 1]
+                        val span = (b.timeUs - a.timeUs).coerceAtLeast(1L)
+                        val t = ease(a.easing,
+                            ((presentUs - a.timeUs).toFloat() / span).coerceIn(0f, 1f))
+                        s = a.scale + (b.scale - a.scale) * t
+                        fx = a.fx + (b.fx - a.fx) * t
+                        fy = a.fy + (b.fy - a.fy) * t
+                    }
+                }
+            } else {
+                val dur = (z.endUs - z.startUs).coerceAtLeast(1L)
+                val t = ((presentUs - z.startUs).toFloat() / dur).coerceIn(0f, 1f)
+                s = z.fromScale + (z.toScale - z.fromScale) * t
+                fx = z.focusX; fy = z.focusY
+            }
+            if (s <= 1.001f) return null
+            return Triple(s, fx, fy)
+        }
+        return null
+    }
+
+    /// Return a zoomed copy of [src] for [presentUs], or [src] unchanged.
+    private fun applyZoom(src: Bitmap, presentUs: Long): Bitmap {
+        val z = zoomAt(presentUs) ?: return src
+        val (s, fx, fy) = z
+        val out = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
+        val c = Canvas(out)
+        val cx = fx * src.width
+        val cy = fy * src.height
+        val mtx = android.graphics.Matrix().apply {
+            postTranslate(-cx, -cy)
+            postScale(s, s)
+            postTranslate(cx, cy)
+        }
+        c.drawBitmap(src, mtx,
+            android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG))
+        return out
+    }
+
+    // ── Fade transitions (black overlay with animated alpha) ───────────────────
+    private data class FadeFx(val startUs: Long, val endUs: Long, val toBlack: Boolean)
+    private var fadeEffects: List<FadeFx> = emptyList()
+
+    private fun parseFadeEffects(raw: List<Map<String, Any>>?): List<FadeFx> {
+        if (raw == null) return emptyList()
+        val out = ArrayList<FadeFx>()
+        for (m in raw) {
+            try {
+                out.add(FadeFx(
+                    startUs = (m["startMs"] as Number).toLong() * 1000L,
+                    endUs = (m["endMs"] as Number).toLong() * 1000L,
+                    toBlack = (m["toBlack"] as? Boolean) ?: true,
+                ))
+            } catch (_: Exception) {}
+        }
+        return out
+    }
+
+    /// Black-overlay alpha (0..255) active at [presentUs]; 0 = none.
+    private fun fadeAlphaAt(presentUs: Long): Int {
+        for (f in fadeEffects) {
+            if (presentUs < f.startUs || presentUs > f.endUs) continue
+            val dur = (f.endUs - f.startUs).coerceAtLeast(1L)
+            val t = ((presentUs - f.startUs).toFloat() / dur).coerceIn(0f, 1f)
+            val a = if (f.toBlack) t else (1f - t)
+            return (a * 255f).toInt().coerceIn(0, 255)
+        }
+        return 0
+    }
+
+    // ── Camera shake ───────────────────────────────────────────────────────────
+    private data class ShakeFx(val startUs: Long, val endUs: Long, val intensity: Float)
+    private var shakeEffects: List<ShakeFx> = emptyList()
+
+    private fun parseShakeEffects(raw: List<Map<String, Any>>?): List<ShakeFx> {
+        if (raw == null) return emptyList()
+        val out = ArrayList<ShakeFx>()
+        for (m in raw) {
+            try {
+                out.add(ShakeFx(
+                    startUs = (m["startMs"] as Number).toLong() * 1000L,
+                    endUs = (m["endMs"] as Number).toLong() * 1000L,
+                    intensity = (m["intensity"] as? Number)?.toFloat() ?: 0.03f,
+                ))
+            } catch (_: Exception) {}
+        }
+        return out
+    }
+
+    /// Shake intensity active at [presentUs] (fraction of frame), or 0.
+    private fun shakeAt(presentUs: Long): Float {
+        for (s in shakeEffects) {
+            if (presentUs in s.startUs..s.endUs) return s.intensity
+        }
+        return 0f
+    }
+
+    /// Apply a camera shake to [src] for [presentUs]: scale up slightly so the
+    /// jitter never reveals edges, then offset by a fast oscillation.
+    private fun applyShake(src: Bitmap, presentUs: Long): Bitmap {
+        val amp = shakeAt(presentUs)
+        if (amp <= 0f) return src
+        val w = src.width; val h = src.height
+        val maxOff = amp * w
+        // Two detuned sines → organic, non-repeating-looking shake.
+        val tSec = presentUs / 1_000_000.0
+        val dx = (Math.sin(tSec * 57.0) + Math.sin(tSec * 89.0) * 0.6).toFloat() * maxOff
+        val dy = (Math.cos(tSec * 63.0) + Math.cos(tSec * 97.0) * 0.6).toFloat() * maxOff
+        val scale = 1f + amp * 2f // margin so offset stays inside
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val c = Canvas(out)
+        val mtx = android.graphics.Matrix().apply {
+            postTranslate(-w / 2f, -h / 2f)
+            postScale(scale, scale)
+            postTranslate(w / 2f + dx, h / 2f + dy)
+        }
+        c.drawBitmap(src, mtx, android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG))
+        return out
+    }
+
+    // ── Blurred background (fit a non-9:16 video into a 9:16 frame) ────────────
+    private var blurBg: Boolean = false
+
+    /// Compose [video] into an [outW]x[outH] canvas: a blurred, scaled-up copy
+    /// fills the frame (cover) with the real video fit-centered on top.
+    private fun blurBgCompose(video: Bitmap, outW: Int, outH: Int): Bitmap {
+        val out = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
+        val c = Canvas(out)
+        val fp = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
+        // Cheap blur: downscale to ~1/18 then upscale to COVER the frame.
+        val sw = (video.width / 18).coerceAtLeast(2)
+        val sh = (video.height / 18).coerceAtLeast(2)
+        val small = Bitmap.createScaledBitmap(video, sw, sh, true)
+        val cover = maxOf(outW.toFloat() / sw, outH.toFloat() / sh)
+        val cw = sw * cover; val ch = sh * cover
+        c.drawBitmap(small, android.graphics.Matrix().apply {
+            postScale(cover, cover)
+            postTranslate((outW - cw) / 2f, (outH - ch) / 2f)
+        }, fp)
+        small.recycle()
+        c.drawARGB(70, 0, 0, 0) // dark scrim for subtitle contrast
+        // Real video, fit (contain) + centered.
+        val fit = minOf(outW.toFloat() / video.width, outH.toFloat() / video.height)
+        val fw = video.width * fit; val fh = video.height * fit
+        c.drawBitmap(video, android.graphics.Matrix().apply {
+            postScale(fit, fit)
+            postTranslate((outW - fw) / 2f, (outH - fh) / 2f)
+        }, fp)
+        return out
+    }
+
+    /// Draw any active image overlays onto [canvas] sized [w]x[h] (display dims)
+    /// for presentation time [presentUs]. Scaled by display width, centred at
+    /// (x*w, y*h), rotated about that centre.
+    private fun drawImageOverlays(canvas: Canvas, presentUs: Long, w: Int, h: Int) {
+        if (imageOverlays.isEmpty()) return
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        for (ov in imageOverlays) {
+            if (presentUs < ov.startUs || presentUs > ov.endUs) continue
+
+            // Interpolated transform + opacity (keyframes) at this time.
+            val st = overlayStateAt(ov, presentUs)
+            val alpha = (st.opacity.coerceIn(0f, 1f) * 255f).toInt()
+            if (alpha <= 0) continue
+            paint.alpha = alpha
+
+            // Full-screen "cover" overlay: fill the whole frame, crop the overflow.
+            // Ignores x/y/scale/rotation. Used for full-screen B-roll.
+            if (ov.cover) {
+                val dec0 = ov.decoder
+                val src: Bitmap = if (dec0 != null) {
+                    val elapsedUs = presentUs - ov.startUs
+                    val srcUs = if (ov.srcDurUs > 0L) elapsedUs % ov.srcDurUs else elapsedUs
+                    dec0.frameAt(srcUs) ?: ov.bitmap
+                } else ov.bitmap
+                val sw = src.width.coerceAtLeast(1)
+                val sh = src.height.coerceAtLeast(1)
+                val coverScale = maxOf(w.toFloat() / sw, h.toFloat() / sh)
+                val dw = sw * coverScale
+                val dh = sh * coverScale
+                val left = (w - dw) / 2f
+                val top = (h - dh) / 2f
+                canvas.save()
+                canvas.clipRect(0f, 0f, w.toFloat(), h.toFloat())
+                if (ov.flipH) { canvas.translate(w.toFloat(), 0f); canvas.scale(-1f, 1f) }
+                canvas.drawBitmap(src, null, RectF(left, top, left + dw, top + dh), paint)
+                canvas.restore()
+                continue
+            }
+
+            val srcW = ov.gifW.coerceAtLeast(1)
+            val srcH = ov.gifH.coerceAtLeast(1)
+            val targetW = st.scale * w
+            val targetH = targetW * (srcH.toFloat() / srcW.toFloat())
+            val cx = st.x * w
+            val cy = st.y * h
+            canvas.save()
+            canvas.translate(cx, cy)
+            if (st.rotation != 0f) canvas.rotate(st.rotation)
+            if (ov.flipH) canvas.scale(-1f, 1f)
+            val dec = ov.decoder
+            if (dec != null) {
+                // Video B-roll: stream the frame at the (looped) elapsed time from
+                // the sequential decoder — smooth at the export frame rate.
+                val elapsedUs = presentUs - ov.startUs
+                val srcUs = if (ov.srcDurUs > 0L) elapsedUs % ov.srcDurUs else elapsedUs
+                val fb = dec.frameAt(srcUs) ?: ov.bitmap
+                val fsW = fb.width.coerceAtLeast(1)
+                val fsH = fb.height.coerceAtLeast(1)
+                val tW = st.scale * w
+                val tH = tW * (fsH.toFloat() / fsW.toFloat())
+                canvas.drawBitmap(fb, null, RectF(-tW / 2f, -tH / 2f, tW / 2f, tH / 2f), paint)
+                canvas.restore()
+                continue
+            }
+            val mv = ov.movie
+            if (mv != null && mv.duration() > 0) {
+                // Animated GIF: pick the frame at the looped elapsed time.
+                val elapsedMs = ((presentUs - ov.startUs) / 1000L).toInt()
+                mv.setTime(elapsedMs % mv.duration())
+                canvas.scale(targetW / srcW, targetH / srcH)
+                canvas.translate(-srcW / 2f, -srcH / 2f)
+                try { mv.draw(canvas, 0f, 0f, paint) } catch (_: Exception) {
+                    canvas.drawBitmap(ov.bitmap, null,
+                        RectF(0f, 0f, srcW.toFloat(), srcH.toFloat()), paint)
+                }
+            } else {
+                val dst = RectF(-targetW / 2f, -targetH / 2f, targetW / 2f, targetH / 2f)
+                canvas.drawBitmap(ov.bitmap, null, dst, paint)
+            }
+            canvas.restore()
+        }
+    }
 
     // Worker pool to parallelise the per-pixel YUV<->RGB conversions across cores.
     private val cpuCount = Runtime.getRuntime().availableProcessors().coerceIn(2, 8)
@@ -53,8 +524,125 @@ class MainActivity : FlutterActivity() {
         for (f in futures) f.get()
     }
 
+    /// Sequential MediaCodec decoder for one B-roll clip. [frameAt] decodes forward
+    /// to the requested source time and returns the current frame (display oriented),
+    /// rewinding on a backward jump (loop wrap / scrub). Holds only one frame in
+    /// memory. Reuses [imageToBitmap]/[bufferToBitmap] from the outer class.
+    inner class BrollDecoder(path: String, private val rotationDeg: Int) {
+        private val extractor = MediaExtractor()
+        private var codec: MediaCodec? = null
+        private val info = MediaCodec.BufferInfo()
+        private var vw = 0
+        private var vh = 0
+        private var inputDone = false
+        private var outputDone = false
+        private var currentPtsUs = -1L
+        private var current: Bitmap? = null
+        private var ok = false
+
+        init {
+            try {
+                extractor.setDataSource(path)
+                var tIdx = -1
+                var fmt: MediaFormat? = null
+                for (i in 0 until extractor.trackCount) {
+                    val f = extractor.getTrackFormat(i)
+                    if ((f.getString(MediaFormat.KEY_MIME) ?: "").startsWith("video/")) {
+                        tIdx = i; fmt = f; break
+                    }
+                }
+                if (tIdx >= 0 && fmt != null) {
+                    extractor.selectTrack(tIdx)
+                    vw = fmt.getInteger(MediaFormat.KEY_WIDTH)
+                    vh = fmt.getInteger(MediaFormat.KEY_HEIGHT)
+                    val c = MediaCodec.createDecoderByType(fmt.getString(MediaFormat.KEY_MIME)!!)
+                    c.configure(fmt, null, null, 0)
+                    c.start()
+                    codec = c
+                    ok = true
+                }
+            } catch (_: Exception) { ok = false }
+        }
+
+        private fun orient(bmp: Bitmap): Bitmap {
+            if (rotationDeg == 0) return bmp
+            val m = android.graphics.Matrix().apply { postRotate(rotationDeg.toFloat()) }
+            val r = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+            bmp.recycle(); return r
+        }
+
+        private fun rewind() {
+            try {
+                extractor.seekTo(0L, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+                codec?.flush()
+            } catch (_: Exception) {}
+            inputDone = false; outputDone = false; currentPtsUs = -1L
+        }
+
+        /** Frame at [targetUs] (display oriented). Caller must NOT recycle it. */
+        fun frameAt(targetUs: Long): Bitmap? {
+            val c = codec
+            if (!ok || c == null) return current
+            // Backward jump (loop wrap or scrub) → rewind and re-decode from start.
+            if (targetUs < currentPtsUs - 40_000L) {
+                current?.recycle(); current = null
+                rewind()
+            }
+            var guard = 0
+            while (currentPtsUs < targetUs && !outputDone && guard < 3000) {
+                guard++
+                if (!inputDone) {
+                    val inIdx = c.dequeueInputBuffer(8_000L)
+                    if (inIdx >= 0) {
+                        val buf = c.getInputBuffer(inIdx)!!
+                        val sz = extractor.readSampleData(buf, 0)
+                        if (sz < 0) {
+                            c.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            inputDone = true
+                        } else {
+                            c.queueInputBuffer(inIdx, 0, sz, extractor.sampleTime, 0)
+                            extractor.advance()
+                        }
+                    }
+                }
+                val outIdx = c.dequeueOutputBuffer(info, 8_000L)
+                if (outIdx >= 0) {
+                    val isEos = info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
+                    if (info.size > 0) {
+                        val img = c.getOutputImage(outIdx)
+                        val raw = if (img != null) { val b = imageToBitmap(img); img.close(); b }
+                                  else bufferToBitmap(c.getOutputBuffer(outIdx), c.outputFormat, vw, vh)
+                        c.releaseOutputBuffer(outIdx, false)
+                        if (raw != null) {
+                            current?.recycle()
+                            current = orient(raw)
+                            currentPtsUs = info.presentationTimeUs
+                        }
+                    } else {
+                        c.releaseOutputBuffer(outIdx, false)
+                    }
+                    if (isEos) outputDone = true
+                }
+            }
+            return current
+        }
+
+        fun release() {
+            try { current?.recycle() } catch (_: Exception) {}
+            current = null
+            try { codec?.stop() } catch (_: Exception) {}
+            try { codec?.release() } catch (_: Exception) {}
+            try { extractor.release() } catch (_: Exception) {}
+        }
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        // Gapless multi-clip player (CapCut-style timeline).
+        val clipPlayer = ClipPlayer(applicationContext, flutterEngine.renderer)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger,
+            "com.anniekaydee.subtitle_app/clipplayer")
+            .setMethodCallHandler(clipPlayer)
         val ch = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
         methodChannel = ch
         ch.setMethodCallHandler { call, result ->
@@ -71,6 +659,13 @@ class MainActivity : FlutterActivity() {
                             ?: return@setMethodCallHandler result.error("MISSING", "videoPath missing", null)
                         resolveVideoPath(videoPath, result)
                     }
+                    "mergeVideos" -> {
+                        val paths = call.argument<List<String>>("paths")
+                            ?: return@setMethodCallHandler result.error("MISSING", "paths missing", null)
+                        val outputPath = call.argument<String>("outputPath")
+                            ?: return@setMethodCallHandler result.error("MISSING", "outputPath missing", null)
+                        mergeVideos(paths, outputPath, result)
+                    }
                     "burnSubtitles" -> {
                         val videoPath = call.argument<String>("videoPath")
                             ?: return@setMethodCallHandler result.error("MISSING", "videoPath missing", null)
@@ -82,7 +677,16 @@ class MainActivity : FlutterActivity() {
                             ?: return@setMethodCallHandler result.error("MISSING", "segments missing", null)
                         val style = call.argument<Map<String, Any>>("style")
                             ?: return@setMethodCallHandler result.error("MISSING", "style missing", null)
-                        burnSubtitles(videoPath, outputPath, fileName, segments, style, result)
+                        val autoCut = call.argument<Boolean>("autoCut") ?: false
+                        val returnTempPath = call.argument<Boolean>("returnTempPath") ?: false
+                        val keptRegionsMs = call.argument<List<Int>>("keptRegionsMs")
+                        val imageOverlays = call.argument<List<Map<String, Any>>>("imageOverlays")
+                        val zoomEffectsRaw = call.argument<List<Map<String, Any>>>("zoomEffects")
+                        val fadeEffectsRaw = call.argument<List<Map<String, Any>>>("fadeEffects")
+                        val shakeEffectsRaw = call.argument<List<Map<String, Any>>>("shakeEffects")
+                        val blurBgArg = call.argument<Boolean>("bgBlur") ?: false
+                        val autoCutGapMs = (call.argument<Int>("autoCutGapMs") ?: 300).toLong()
+                        burnSubtitles(videoPath, outputPath, fileName, segments, style, autoCut, returnTempPath, keptRegionsMs, imageOverlays, zoomEffectsRaw, fadeEffectsRaw, shakeEffectsRaw, blurBgArg, autoCutGapMs, result)
                     }
                     "detectSpeechOnsets" -> {
                         val videoPath = call.argument<String>("videoPath")
@@ -116,6 +720,32 @@ class MainActivity : FlutterActivity() {
                             ?: return@setMethodCallHandler result.error("MISSING", "videoPath missing", null)
                         val thumbPath = call.argument<String>("thumbPath")
                         videoMeta(videoPath, thumbPath, result)
+                    }
+                    "replaceAudioTrack" -> {
+                        val videoPath = call.argument<String>("videoPath")
+                            ?: return@setMethodCallHandler result.error("MISSING", "videoPath missing", null)
+                        val audioPath = call.argument<String>("audioPath")
+                            ?: return@setMethodCallHandler result.error("MISSING", "audioPath missing", null)
+                        val outputPath = call.argument<String>("outputPath")
+                            ?: return@setMethodCallHandler result.error("MISSING", "outputPath missing", null)
+                        val fileName = call.argument<String>("fileName")
+                            ?: return@setMethodCallHandler result.error("MISSING", "fileName missing", null)
+                        replaceAudioTrack(videoPath, audioPath, outputPath, fileName, result)
+                    }
+                    "saveAudioToGallery" -> {
+                        val audioPath = call.argument<String>("audioPath")
+                            ?: return@setMethodCallHandler result.error("MISSING", "audioPath missing", null)
+                        val fileName = call.argument<String>("fileName")
+                            ?: return@setMethodCallHandler result.error("MISSING", "fileName missing", null)
+                        saveAudioToGallery(audioPath, fileName, result)
+                    }
+                    "saveTextFile" -> {
+                        val content = call.argument<String>("content")
+                            ?: return@setMethodCallHandler result.error("MISSING", "content missing", null)
+                        val fileName = call.argument<String>("fileName")
+                            ?: return@setMethodCallHandler result.error("MISSING", "fileName missing", null)
+                        val mime = call.argument<String>("mime") ?: "text/plain"
+                        saveTextFile(content, fileName, mime, result)
                     }
                     else -> result.notImplemented()
                 }
@@ -305,8 +935,36 @@ class MainActivity : FlutterActivity() {
         fileName: String,
         segmentsRaw: List<Map<String, Any>>,
         styleMap: Map<String, Any>,
+        autoCut: Boolean,
+        returnTempPath: Boolean,
+        keptRegionsMsFlat: List<Int>?,
+        imageOverlaysRaw: List<Map<String, Any>>?,
+        zoomEffectsRaw: List<Map<String, Any>>?,
+        fadeEffectsRaw: List<Map<String, Any>>?,
+        shakeEffectsRaw: List<Map<String, Any>>?,
+        blurBgArg: Boolean,
+        autoCutGapMs: Long,
         result: MethodChannel.Result,
     ) {
+        // Decode image overlays once (downsampled near display width).
+        imageOverlays = parseImageOverlays(imageOverlaysRaw)
+        zoomEffects = parseZoomEffects(zoomEffectsRaw)
+        fadeEffects = parseFadeEffects(fadeEffectsRaw)
+        shakeEffects = parseShakeEffects(shakeEffectsRaw)
+        blurBg = blurBgArg
+        // Manual video cuts: flat [start,end,...] ms → list of (startUs,endUs).
+        val manualKept: List<Pair<Long, Long>>? =
+            if (keptRegionsMsFlat != null && keptRegionsMsFlat.size >= 2) {
+                val list = ArrayList<Pair<Long, Long>>()
+                var i = 0
+                while (i + 1 < keptRegionsMsFlat.size) {
+                    list.add(Pair(keptRegionsMsFlat[i].toLong() * 1000L,
+                                  keptRegionsMsFlat[i + 1].toLong() * 1000L))
+                    i += 2
+                }
+                list
+            } else null
+
         Thread {
             try {
                 lastEmittedPct = -1
@@ -329,27 +987,89 @@ class MainActivity : FlutterActivity() {
                 peek.release()
                 val rotation = readRotation(effectivePath, formatRotation)
 
+                // Manual cuts take precedence; otherwise compute silence-cut
+                // regions when Auto-Cut is enabled.
+                val keptRegions = manualKept ?: if (autoCut) {
+                    val energies = decodeEnergies(effectivePath)
+                    val rawRegions = computeRegions(energies, vadFrameMs)
+                    val keptRegionsMs = ArrayList<Pair<Long, Long>>()
+                    if (rawRegions.isNotEmpty()) {
+                        var curStart = rawRegions[0][0].toLong()
+                        var curEnd = rawRegions[0][1].toLong()
+                        for (i in 1 until rawRegions.size) {
+                            val rStart = rawRegions[i][0].toLong()
+                            val rEnd = rawRegions[i][1].toLong()
+                            if (rStart - curEnd <= autoCutGapMs) {
+                                curEnd = rEnd
+                            } else {
+                                keptRegionsMs.add(Pair(curStart, curEnd))
+                                curStart = rStart
+                                curEnd = rEnd
+                            }
+                        }
+                        keptRegionsMs.add(Pair(curStart, curEnd))
+                    }
+                    keptRegionsMs.map { Pair(it.first * 1000L, it.second * 1000L) }
+                } else {
+                    null
+                }
+
                 // Portrait/rotated videos: the GPU path's SurfaceTexture transform
                 // handles rotation differently across devices, which can clash with
                 // the muxer orientation hint and tilt the output. The CPU pipeline
                 // decodes raw frames + sets the hint deterministically, so it's
                 // reliable for rotation — use it whenever the source is rotated.
-                if (rotation != 0) {
-                    burnSubtitlesCpu(videoPath, outputPath, fileName, segmentsRaw, styleMap, result)
+                // Image overlays, zoom/Ken-Burns and fade transitions are
+                // composited only in the CPU path, so route there too whenever
+                // any of them exist (the GPU path doesn't apply these effects).
+                if (rotation != 0 || imageOverlays.isNotEmpty() ||
+                    zoomEffects.isNotEmpty() || fadeEffects.isNotEmpty() ||
+                    shakeEffects.isNotEmpty() || blurBg) {
+                    burnSubtitlesCpu(videoPath, outputPath, fileName, segmentsRaw, styleMap, keptRegions, returnTempPath, result)
                     return@Thread
                 }
 
                 val provider = makeSubtitleProvider(segmentsRaw, styleMap, vidW, vidH, rotation)
-                VideoExporterGl().export(effectivePath, outputPath, { p -> emitProgress(p) }, provider)
+                VideoExporterGl().export(effectivePath, outputPath, { p -> emitProgress(p) }, provider, keptRegions)
 
                 emitProgress(0.96)
-                saveVideoToGallery(outputPath, fileName)
+                if (!returnTempPath) {
+                    saveVideoToGallery(outputPath, fileName)
+                }
                 emitProgress(1.0)
-                runOnUiThread { result.success("Movies/SubtitleAI/$fileName") }
+                runOnUiThread { result.success(if (returnTempPath) outputPath else "Movies/SubtitleAI/$fileName") }
             } catch (e: Throwable) {
                 // GPU path unsupported/failed → fall back to CPU pipeline.
                 try { File(outputPath).delete() } catch (_: Exception) {}
-                burnSubtitlesCpu(videoPath, outputPath, fileName, segmentsRaw, styleMap, result)
+                // Re-evaluate path with kept regions
+                val effectivePath = resolveUriToFilePath(videoPath)
+                val keptRegions = manualKept ?: if (autoCut) {
+                    try {
+                        val energies = decodeEnergies(effectivePath)
+                        val rawRegions = computeRegions(energies, vadFrameMs)
+                        val keptRegionsMs = ArrayList<Pair<Long, Long>>()
+                        if (rawRegions.isNotEmpty()) {
+                            var curStart = rawRegions[0][0].toLong()
+                            var curEnd = rawRegions[0][1].toLong()
+                            for (i in 1 until rawRegions.size) {
+                                val rStart = rawRegions[i][0].toLong()
+                                val rEnd = rawRegions[i][1].toLong()
+                                if (rStart - curEnd <= autoCutGapMs) {
+                                    curEnd = rEnd
+                                } else {
+                                    keptRegionsMs.add(Pair(curStart, curEnd))
+                                    curStart = rStart
+                                    curEnd = rEnd
+                                }
+                            }
+                            keptRegionsMs.add(Pair(curStart, curEnd))
+                        }
+                        keptRegionsMs.map { Pair(it.first * 1000L, it.second * 1000L) }
+                    } catch (_: Exception) { null }
+                } else {
+                    null
+                }
+                burnSubtitlesCpu(videoPath, outputPath, fileName, segmentsRaw, styleMap, keptRegions, returnTempPath, result)
             }
         }.start()
     }
@@ -542,6 +1262,8 @@ class MainActivity : FlutterActivity() {
         fileName: String,
         segmentsRaw: List<Map<String, Any>>,
         styleMap: Map<String, Any>,
+        keptRegions: List<Pair<Long, Long>>?,
+        returnTempPath: Boolean,
         result: MethodChannel.Result,
     ) {
         val segments = segmentsRaw.map { raw ->
@@ -635,8 +1357,23 @@ class MainActivity : FlutterActivity() {
                     videoFormat.getLong(MediaFormat.KEY_DURATION) else 0L
 
                 lastEmittedPct = -1
+                // Output in DISPLAY orientation so all players show it correctly
+                // (no orientation-hint needed — frames are physically rotated).
                 val displayH = if (rotation == 90 || rotation == 270) vidW else vidH
                 val displayW = if (rotation == 90 || rotation == 270) vidH else vidW
+                // With blurred background, output a 9:16 portrait canvas; the video
+                // is fit-centered and a blurred copy fills the rest. Otherwise keep
+                // the video's own dimensions.
+                val outW: Int
+                val outH: Int
+                if (blurBg) {
+                    val longSide = maxOf(displayW, displayH)
+                    outH = (longSide / 2) * 2
+                    outW = ((longSide * 9 / 16) / 2) * 2
+                } else {
+                    outW = displayW
+                    outH = displayH
+                }
 
                 val w = fontWeight.coerceIn(100, 900)
                 val fontFile = if (fontPath != null && File(fontPath).exists()) File(fontPath) else null
@@ -678,7 +1415,7 @@ class MainActivity : FlutterActivity() {
                     hasUnderline        = hasUnderline,
                     underlineColor      = underlineColor,
                     typeface            = subTypeface,
-                    scaledTextSize      = fontSize * displayH / 220f,
+                    scaledTextSize      = fontSize * outH / 220f,
                     positionY           = positionY,
                     positionX           = positionX,
                     rotation            = rotationDeg,
@@ -687,10 +1424,10 @@ class MainActivity : FlutterActivity() {
                     bilingualBgColor    = bilingualBgColor,
                     bilingualHasShadow  = bilingualHasShadow,
                     bilingualIsBold     = bilingualIsBold,
-                    scaledBilingualSize = (bilingualFontSize ?: (fontSize * 0.75f)) * displayH / 220f,
+                    scaledBilingualSize = (bilingualFontSize ?: (fontSize * 0.75f)) * outH / 220f,
                     bilingualHasNeon    = bilingualHasNeon,
                     bilingualGlowColor  = bilingualGlowColor,
-                    bilingualGap        = bilingualGap * displayH / 220f,
+                    bilingualGap        = bilingualGap * outH / 220f,
                     watermarkText       = styleMap["watermarkText"] as? String,
                     watermarkPosition   = styleMap["watermarkPosition"] as? String ?: "top",
                     watermarkLogo       = (styleMap["watermarkLogoPath"] as? String)?.let { lp ->
@@ -698,10 +1435,9 @@ class MainActivity : FlutterActivity() {
                     },
                 )
 
-                // Persistent watermark overlay — composited on every frame below.
-                // Rendered upright at display dims, rotated to raw orientation.
-                val watermarkBmp: Bitmap? =
-                    makeWatermarkBitmap(displayW, displayH, style)?.let { orientOverlay(it, rotation) }
+                // Watermark rendered at display (output) dims — no rotation needed
+                // because frames are already physically rotated before compositing.
+                val watermarkBmp: Bitmap? = makeWatermarkBitmap(outW, outH, style)
 
                 // ── Decoder ──
                 decoder = MediaCodec.createDecoderByType(videoFormat.getString(MediaFormat.KEY_MIME)!!)
@@ -719,7 +1455,8 @@ class MainActivity : FlutterActivity() {
                     encColorFormats.contains(planar)     -> planar
                     else -> MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible
                 }
-                val encFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, vidW, vidH).apply {
+                // Encode at display (output) dimensions — frames are rotated before encoding.
+                val encFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, outW, outH).apply {
                     setInteger(MediaFormat.KEY_COLOR_FORMAT, chosenColor)
                     setInteger(MediaFormat.KEY_BIT_RATE,     bitRate.coerceIn(1_000_000, 12_000_000))
                     setInteger(MediaFormat.KEY_FRAME_RATE,   frameRate)
@@ -730,7 +1467,7 @@ class MainActivity : FlutterActivity() {
 
                 // ── MediaMuxer + audio passthrough (no audio re-encode) ──
                 muxer = MediaMuxer(outputPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-                if (rotation != 0) muxer.setOrientationHint(rotation)
+                // No setOrientationHint — frames are physically in display orientation.
                 var audioFormatForMux: MediaFormat? = null
                 if (audioTrackIdx != -1) {
                     try {
@@ -746,7 +1483,7 @@ class MainActivity : FlutterActivity() {
                 var muxerVideoTrack = -1
                 var muxerAudioTrack = -1
                 var muxerStarted    = false
-                val frameSize       = vidW * vidH * 3 / 2
+                val frameSize       = outW * outH * 3 / 2
 
                 extractor.selectTrack(videoTrackIdx)
 
@@ -781,14 +1518,27 @@ class MainActivity : FlutterActivity() {
                         val presentUs = decInfo.presentationTimeUs
                         val isEos     = decInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
 
-                        if (durationUs > 0L && decInfo.size > 0) {
+                        val keepFrame = keptRegions == null || keptRegions.isEmpty() || keptRegions.any { presentUs >= it.first && presentUs <= it.second }
+
+                        if (durationUs > 0L && decInfo.size > 0 && keepFrame) {
                             val frac = (presentUs.toDouble() / durationUs).coerceIn(0.0, 1.0)
                             emitProgress(0.10 + frac * 0.82) // 10%..92% during encoding
                         }
 
                         if (decInfo.size > 0) {
+                            if (!keepFrame) {
+                                decoder.releaseOutputBuffer(decOutIdx, false)
+                                if (isEos) {
+                                    val encInIdx = encoder.dequeueInputBuffer(10_000L)
+                                    if (encInIdx >= 0) {
+                                        val eosPts = encodedFrameCount * ptsStepUs
+                                        encoder.queueInputBuffer(encInIdx, 0, 0, eosPts, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                                    }
+                                }
+                                continue
+                            }
                             val image = decoder.getOutputImage(decOutIdx)
-                            val frameBmp: Bitmap = when {
+                            val rawBmp: Bitmap = when {
                                 image != null -> { val b = imageToBitmap(image); image.close(); b }
                                 else -> {
                                     val buf = decoder.getOutputBuffer(decOutIdx)
@@ -798,9 +1548,39 @@ class MainActivity : FlutterActivity() {
                             }
                             decoder.releaseOutputBuffer(decOutIdx, false)
 
+                            // Physically rotate frame to display orientation — works on all players.
+                            var frameBmp: Bitmap = if (rotation != 0) {
+                                val m = android.graphics.Matrix().apply { postRotate(rotation.toFloat()) }
+                                val r = Bitmap.createBitmap(rawBmp, 0, 0, rawBmp.width, rawBmp.height, m, true)
+                                rawBmp.recycle(); r
+                            } else rawBmp
+
+                            // Zoom / Ken-Burns on the video frame (under overlays + subtitle).
+                            if (zoomEffects.isNotEmpty()) {
+                                val zoomed = applyZoom(frameBmp, presentUs)
+                                if (zoomed !== frameBmp) { frameBmp.recycle(); frameBmp = zoomed }
+                            }
+                            // Camera shake (after zoom, still under overlays + subtitle).
+                            if (shakeEffects.isNotEmpty()) {
+                                val shaken = applyShake(frameBmp, presentUs)
+                                if (shaken !== frameBmp) { frameBmp.recycle(); frameBmp = shaken }
+                            }
+
+                            // Blurred background: fit the (zoomed/shaken) video into the
+                            // 9:16 output canvas with a blurred fill. frameBmp → outW×outH.
+                            if (blurBg) {
+                                val composed = blurBgCompose(frameBmp, outW, outH)
+                                frameBmp.recycle(); frameBmp = composed
+                            }
+
+                            // Image overlays sit UNDER the subtitle/watermark text.
+                            if (imageOverlays.isNotEmpty()) {
+                                drawImageOverlays(Canvas(frameBmp), presentUs, outW, outH)
+                            }
+
                             val activeSeg = segments.firstOrNull { s -> s.startUs <= presentUs && presentUs < s.endUs }
                             if (activeSeg != null) {
-                                val es         = effectiveStyle(activeSeg, style, displayH)
+                                val es         = effectiveStyle(activeSeg, style, outH)
                                 val isType     = es.animationType == "typewriter"
                                 val animDurUs  = animInMs * 1000L
                                 val elapsed    = (presentUs - activeSeg.startUs).coerceAtLeast(0L)
@@ -827,21 +1607,26 @@ class MainActivity : FlutterActivity() {
                                 if (subKey != prevSubKey) {
                                     cachedSubBmp?.recycle()
                                     val drawStyle = if (exitWin) es.copy(animationType = animOutType) else es
-                                    val upright = if (useKaraoke) {
+                                    // Subtitle rendered in display orientation — no orientOverlay needed.
+                                    cachedSubBmp = if (useKaraoke) {
                                         makeKaraokeBitmap(activeSeg.text, activeSeg.words, activeWordIdx,
-                                            activeSeg.translatedText, animT, displayW, displayH, drawStyle, exitWin,
+                                            activeSeg.translatedText, animT, outW, outH, drawStyle, exitWin,
                                             activeSeg.emphasis, sweepOn, activeSeg.emoji)
                                     } else {
                                         makeNormalBitmap(appendEmoji(shownText, activeSeg.emoji), activeSeg.translatedText,
-                                            animT, displayW, displayH, drawStyle, exitWin)
+                                            animT, outW, outH, drawStyle, exitWin)
                                     }
-                                    cachedSubBmp = orientOverlay(upright, rotation)
                                     prevSubKey = subKey
                                 }
                                 cachedSubBmp?.let { Canvas(frameBmp).drawBitmap(it, 0f, 0f, null) }
                             } else {
-                                // No subtitle on this frame — still stamp the watermark.
                                 watermarkBmp?.let { Canvas(frameBmp).drawBitmap(it, 0f, 0f, null) }
+                            }
+
+                            // Fade transition: black overlay over the whole frame (incl. subtitle).
+                            if (fadeEffects.isNotEmpty()) {
+                                val fa = fadeAlphaAt(presentUs)
+                                if (fa > 0) Canvas(frameBmp).drawARGB(fa, 0, 0, 0)
                             }
 
                             val encInIdx = encoder.dequeueInputBuffer(10_000L)
@@ -851,14 +1636,14 @@ class MainActivity : FlutterActivity() {
                                 val encBuf = encoder.getInputBuffer(encInIdx)!!
                                 encBuf.clear()
                                 val byteCount = when (chosenColor) {
-                                    semiPlanar -> bitmapToYuv(frameBmp, encBuf, vidW, vidH, true)
-                                    planar     -> bitmapToYuv(frameBmp, encBuf, vidW, vidH, false)
+                                    semiPlanar -> bitmapToYuv(frameBmp, encBuf, outW, outH, true)
+                                    planar     -> bitmapToYuv(frameBmp, encBuf, outW, outH, false)
                                     else -> {
                                         val encImg = encoder.getInputImage(encInIdx)
                                         if (encImg != null) {
                                             bitmapToImage(frameBmp, encImg); encImg.close(); frameSize
                                         } else {
-                                            bitmapToYuv(frameBmp, encBuf, vidW, vidH, false)
+                                            bitmapToYuv(frameBmp, encBuf, outW, outH, false)
                                         }
                                     }
                                 }
@@ -918,13 +1703,17 @@ class MainActivity : FlutterActivity() {
                         while (true) {
                             val sz = aExtractor.readSampleData(audioBuf, 0)
                             if (sz < 0) break
-                            audioInfo.offset = 0
-                            audioInfo.size = sz
-                            audioInfo.presentationTimeUs = aExtractor.sampleTime
-                            audioInfo.flags =
-                                if (aExtractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0)
-                                    MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
-                            muxer.writeSampleData(muxerAudioTrack, audioBuf, audioInfo)
+                            val sampleTimeUs = aExtractor.sampleTime
+                            val keepAudio = keptRegions == null || keptRegions.isEmpty() || keptRegions.any { sampleTimeUs >= it.first && sampleTimeUs <= it.second }
+                            if (keepAudio) {
+                                audioInfo.offset = 0
+                                audioInfo.size = sz
+                                audioInfo.presentationTimeUs = mapOriginalToNewPts(sampleTimeUs, keptRegions)
+                                audioInfo.flags =
+                                    if (aExtractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0)
+                                        MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
+                                muxer.writeSampleData(muxerAudioTrack, audioBuf, audioInfo)
+                            }
                             aExtractor.advance()
                         }
                     } catch (_: Exception) {
@@ -936,15 +1725,18 @@ class MainActivity : FlutterActivity() {
                 encoder.stop();  encoder.release();  encoder = null
                 extractor.release()
                 audioExtractor?.release(); audioExtractor = null
+                releaseOverlayVideos()
 
                 emitProgress(0.95)
                 try { muxer.stop() } catch (_: Exception) {}
                 muxer.release(); muxer = null
 
                 emitProgress(0.98)
-                saveVideoToGallery(outputPath, fileName)
+                if (!returnTempPath) {
+                    saveVideoToGallery(outputPath, fileName)
+                }
                 emitProgress(1.0)
-                runOnUiThread { result.success("Movies/SubtitleAI/$fileName") }
+                runOnUiThread { result.success(if (returnTempPath) outputPath else "Movies/SubtitleAI/$fileName") }
 
             } catch (e: Exception) {
                 try { decoder?.stop();  decoder?.release()  } catch (_: Exception) {}
@@ -952,10 +1744,26 @@ class MainActivity : FlutterActivity() {
                 try { extractor?.release()                  } catch (_: Exception) {}
                 try { audioExtractor?.release()             } catch (_: Exception) {}
                 try { muxer?.release()                      } catch (_: Exception) {}
+                try { releaseOverlayVideos()                 } catch (_: Exception) {}
                 try { File(outputPath).delete()             } catch (_: Exception) {}
                 runOnUiThread { result.error("EXPORT_FAILED", e.message ?: "Unknown", null) }
             }
         }.start()
+    }
+
+    private fun mapOriginalToNewPts(originalPtsUs: Long, keptRegions: List<Pair<Long, Long>>?): Long {
+        if (keptRegions == null || keptRegions.isEmpty()) return originalPtsUs
+        var accumulatedTime = 0L
+        for (region in keptRegions) {
+            if (originalPtsUs < region.first) {
+                return accumulatedTime
+            }
+            if (originalPtsUs <= region.second) {
+                return accumulatedTime + (originalPtsUs - region.first)
+            }
+            accumulatedTime += (region.second - region.first)
+        }
+        return accumulatedTime
     }
 
     // ─── Frame helpers ────────────────────────────────────────────────────────
@@ -1317,6 +2125,206 @@ class MainActivity : FlutterActivity() {
             r
         } catch (_: Exception) {
             0
+        }
+    }
+
+    private fun clipDurationUs(path: String): Long {
+        return try {
+            val mmr = android.media.MediaMetadataRetriever()
+            mmr.setDataSource(path)
+            val ms = mmr.extractMetadata(
+                android.media.MediaMetadataRetriever.METADATA_KEY_DURATION
+            )?.toLongOrNull() ?: 0L
+            mmr.release()
+            ms * 1000L
+        } catch (_: Exception) {
+            0L
+        }
+    }
+
+    /// Concatenate several clips into one MP4 by copying compressed samples
+    /// (no re-encode → fast + lossless). Requires the clips to share the same
+    /// video size + codec (the common case: clips from one phone). On a mismatch
+    /// it fails with code "INCOMPAT" so the UI can ask the user to use clips of
+    /// the same size. Audio tracks are concatenated when present + compatible.
+    private fun mergeVideos(paths: List<String>, outputPath: String, result: MethodChannel.Result) {
+        Thread {
+            try {
+                if (paths.size < 2) throw RuntimeException("need at least 2 clips")
+                try {
+                    // Fast path: lossless sample-copy (clips already same size/codec).
+                    muxConcat(paths, outputPath)
+                } catch (e: Exception) {
+                    if (e.message != "INCOMPAT") throw e
+                    // Fallback: clips differ → re-encode each to the first clip's
+                    // RAW size, then concat the uniform temps (rotation handled by
+                    // each temp's orientation hint, like the normal export path).
+                    val (tw, th) = firstClipRawSize(paths[0])
+                    val temps = ArrayList<String>()
+                    try {
+                        for ((i, src) in paths.withIndex()) {
+                            val tmp = "${cacheDir.absolutePath}/norm_${System.currentTimeMillis()}_$i.mp4"
+                            VideoExporterGl().export(src, tmp, { }, { null }, null, tw, th)
+                            temps.add(tmp)
+                        }
+                        muxConcat(temps, outputPath)
+                    } finally {
+                        for (t in temps) try { java.io.File(t).delete() } catch (_: Exception) {}
+                    }
+                }
+                runOnUiThread { result.success(outputPath) }
+            } catch (e: Exception) {
+                try { java.io.File(outputPath).delete() } catch (_: Exception) {}
+                runOnUiThread { result.error("MERGE_FAIL", e.message, null) }
+            }
+        }.start()
+    }
+
+    /// First clip's RAW (encoded) size — the merge target. Rotation is NOT
+    /// applied here; it is preserved per-clip via the muxer orientation hint.
+    private fun firstClipRawSize(path: String): Pair<Int, Int> {
+        val ex = MediaExtractor()
+        try {
+            ex.setDataSource(path)
+            for (i in 0 until ex.trackCount) {
+                val f = ex.getTrackFormat(i)
+                val mime = f.getString(MediaFormat.KEY_MIME) ?: ""
+                if (mime.startsWith("video/")) {
+                    val w = f.getInteger(MediaFormat.KEY_WIDTH)
+                    val h = f.getInteger(MediaFormat.KEY_HEIGHT)
+                    fun even(v: Int) = if (v % 2 == 0) v else v - 1 // encoders need even dims
+                    return Pair(even(w), even(h))
+                }
+            }
+            return Pair(1080, 1920)
+        } finally {
+            try { ex.release() } catch (_: Exception) {}
+        }
+    }
+
+    /// Lossless concat by copying compressed samples. Throws "INCOMPAT" if the
+    /// clips don't share the same video size + codec.
+    private fun muxConcat(paths: List<String>, outputPath: String) {
+        run {
+            var muxer: MediaMuxer? = null
+            var started = false
+            try {
+                if (paths.size < 2) throw RuntimeException("need at least 2 clips")
+
+                // Read the first clip's track formats (template for the output).
+                val firstEx = MediaExtractor()
+                firstEx.setDataSource(paths[0])
+                var vFormat: MediaFormat? = null
+                var aFormat: MediaFormat? = null
+                for (i in 0 until firstEx.trackCount) {
+                    val f = firstEx.getTrackFormat(i)
+                    val mime = f.getString(MediaFormat.KEY_MIME) ?: ""
+                    if (mime.startsWith("video/") && vFormat == null) vFormat = f
+                    if (mime.startsWith("audio/") && aFormat == null) aFormat = f
+                }
+                firstEx.release()
+                val vf = vFormat ?: throw RuntimeException("no video track")
+                val baseW = vf.getInteger(MediaFormat.KEY_WIDTH)
+                val baseH = vf.getInteger(MediaFormat.KEY_HEIGHT)
+                val baseMime = vf.getString(MediaFormat.KEY_MIME)
+
+                muxer = MediaMuxer(outputPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+                val rot = readRotation(paths[0],
+                    if (vf.containsKey("rotation-degrees")) vf.getInteger("rotation-degrees") else 0)
+                if (rot != 0) muxer.setOrientationHint(rot)
+                val muxVideo = muxer.addTrack(vf)
+                val muxAudio = if (aFormat != null) muxer.addTrack(aFormat!!) else -1
+                muxer.start()
+                started = true
+
+                val cap = maxOf(
+                    if (vf.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE))
+                        vf.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE) else 0,
+                    1 shl 21,
+                )
+                val buffer = ByteBuffer.allocate(cap)
+                val info = MediaCodec.BufferInfo()
+
+                var videoOffsetUs = 0L
+                var audioOffsetUs = 0L
+
+                for (path in paths) {
+                    val clipDurUs = clipDurationUs(path)
+
+                    // ── video samples ──
+                    val vEx = MediaExtractor()
+                    vEx.setDataSource(path)
+                    var vt = -1
+                    for (i in 0 until vEx.trackCount) {
+                        val f = vEx.getTrackFormat(i)
+                        val mime = f.getString(MediaFormat.KEY_MIME) ?: ""
+                        if (mime.startsWith("video/")) {
+                            if (f.getInteger(MediaFormat.KEY_WIDTH) != baseW ||
+                                f.getInteger(MediaFormat.KEY_HEIGHT) != baseH ||
+                                f.getString(MediaFormat.KEY_MIME) != baseMime) {
+                                vEx.release()
+                                throw RuntimeException("INCOMPAT")
+                            }
+                            vt = i
+                            break
+                        }
+                    }
+                    if (vt >= 0) {
+                        vEx.selectTrack(vt)
+                        while (true) {
+                            val sz = vEx.readSampleData(buffer, 0)
+                            if (sz < 0) break
+                            info.offset = 0
+                            info.size = sz
+                            info.presentationTimeUs = vEx.sampleTime + videoOffsetUs
+                            info.flags = if (vEx.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0)
+                                MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
+                            muxer.writeSampleData(muxVideo, buffer, info)
+                            vEx.advance()
+                        }
+                    }
+                    vEx.release()
+
+                    // ── audio samples (best-effort; skipped if absent) ──
+                    if (muxAudio != -1) {
+                        try {
+                            val aEx = MediaExtractor()
+                            aEx.setDataSource(path)
+                            var at = -1
+                            for (i in 0 until aEx.trackCount) {
+                                val mime = aEx.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: ""
+                                if (mime.startsWith("audio/")) { at = i; break }
+                            }
+                            if (at >= 0) {
+                                aEx.selectTrack(at)
+                                while (true) {
+                                    val sz = aEx.readSampleData(buffer, 0)
+                                    if (sz < 0) break
+                                    info.offset = 0
+                                    info.size = sz
+                                    info.presentationTimeUs = aEx.sampleTime + audioOffsetUs
+                                    info.flags = if (aEx.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0)
+                                        MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
+                                    muxer.writeSampleData(muxAudio, buffer, info)
+                                    aEx.advance()
+                                }
+                            }
+                            aEx.release()
+                        } catch (_: Exception) { /* keep video on audio failure */ }
+                    }
+
+                    videoOffsetUs += clipDurUs
+                    audioOffsetUs += clipDurUs
+                }
+
+                muxer.stop()
+            } catch (e: Exception) {
+                if (started) { try { muxer?.stop() } catch (_: Exception) {} }
+                try { java.io.File(outputPath).delete() } catch (_: Exception) {}
+                throw e // let the caller decide (INCOMPAT → re-encode fallback)
+            } finally {
+                try { muxer?.release() } catch (_: Exception) {}
+            }
         }
     }
 
@@ -1839,8 +2847,25 @@ class MainActivity : FlutterActivity() {
                 while (!isEOS) {
                     val inIdx = decoder.dequeueInputBuffer(10_000)
                     if (inIdx >= 0) { val inBuf = decoder.getInputBuffer(inIdx)!!; val sz = extractor.readSampleData(inBuf, 0); if (sz < 0) { decoder.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM); isEOS = true } else { decoder.queueInputBuffer(inIdx, 0, sz, extractor.sampleTime, 0); extractor.advance() } }
-                    val info = MediaCodec.BufferInfo(); var outIdx = decoder.dequeueOutputBuffer(info, 10_000)
-                    while (outIdx >= 0) { val outBuf = decoder.getOutputBuffer(outIdx)!!; val bytes = ByteArray(info.size); outBuf.get(bytes); rawPcm.add(bytes); decoder.releaseOutputBuffer(outIdx, false); outIdx = decoder.dequeueOutputBuffer(info, 0) }
+                    val info = MediaCodec.BufferInfo()
+                    var outIdx = decoder.dequeueOutputBuffer(info, 10_000)
+                    while (outIdx != MediaCodec.INFO_TRY_AGAIN_LATER) {
+                        if (outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                            val newFormat = decoder.outputFormat
+                            if (newFormat.containsKey(MediaFormat.KEY_SAMPLE_RATE)) srcSampleRate = newFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                            if (newFormat.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) srcChannels = newFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                        } else if (outIdx >= 0) {
+                            val outBuf = decoder.getOutputBuffer(outIdx)!!
+                            val bytes = ByteArray(info.size)
+                            outBuf.position(info.offset)
+                            outBuf.get(bytes)
+                            rawPcm.add(bytes)
+                            decoder.releaseOutputBuffer(outIdx, false)
+                        }
+                        if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) isEOS = true
+                        if (isEOS) break
+                        outIdx = decoder.dequeueOutputBuffer(info, 0)
+                    }
                 }
                 decoder.stop(); decoder.release(); extractor.release()
                 val resampled = resample(rawPcm, srcSampleRate, srcChannels)
@@ -1864,5 +2889,241 @@ class MainActivity : FlutterActivity() {
         buf.put("RIFF".toByteArray()); buf.putInt((pcmBytes + 36).toInt()); buf.put("WAVE".toByteArray()); buf.put("fmt ".toByteArray()); buf.putInt(16)
         buf.putShort(1); buf.putShort(channels.toShort()); buf.putInt(sampleRate); buf.putInt(byteRate); buf.putShort((channels * 2).toShort()); buf.putShort(16)
         buf.put("data".toByteArray()); buf.putInt(pcmBytes.toInt()); raf.write(buf.array()); raf.close()
+    }
+
+    private fun replaceAudioTrack(
+        videoPath: String,
+        audioPath: String,
+        outputPath: String,
+        fileName: String,
+        result: MethodChannel.Result
+    ) {
+        Thread {
+            try {
+                val resolvedVideo = resolveUriToFilePath(videoPath)
+                val resolvedAudio = resolveUriToFilePath(audioPath)
+
+                // ── 1. Extract video track ──
+                val videoExtractor = MediaExtractor()
+                videoExtractor.setDataSource(resolvedVideo)
+                var videoTrackIndex = -1
+                var videoFormat: MediaFormat? = null
+                for (i in 0 until videoExtractor.trackCount) {
+                    val format = videoExtractor.getTrackFormat(i)
+                    val mime = format.getString(MediaFormat.KEY_MIME) ?: ""
+                    if (mime.startsWith("video/")) {
+                        videoTrackIndex = i
+                        videoFormat = format
+                        break
+                    }
+                }
+                if (videoTrackIndex == -1) {
+                    videoExtractor.release()
+                    runOnUiThread { result.error("NO_VIDEO", "No video track found", null) }
+                    return@Thread
+                }
+                videoExtractor.selectTrack(videoTrackIndex)
+
+                // ── 2. Parse WAV header to get PCM parameters ──
+                val wavFile = java.io.RandomAccessFile(resolvedAudio, "r")
+                if (wavFile.length() < 44) {
+                    wavFile.close()
+                    videoExtractor.release()
+                    runOnUiThread { result.error("BAD_WAV", "WAV file too small", null) }
+                    return@Thread
+                }
+                val wavHeader = ByteArray(44)
+                wavFile.readFully(wavHeader)
+                val wavData = java.nio.ByteBuffer.wrap(wavHeader).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                val audioChannels = wavData.getShort(22).toInt()
+                val sampleRate = wavData.getInt(24)
+                val bitsPerSample = wavData.getShort(34).toInt()
+                val pcmDataSize = wavData.getInt(40)
+                android.util.Log.d("MuxerPCM", "WAV: ${sampleRate}Hz, ${audioChannels}ch, ${bitsPerSample}bit, PCM=${pcmDataSize}bytes")
+
+                // ── 3. Setup AAC encoder (no decoder needed for raw PCM) ──
+                val aacMime = MediaFormat.MIMETYPE_AUDIO_AAC
+                val encoderFormat = MediaFormat.createAudioFormat(aacMime, sampleRate, audioChannels)
+                encoderFormat.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+                encoderFormat.setInteger(MediaFormat.KEY_BIT_RATE, 128000)
+                encoderFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
+
+                val audioEncoder = MediaCodec.createEncoderByType(aacMime)
+                audioEncoder.configure(encoderFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                audioEncoder.start()
+
+                // ── 4. Setup Muxer ──
+                val muxer = MediaMuxer(outputPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+                val muxedVideoTrackIndex = muxer.addTrack(videoFormat!!)
+                var muxedAudioTrackIndex = -1
+
+                var videoDone = false
+                var audioInputDone = false
+                var audioEncoderDone = false
+                var muxerStarted = false
+                var pcmBytesRead = 0L
+                val bytesPerSampleFrame = audioChannels * (bitsPerSample / 8)
+
+                val videoBuffer = java.nio.ByteBuffer.allocate(2 * 1024 * 1024)
+                val videoBufferInfo = MediaCodec.BufferInfo()
+                val encBufferInfo = MediaCodec.BufferInfo()
+
+                val startTimeMs = System.currentTimeMillis()
+                while (!videoDone || !audioEncoderDone) {
+                    if (System.currentTimeMillis() - startTimeMs > 60000) {
+                        throw Exception("Muxing timed out (60s)")
+                    }
+                    var workDone = false
+
+                    // ── Copy video samples ──
+                    if (muxerStarted && !videoDone) {
+                        videoBufferInfo.offset = 0
+                        videoBufferInfo.size = videoExtractor.readSampleData(videoBuffer, 0)
+                        if (videoBufferInfo.size < 0) {
+                            videoDone = true
+                        } else {
+                            videoBufferInfo.presentationTimeUs = videoExtractor.sampleTime
+                            videoBufferInfo.flags = videoExtractor.sampleFlags
+                            muxer.writeSampleData(muxedVideoTrackIndex, videoBuffer, videoBufferInfo)
+                            videoExtractor.advance()
+                            workDone = true
+                        }
+                    }
+
+                    // ── Feed raw PCM directly into encoder input (skip decoder entirely) ──
+                    if (!audioInputDone) {
+                        val inIdx = audioEncoder.dequeueInputBuffer(5000)
+                        if (inIdx >= 0) {
+                            val inBuf = audioEncoder.getInputBuffer(inIdx)!!
+                            inBuf.clear()
+                            val readSize = minOf(inBuf.remaining().toLong(), (pcmDataSize - pcmBytesRead)).toInt()
+                            if (readSize <= 0) {
+                                audioEncoder.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                                audioInputDone = true
+                            } else {
+                                val pcmChunk = ByteArray(readSize)
+                                wavFile.readFully(pcmChunk)
+                                inBuf.put(pcmChunk)
+                                val presentationTimeUs = (pcmBytesRead * 1000000L) / (sampleRate.toLong() * bytesPerSampleFrame)
+                                audioEncoder.queueInputBuffer(inIdx, 0, readSize, presentationTimeUs, 0)
+                                pcmBytesRead += readSize
+                            }
+                            workDone = true
+                        }
+                    }
+
+                    // ── Drain encoder output → muxer ──
+                    if (!audioEncoderDone) {
+                        val outIdx = audioEncoder.dequeueOutputBuffer(encBufferInfo, 5000)
+                        if (outIdx >= 0) {
+                            val outBuf = audioEncoder.getOutputBuffer(outIdx)!!
+                            if (muxedAudioTrackIndex != -1 && muxerStarted && encBufferInfo.size > 0) {
+                                muxer.writeSampleData(muxedAudioTrackIndex, outBuf, encBufferInfo)
+                            }
+                            if ((encBufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                                audioEncoderDone = true
+                            }
+                            audioEncoder.releaseOutputBuffer(outIdx, false)
+                            workDone = true
+                        } else if (outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                            val newFormat = audioEncoder.outputFormat
+                            muxedAudioTrackIndex = muxer.addTrack(newFormat)
+                            muxer.start()
+                            muxerStarted = true
+                            workDone = true
+                        }
+                    }
+
+                    if (!workDone) {
+                        try { Thread.sleep(5) } catch (_: Exception) {}
+                    }
+                }
+
+                try { wavFile.close() } catch (_: Exception) {}
+                try { videoExtractor.release() } catch (_: Exception) {}
+                try { audioEncoder.stop(); audioEncoder.release() } catch (_: Exception) {}
+                try { muxer.stop(); muxer.release() } catch (_: Exception) {}
+
+                saveVideoToGallery(outputPath, fileName)
+                runOnUiThread { result.success("Movies/SubtitleAI/$fileName") }
+            } catch (e: Exception) {
+                android.util.Log.e("MuxerPCM", "replaceAudioTrack failed", e)
+                runOnUiThread { result.error("FAILED", e.message ?: "Unknown", null) }
+            }
+        }.start()
+    }
+
+    private fun saveAudioToGallery(audioPath: String, fileName: String, result: MethodChannel.Result) {
+        Thread {
+            try {
+                val sourceFile = File(audioPath)
+                if (!sourceFile.exists() || sourceFile.length() == 0L) {
+                    runOnUiThread { result.error("FILE_ERROR", "Audio file not found or empty", null) }
+                    return@Thread
+                }
+                val destFileName = if (fileName.endsWith(".wav")) fileName else "$fileName.wav"
+                
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val values = ContentValues().apply {
+                        put(MediaStore.Audio.Media.DISPLAY_NAME, destFileName)
+                        put(MediaStore.Audio.Media.MIME_TYPE, "audio/wav")
+                        put(MediaStore.Audio.Media.RELATIVE_PATH, "Music/SubtitleAI")
+                        put(MediaStore.Audio.Media.IS_PENDING, 1)
+                    }
+                    val uri = contentResolver.insert(MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values)
+                        ?: throw Exception("MediaStore insert returned null")
+                    contentResolver.openOutputStream(uri)?.use { out -> sourceFile.inputStream().use { it.copyTo(out) } }
+                        ?: throw Exception("Cannot open MediaStore output stream")
+                    values.clear()
+                    values.put(MediaStore.Audio.Media.IS_PENDING, 0)
+                    contentResolver.update(uri, values, null, null)
+                } else {
+                    @Suppress("DEPRECATION")
+                    val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC), "SubtitleAI")
+                    dir.mkdirs()
+                    val dest = File(dir, destFileName)
+                    sourceFile.copyTo(dest, overwrite = true)
+                    MediaScannerConnection.scanFile(applicationContext, arrayOf(dest.absolutePath), arrayOf("audio/wav"), null)
+                }
+                runOnUiThread { result.success("Music/SubtitleAI/$destFileName") }
+            } catch (e: Exception) {
+                runOnUiThread { result.error("FAILED", e.message ?: "Unknown", null) }
+            }
+        }.start()
+    }
+
+    // Save a UTF-8 text file (e.g. .srt/.vtt) to Download/SubtitleAI so it can be
+    // imported into CapCut / YouTube / other editors.
+    private fun saveTextFile(content: String, fileName: String, mime: String, result: MethodChannel.Result) {
+        Thread {
+            try {
+                val bytes = content.toByteArray(Charsets.UTF_8)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val values = ContentValues().apply {
+                        put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                        put(MediaStore.Downloads.MIME_TYPE, mime)
+                        put(MediaStore.Downloads.RELATIVE_PATH, "Download/SubtitleAI")
+                        put(MediaStore.Downloads.IS_PENDING, 1)
+                    }
+                    val uri = contentResolver.insert(MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values)
+                        ?: throw Exception("MediaStore insert returned null")
+                    contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
+                        ?: throw Exception("Cannot open MediaStore output stream")
+                    values.clear()
+                    values.put(MediaStore.Downloads.IS_PENDING, 0)
+                    contentResolver.update(uri, values, null, null)
+                } else {
+                    @Suppress("DEPRECATION")
+                    val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "SubtitleAI")
+                    dir.mkdirs()
+                    val dest = File(dir, fileName)
+                    dest.writeBytes(bytes)
+                    MediaScannerConnection.scanFile(applicationContext, arrayOf(dest.absolutePath), arrayOf(mime), null)
+                }
+                runOnUiThread { result.success("Download/SubtitleAI/$fileName") }
+            } catch (e: Exception) {
+                runOnUiThread { result.error("FAILED", e.message ?: "Unknown", null) }
+            }
+        }.start()
     }
 }

@@ -19,7 +19,12 @@ class FreeQuotaService {
   // Daily FHD (1080p) export quota for free users. HD (720p) is unlimited.
   static const _exportDateKey = 'fhd_export_date';
   static const _exportCountKey = 'fhd_export_count';
-  static const int freeFhdPerDay = 1;
+  static const int freeFhdPerDay = 3;
+
+  // Daily SRT/VTT subtitle-file export quota for free users.
+  static const _srtDateKey = 'srt_export_date';
+  static const _srtCountKey = 'srt_export_count';
+  static const int freeSrtPerDay = 2;
 
   /// True if PRO is active (either source) and not yet expired.
   static Future<bool> isPro() async {
@@ -83,6 +88,27 @@ class FreeQuotaService {
     final count = storedDate == today ? (prefs.getInt(_exportCountKey) ?? 0) : 0;
     await prefs.setString(_exportDateKey, today);
     await prefs.setInt(_exportCountKey, count + 1);
+  }
+
+  /// Remaining free SRT/VTT subtitle-file exports for today. PRO is unlimited.
+  static Future<int> remainingSrtExports() async {
+    if (await isPro()) return 999;
+    final prefs = await SharedPreferences.getInstance();
+    final today = _todayStr();
+    final storedDate = prefs.getString(_srtDateKey) ?? '';
+    if (storedDate != today) return freeSrtPerDay;
+    final used = prefs.getInt(_srtCountKey) ?? 0;
+    return (freeSrtPerDay - used).clamp(0, freeSrtPerDay);
+  }
+
+  /// Consume one free SRT/VTT export for today.
+  static Future<void> useSrtExport() async {
+    final prefs = await SharedPreferences.getInstance();
+    final today = _todayStr();
+    final storedDate = prefs.getString(_srtDateKey) ?? '';
+    final count = storedDate == today ? (prefs.getInt(_srtCountKey) ?? 0) : 0;
+    await prefs.setString(_srtDateKey, today);
+    await prefs.setInt(_srtCountKey, count + 1);
   }
 
   static DateTime? _parse(String? s) =>

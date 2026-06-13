@@ -16,7 +16,17 @@
       "Bash(where magick *)",
       "Bash(echo \"EXIT_AAB=$?\")",
       "Bash(echo \"EXIT_APK=$?\")",
-      "PowerShell($img = \"C:\\\\Users\\\\Nou\\\\Desktop\\\\annie-kaydee\\\\subtitle_app\\\\assets\\\\icon\\\\watermark_logo.png\"; Add-Type -AssemblyName System.Drawing; $b = [System.Drawing.Image]::FromFile\\($img\\); Write-Output \"watermark_logo.png = $\\($b.Width\\) x $\\($b.Height\\) px\"; $b.Dispose\\(\\))"
+      "PowerShell($img = \"C:\\\\Users\\\\Nou\\\\Desktop\\\\annie-kaydee\\\\subtitle_app\\\\assets\\\\icon\\\\watermark_logo.png\"; Add-Type -AssemblyName System.Drawing; $b = [System.Drawing.Image]::FromFile\\($img\\); Write-Output \"watermark_logo.png = $\\($b.Width\\) x $\\($b.Height\\) px\"; $b.Dispose\\(\\))",
+      "Bash(echo \"RC=$?\")",
+      "Bash(git --no-pager diff --no-color lib/services/export_service.dart)",
+      "Read(//tmp/**)",
+      "Bash(awk 'NR>=2717 && NR<=2728' lib/screens/editor_screen.dart)",
+      "PowerShell(curl.exe -L -o tools\\\\font8bit\\\\NotoSansLaoLooped-Regular.ttf \"https://github.com/notofonts/lao/raw/main/fonts/NotoSansLaoLooped/unhinted/ttf/NotoSansLaoLooped-Regular.ttf\"; \\(Get-Item tools\\\\font8bit\\\\NotoSansLaoLooped-Regular.ttf\\).Length)",
+      "PowerShell(python tools\\\\font8bit\\\\pixelate_font.py tools\\\\font8bit\\\\NotoSansLaoLooped-Regular.ttf tools\\\\font8bit\\\\KarnSubLao8Bit.ttf 16)",
+      "PowerShell($b = [System.IO.File]::ReadAllBytes\\(\"tools\\\\font8bit\\\\NotoSansLaoLooped-Regular.ttf\"\\)[0..15]; \\($b | ForEach-Object { $_.ToString\\(\"X2\"\\) }\\) -join \" \"; [System.Text.Encoding]::ASCII.GetString\\($b\\))",
+      "WebSearch",
+      "WebFetch(domain:www.f0nt.com)",
+      "PowerShell(Set-Location tools\\\\font8bit; $env:PYTHONIOENCODING='utf-8'; python -u diag_stage.py NotoSansLao-SemiBold.ttf)"
     ]
   }
 }

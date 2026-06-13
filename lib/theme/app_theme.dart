@@ -1,18 +1,20 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
+/// "Aurora" palette — deep blue-tinted dark surfaces, teal primary with a
+/// purple secondary accent (feature buttons keep their purple highlights).
 class AppColors {
-  static const background = Color(0xFF0E0E12);
-  static const surface = Color(0xFF1A1A20);
-  static const surfaceLight = Color(0xFF26262E);
+  static const background = Color(0xFF0B0F16);
+  static const surface = Color(0xFF131A24);
+  static const surfaceLight = Color(0xFF1D2735);
   static const primary = Color(0xFF7C6BFF);
   static const primaryDark = Color(0xFF4F46E5);
   static const accent = Color(0xFFFF6B6B);
   static const warning = Color(0xFFFFB300);
-  static const textPrimary = Color(0xFFF5F5F7);
-  static const textSecondary = Color(0xFFA0A0AD);
-  static const textHint = Color(0xFF5C5C68);
-  static const border = Color(0xFF2C2C36);
+  static const textPrimary = Color(0xFFEEF3F2);
+  static const textSecondary = Color(0xFF9AAAB4);
+  static const textHint = Color(0xFF5A6875);
+  static const border = Color(0xFF243140);
   static const success = Color(0xFF34D399);
   static const neonGreen = Color(0xFF39FF14);
   static const neonPurple = Color(0xFF7C6BFF);
@@ -28,7 +30,13 @@ class AppRadius {
 
 class AppGradients {
   static const primary = LinearGradient(
-    colors: [AppColors.primaryDark, AppColors.primary],
+    colors: [Color(0xFF4F46E5), Color(0xFF8C7BFF)],
+    begin: Alignment.topLeft,
+    end: Alignment.bottomRight,
+  );
+  // Purple secondary gradient (AI/special feature highlights).
+  static const aurora = LinearGradient(
+    colors: [Color(0xFF534AB7), Color(0xFF7F77DD)],
     begin: Alignment.topLeft,
     end: Alignment.bottomRight,
   );
@@ -115,6 +123,19 @@ class AppTheme {
         backgroundColor: AppColors.surfaceLight,
         contentTextStyle: const TextStyle(color: AppColors.textPrimary),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
+      ),
+      // One consistent look for every bottom sheet: grab handle + rounded top
+      // + surface bg (applies app-wide so all ~24 sheets match without editing
+      // each one).
+      bottomSheetTheme: const BottomSheetThemeData(
+        showDragHandle: true,
+        dragHandleColor: AppColors.textHint,
+        backgroundColor: AppColors.surface,
+        modalBackgroundColor: AppColors.surface,
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.xl)),
+        ),
       ),
     );
   }
