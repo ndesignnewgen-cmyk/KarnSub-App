@@ -31,6 +31,7 @@ class _SetupScreenState extends State<SetupScreen> {
   String _targetLanguage = 'lo';
   String _aiEngine = 'gemini';
   bool _isPro = false;
+  bool _merging = false;
   bool _proofread = true;
   bool _hasGroqKey = false;
   bool _hasOpenAiKey = false;
@@ -65,22 +66,22 @@ class _SetupScreenState extends State<SetupScreen> {
   }
 
   Future<void> _pickVideo() async {
+    // Multi-clip merge is shelved → pick a single video for now.
     final result = await FilePicker.platform.pickFiles(
       type: FileType.video,
       allowMultiple: false,
     );
-    if (result != null && result.files.isNotEmpty) {
-      setState(() {
-        _videoPath = result.files.first.path;
-        _videoName = result.files.first.name;
-        if (_nameController.text.isEmpty) {
-          _nameController.text = result.files.first.name.replaceAll(
-            RegExp(r'\.[^\.]+$'),
-            '',
-          );
-        }
-      });
-    }
+    if (result == null || result.files.isEmpty) return;
+    final path = result.files.first.path;
+    if (path == null) return;
+    setState(() {
+      _videoPath = path;
+      _videoName = result.files.first.name;
+      if (_nameController.text.isEmpty) {
+        _nameController.text =
+            result.files.first.name.replaceAll(RegExp(r'\.[^\.]+$'), '');
+      }
+    });
   }
 
   void _startProcessing() {
@@ -423,6 +424,34 @@ class _SetupScreenState extends State<SetupScreen> {
   }
 
   Widget _buildVideoUpload() {
+    if (_merging) {
+      return Container(
+        width: double.infinity,
+        height: 140,
+        decoration: BoxDecoration(
+          color: AppColors.surface,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: AppColors.primary, width: 1.5),
+        ),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const SizedBox(
+              width: 28,
+              height: 28,
+              child: CircularProgressIndicator(
+                  strokeWidth: 2.5, color: AppColors.primary),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              tr('setup.merging'),
+              style: const TextStyle(
+                  color: AppColors.textPrimary, fontWeight: FontWeight.w600),
+            ),
+          ],
+        ),
+      );
+    }
     return GestureDetector(
       onTap: _pickVideo,
       child: AnimatedContainer(

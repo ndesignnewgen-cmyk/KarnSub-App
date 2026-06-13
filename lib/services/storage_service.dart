@@ -78,6 +78,7 @@ class StorageService {
         'bgBlur': p.bgBlur,
         'removedRanges': p.removedRanges,
         'splitPointsMs': p.splitPointsMs,
+        'clips': p.clips.map((c) => c.toJson()).toList(),
         'imageOverlays': p.imageOverlays.map(_imageOverlayToJson).toList(),
         'zoomEffects': p.zoomEffects.map(_zoomEffectToJson).toList(),
         'fadeEffects': p.fadeEffects.map(_fadeEffectToJson).toList(),
@@ -154,6 +155,11 @@ class StorageService {
           [],
       splitPointsMs: (j['splitPointsMs'] as List<dynamic>?)
               ?.map((e) => e as int)
+              .toList() ??
+          [],
+      clips: (j['clips'] as List<dynamic>?)
+              ?.map((c) => VideoClip.fromJson(c as Map<String, dynamic>))
+              .where((c) => File(c.path).existsSync())
               .toList() ??
           [],
       imageOverlays: (j['imageOverlays'] as List<dynamic>?)

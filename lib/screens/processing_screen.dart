@@ -271,10 +271,15 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
         final hasGroq = groqKey != null && groqKey.isNotEmpty;
         final hasOpenAi = openAiKey != null && openAiKey.isNotEmpty;
 
-        if (hasGroq || hasOpenAi) {
+        // Whisper can't understand Lao — forcing it to align Lao audio as Thai
+        // gives word boundaries that DON'T match the real speech, so the timing
+        // drifts worse and worse through the clip. For Lao, SKIP Whisper and use
+        // the language-agnostic energy-VAD alignment (anchors to real speech the
+        // whole way → no cumulative drift).
+        if ((hasGroq || hasOpenAi) && project.language != 'lo') {
           try {
             setState(() => _statusText = tr('proc.whisperAligning'));
-            final alignLang = project.language == 'lo' ? 'th' : project.language;
+            final alignLang = project.language;
             final wt = hasGroq
                 ? await GroqSpeechService(
                     apiKey: groqKey,
@@ -356,6 +361,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
         project.fontFamily = 'NotoSansLao';
       }
 
+      _fixSubtitleOverlaps(segments); // no two captions on screen at once
       context.read<ProjectProvider>().updateSegments(segments);
 
       await Future.delayed(const Duration(milliseconds: 700));
@@ -385,6 +391,25 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
               ? tr('proc.errorLong')
               : tr('proc.errorGeneric', {'msg': msg});
         });
+      }
+    }
+  }
+
+  /// Sort captions by start time and clamp each one's end so it never overlaps
+  /// the next caption (otherwise two captions show on screen + blocks overlap
+  /// on the timeline). Also drops zero/negative-length leftovers.
+  void _fixSubtitleOverlaps(List<SubtitleSegment> segs) {
+    if (segs.length < 2) return;
+    segs.sort((a, b) => a.startTime.compareTo(b.startTime));
+    for (int i = 0; i < segs.length - 1; i++) {
+      final cur = segs[i];
+      final next = segs[i + 1];
+      if (cur.endTime > next.startTime) {
+        // Clamp current end to the next caption's start (back-to-back, no overlap).
+        final clamped = next.startTime;
+        cur.endTime = clamped.inMilliseconds > cur.startTime.inMilliseconds
+            ? clamped
+            : cur.startTime + const Duration(milliseconds: 300);
       }
     }
   }

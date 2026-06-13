@@ -3,10 +3,12 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'theme/app_theme.dart';
 import 'i18n/i18n.dart';
 import 'providers/project_provider.dart';
 import 'screens/home_screen.dart';
+import 'screens/onboarding_screen.dart';
 import 'services/custom_font_service.dart';
 import 'services/firebase_service.dart';
 import 'services/subscription_service.dart';
@@ -87,6 +89,7 @@ class _AppLoaderState extends State<AppLoader> {
   // Keep the logo splash on screen for at least this long so it doesn't just
   // flash by — like other apps that briefly show their logo on launch.
   bool _minElapsed = false;
+  bool? _onboardDone; // null = still loading the flag
   Timer? _timer;
 
   @override
@@ -105,6 +108,10 @@ class _AppLoaderState extends State<AppLoader> {
   }
 
   Future<void> _load() async {
+    final prefs = await SharedPreferences.getInstance();
+    final done = prefs.getBool(OnboardingScreen.prefsKey) ?? false;
+    if (mounted) setState(() => _onboardDone = done);
+    if (!mounted) return;
     await context.read<ProjectProvider>().loadFromStorage();
   }
 
@@ -112,10 +119,21 @@ class _AppLoaderState extends State<AppLoader> {
   Widget build(BuildContext context) {
     return Consumer<ProjectProvider>(
       builder: (context, provider, _) {
-        final ready = provider.isLoaded && _minElapsed;
+        final ready =
+            provider.isLoaded && _minElapsed && _onboardDone != null;
+        final Widget content;
+        if (!ready) {
+          content = const _SplashScreen();
+        } else if (_onboardDone == false) {
+          content = OnboardingScreen(
+            onDone: () => setState(() => _onboardDone = true),
+          );
+        } else {
+          content = const HomeScreen();
+        }
         return AnimatedSwitcher(
           duration: const Duration(milliseconds: 350),
-          child: ready ? const HomeScreen() : const _SplashScreen(),
+          child: content,
         );
       },
     );

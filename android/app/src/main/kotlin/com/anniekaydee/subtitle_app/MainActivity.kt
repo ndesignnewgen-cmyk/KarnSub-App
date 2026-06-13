@@ -638,6 +638,11 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        // Gapless multi-clip player (CapCut-style timeline).
+        val clipPlayer = ClipPlayer(applicationContext, flutterEngine.renderer)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger,
+            "com.anniekaydee.subtitle_app/clipplayer")
+            .setMethodCallHandler(clipPlayer)
         val ch = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
         methodChannel = ch
         ch.setMethodCallHandler { call, result ->
@@ -653,6 +658,13 @@ class MainActivity : FlutterActivity() {
                         val videoPath = call.argument<String>("videoPath")
                             ?: return@setMethodCallHandler result.error("MISSING", "videoPath missing", null)
                         resolveVideoPath(videoPath, result)
+                    }
+                    "mergeVideos" -> {
+                        val paths = call.argument<List<String>>("paths")
+                            ?: return@setMethodCallHandler result.error("MISSING", "paths missing", null)
+                        val outputPath = call.argument<String>("outputPath")
+                            ?: return@setMethodCallHandler result.error("MISSING", "outputPath missing", null)
+                        mergeVideos(paths, outputPath, result)
                     }
                     "burnSubtitles" -> {
                         val videoPath = call.argument<String>("videoPath")
@@ -2113,6 +2125,206 @@ class MainActivity : FlutterActivity() {
             r
         } catch (_: Exception) {
             0
+        }
+    }
+
+    private fun clipDurationUs(path: String): Long {
+        return try {
+            val mmr = android.media.MediaMetadataRetriever()
+            mmr.setDataSource(path)
+            val ms = mmr.extractMetadata(
+                android.media.MediaMetadataRetriever.METADATA_KEY_DURATION
+            )?.toLongOrNull() ?: 0L
+            mmr.release()
+            ms * 1000L
+        } catch (_: Exception) {
+            0L
+        }
+    }
+
+    /// Concatenate several clips into one MP4 by copying compressed samples
+    /// (no re-encode → fast + lossless). Requires the clips to share the same
+    /// video size + codec (the common case: clips from one phone). On a mismatch
+    /// it fails with code "INCOMPAT" so the UI can ask the user to use clips of
+    /// the same size. Audio tracks are concatenated when present + compatible.
+    private fun mergeVideos(paths: List<String>, outputPath: String, result: MethodChannel.Result) {
+        Thread {
+            try {
+                if (paths.size < 2) throw RuntimeException("need at least 2 clips")
+                try {
+                    // Fast path: lossless sample-copy (clips already same size/codec).
+                    muxConcat(paths, outputPath)
+                } catch (e: Exception) {
+                    if (e.message != "INCOMPAT") throw e
+                    // Fallback: clips differ → re-encode each to the first clip's
+                    // RAW size, then concat the uniform temps (rotation handled by
+                    // each temp's orientation hint, like the normal export path).
+                    val (tw, th) = firstClipRawSize(paths[0])
+                    val temps = ArrayList<String>()
+                    try {
+                        for ((i, src) in paths.withIndex()) {
+                            val tmp = "${cacheDir.absolutePath}/norm_${System.currentTimeMillis()}_$i.mp4"
+                            VideoExporterGl().export(src, tmp, { }, { null }, null, tw, th)
+                            temps.add(tmp)
+                        }
+                        muxConcat(temps, outputPath)
+                    } finally {
+                        for (t in temps) try { java.io.File(t).delete() } catch (_: Exception) {}
+                    }
+                }
+                runOnUiThread { result.success(outputPath) }
+            } catch (e: Exception) {
+                try { java.io.File(outputPath).delete() } catch (_: Exception) {}
+                runOnUiThread { result.error("MERGE_FAIL", e.message, null) }
+            }
+        }.start()
+    }
+
+    /// First clip's RAW (encoded) size — the merge target. Rotation is NOT
+    /// applied here; it is preserved per-clip via the muxer orientation hint.
+    private fun firstClipRawSize(path: String): Pair<Int, Int> {
+        val ex = MediaExtractor()
+        try {
+            ex.setDataSource(path)
+            for (i in 0 until ex.trackCount) {
+                val f = ex.getTrackFormat(i)
+                val mime = f.getString(MediaFormat.KEY_MIME) ?: ""
+                if (mime.startsWith("video/")) {
+                    val w = f.getInteger(MediaFormat.KEY_WIDTH)
+                    val h = f.getInteger(MediaFormat.KEY_HEIGHT)
+                    fun even(v: Int) = if (v % 2 == 0) v else v - 1 // encoders need even dims
+                    return Pair(even(w), even(h))
+                }
+            }
+            return Pair(1080, 1920)
+        } finally {
+            try { ex.release() } catch (_: Exception) {}
+        }
+    }
+
+    /// Lossless concat by copying compressed samples. Throws "INCOMPAT" if the
+    /// clips don't share the same video size + codec.
+    private fun muxConcat(paths: List<String>, outputPath: String) {
+        run {
+            var muxer: MediaMuxer? = null
+            var started = false
+            try {
+                if (paths.size < 2) throw RuntimeException("need at least 2 clips")
+
+                // Read the first clip's track formats (template for the output).
+                val firstEx = MediaExtractor()
+                firstEx.setDataSource(paths[0])
+                var vFormat: MediaFormat? = null
+                var aFormat: MediaFormat? = null
+                for (i in 0 until firstEx.trackCount) {
+                    val f = firstEx.getTrackFormat(i)
+                    val mime = f.getString(MediaFormat.KEY_MIME) ?: ""
+                    if (mime.startsWith("video/") && vFormat == null) vFormat = f
+                    if (mime.startsWith("audio/") && aFormat == null) aFormat = f
+                }
+                firstEx.release()
+                val vf = vFormat ?: throw RuntimeException("no video track")
+                val baseW = vf.getInteger(MediaFormat.KEY_WIDTH)
+                val baseH = vf.getInteger(MediaFormat.KEY_HEIGHT)
+                val baseMime = vf.getString(MediaFormat.KEY_MIME)
+
+                muxer = MediaMuxer(outputPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+                val rot = readRotation(paths[0],
+                    if (vf.containsKey("rotation-degrees")) vf.getInteger("rotation-degrees") else 0)
+                if (rot != 0) muxer.setOrientationHint(rot)
+                val muxVideo = muxer.addTrack(vf)
+                val muxAudio = if (aFormat != null) muxer.addTrack(aFormat!!) else -1
+                muxer.start()
+                started = true
+
+                val cap = maxOf(
+                    if (vf.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE))
+                        vf.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE) else 0,
+                    1 shl 21,
+                )
+                val buffer = ByteBuffer.allocate(cap)
+                val info = MediaCodec.BufferInfo()
+
+                var videoOffsetUs = 0L
+                var audioOffsetUs = 0L
+
+                for (path in paths) {
+                    val clipDurUs = clipDurationUs(path)
+
+                    // ── video samples ──
+                    val vEx = MediaExtractor()
+                    vEx.setDataSource(path)
+                    var vt = -1
+                    for (i in 0 until vEx.trackCount) {
+                        val f = vEx.getTrackFormat(i)
+                        val mime = f.getString(MediaFormat.KEY_MIME) ?: ""
+                        if (mime.startsWith("video/")) {
+                            if (f.getInteger(MediaFormat.KEY_WIDTH) != baseW ||
+                                f.getInteger(MediaFormat.KEY_HEIGHT) != baseH ||
+                                f.getString(MediaFormat.KEY_MIME) != baseMime) {
+                                vEx.release()
+                                throw RuntimeException("INCOMPAT")
+                            }
+                            vt = i
+                            break
+                        }
+                    }
+                    if (vt >= 0) {
+                        vEx.selectTrack(vt)
+                        while (true) {
+                            val sz = vEx.readSampleData(buffer, 0)
+                            if (sz < 0) break
+                            info.offset = 0
+                            info.size = sz
+                            info.presentationTimeUs = vEx.sampleTime + videoOffsetUs
+                            info.flags = if (vEx.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0)
+                                MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
+                            muxer.writeSampleData(muxVideo, buffer, info)
+                            vEx.advance()
+                        }
+                    }
+                    vEx.release()
+
+                    // ── audio samples (best-effort; skipped if absent) ──
+                    if (muxAudio != -1) {
+                        try {
+                            val aEx = MediaExtractor()
+                            aEx.setDataSource(path)
+                            var at = -1
+                            for (i in 0 until aEx.trackCount) {
+                                val mime = aEx.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: ""
+                                if (mime.startsWith("audio/")) { at = i; break }
+                            }
+                            if (at >= 0) {
+                                aEx.selectTrack(at)
+                                while (true) {
+                                    val sz = aEx.readSampleData(buffer, 0)
+                                    if (sz < 0) break
+                                    info.offset = 0
+                                    info.size = sz
+                                    info.presentationTimeUs = aEx.sampleTime + audioOffsetUs
+                                    info.flags = if (aEx.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0)
+                                        MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
+                                    muxer.writeSampleData(muxAudio, buffer, info)
+                                    aEx.advance()
+                                }
+                            }
+                            aEx.release()
+                        } catch (_: Exception) { /* keep video on audio failure */ }
+                    }
+
+                    videoOffsetUs += clipDurUs
+                    audioOffsetUs += clipDurUs
+                }
+
+                muxer.stop()
+            } catch (e: Exception) {
+                if (started) { try { muxer?.stop() } catch (_: Exception) {} }
+                try { java.io.File(outputPath).delete() } catch (_: Exception) {}
+                throw e // let the caller decide (INCOMPAT → re-encode fallback)
+            } finally {
+                try { muxer?.release() } catch (_: Exception) {}
+            }
         }
     }
 

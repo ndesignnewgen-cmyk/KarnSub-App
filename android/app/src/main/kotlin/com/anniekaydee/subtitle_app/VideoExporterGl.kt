@@ -54,6 +54,10 @@ class VideoExporterGl {
 
     private var vidW = 0
     private var vidH = 0
+    // Output (encoder) dimensions — equal to vidW/vidH unless a target size is
+    // given (used by clip-merge to normalize different-sized clips).
+    private var outW = 0
+    private var outH = 0
 
     fun export(
         inputPath: String,
@@ -61,6 +65,8 @@ class VideoExporterGl {
         onProgress: (Double) -> Unit,
         subtitleProvider: (Long) -> Bitmap?,
         keptRegions: List<Pair<Long, Long>>? = null,
+        targetW: Int = 0,
+        targetH: Int = 0,
     ) {
         var extractor: MediaExtractor? = null
         var audioExtractor: MediaExtractor? = null
@@ -106,9 +112,16 @@ class VideoExporterGl {
             val durationUs = if (videoFormat.containsKey(MediaFormat.KEY_DURATION))
                 videoFormat.getLong(MediaFormat.KEY_DURATION) else 0L
 
+            // When a target size is given (clip-merge normalize), encode at that
+            // size and BAKE rotation into the pixels (output orientation 0) so all
+            // clips become uniform and can be concatenated.
+            val bake = targetW > 0 && targetH > 0
+            outW = if (bake) targetW else vidW
+            outH = if (bake) targetH else vidH
+
             // ── Encoder with input Surface (must support COLOR_FormatSurface) ──
             encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-            val encFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, vidW, vidH).apply {
+            val encFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, outW, outH).apply {
                 setInteger(MediaFormat.KEY_COLOR_FORMAT,
                     MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
                 setInteger(MediaFormat.KEY_BIT_RATE, bitRate.coerceIn(1_000_000, 16_000_000))
@@ -123,6 +136,10 @@ class VideoExporterGl {
             initEgl(encoderInput)
             makeCurrent()
             setupGl()
+            // For normalize mode: build an aspect-fit (letterbox) quad so the
+            // RAW frame fills the target without distortion. Rotation is left to
+            // the muxer orientation hint (same as the normal export path).
+            if (bake) setupFitQuad()
 
             // ── Decoder → our SurfaceTexture ──
             decoder = MediaCodec.createDecoderByType(videoFormat.getString(MediaFormat.KEY_MIME)!!)
@@ -132,6 +149,9 @@ class VideoExporterGl {
 
             // ── Muxer + audio ──
             muxer = MediaMuxer(outputPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            // Always keep the orientation hint (we never rotate pixels in GL —
+            // only scale). Clips from the same camera share rotation, so the
+            // re-encoded temps + their hints stay consistent for concat.
             if (rotation != 0) muxer.setOrientationHint(rotation)
             var audioFormat: MediaFormat? = null
             if (audioTrack != -1) {
@@ -397,8 +417,22 @@ class VideoExporterGl {
         surfaceTexture.updateTexImage()
     }
 
+    /// Build an aspect-fit (letterbox) position quad so the RAW frame
+    /// (vidW×vidH) fills the output (outW×outH) without distortion. No rotation
+    /// is applied here — the muxer orientation hint handles display rotation.
+    private fun setupFitQuad() {
+        if (vidW <= 0 || vidH <= 0 || outW <= 0 || outH <= 0) return
+        val scale = minOf(outW.toFloat() / vidW, outH.toFloat() / vidH)
+        val hw = (vidW * scale) / outW // half-width in NDC (0..1)
+        val hh = (vidH * scale) / outH
+        // Corners in posBuf order: BL, BR, TL, TR.
+        posBuf = floatBuf(floatArrayOf(-hw, -hh, hw, -hh, -hw, hh, hw, hh))
+    }
+
     private fun drawFrame(stMatrix: FloatArray, overlay: Bitmap?) {
-        GLES20.glViewport(0, 0, vidW, vidH)
+        GLES20.glViewport(0, 0, outW, outH)
+        GLES20.glClearColor(0f, 0f, 0f, 1f)
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
         GLES20.glDisable(GLES20.GL_BLEND)
 
         // video (external OES)

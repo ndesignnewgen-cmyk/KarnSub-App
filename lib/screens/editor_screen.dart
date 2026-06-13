@@ -31,6 +31,8 @@ import '../services/lao_font_service.dart';
 import '../services/custom_font_service.dart';
 import '../services/lao_word_service.dart';
 import '../services/thumbnail_service.dart';
+import '../services/media_info_service.dart';
+import '../services/clip_player_controller.dart';
 import '../services/api_config.dart';
 import '../services/free_quota_service.dart';
 import '../services/tts_service.dart';
@@ -206,6 +208,23 @@ class _EditorScreenState extends State<EditorScreen>
   Ticker? _scrollTicker;
   int _anchorPosMs = 0;
   int _anchorWallMs = 0;
+  // When play starts, ExoPlayer takes a moment to actually begin advancing.
+  // Hold the wall-clock scroll interpolation until the first real frame so the
+  // timeline doesn't race ahead then snap back (a one-time stutter at play).
+  bool _waitingFirstPlayFrame = false;
+  int _playStartPosMs = 0;
+  bool _appendingClip = false; // true while merging an appended clip
+  int _activeClip = 0; // index of the clip the preview controller is showing
+  int _mcSelected = -1; // selected multi-clip block on the timeline (-1 = none)
+  int _dragClipIndex = -1; // clip block being long-press dragged (-1 = none)
+  double _dragClipDx = 0; // horizontal drag offset (px) while reordering
+  bool _switchingClip = false; // guards against concurrent clip swaps (crash)
+  // Native ExoPlayer gapless multi-clip player (CapCut-style smooth playback).
+  ClipPlayerController? _clipPlayer;
+  int? _clipTextureId;
+  Timer? _clipPoll;
+  // Per-clip filmstrip thumbnails (keyed by clip id) for the inline timeline.
+  final Map<String, List<({int ms, String path})>> _clipThumbs = {};
   late TabController _tabController;
   int _activeSegmentIndex = 0;
   bool _isPlaying = false;
@@ -642,20 +661,30 @@ class _EditorScreenState extends State<EditorScreen>
   Future<void> _initVideo() async {
     final project = context.read<ProjectProvider>().currentProject;
     if (project?.videoPath == null) return;
+    // Multi-clip → native gapless ExoPlayer player (smooth, upright).
+    if (project!.clips.length >= 2) {
+      await _initClipPlayer(project);
+      return;
+    }
     _videoController = VideoPlayerController.file(
       File(project!.videoPath!),
       videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
     );
     await _videoController!.initialize();
+    _activeClip = 0;
     setState(() {
-      _duration = _videoController!.value.duration;
+      // Multi-clip: timeline length = sum of all clips (sequential preview).
+      _duration = project.clips.length >= 2
+          ? Duration(milliseconds: _clipsTotalMs(project))
+          : _videoController!.value.duration;
     });
-    if (project.isAutoCut) {
+    if (project.clips.length < 2 && project.isAutoCut) {
       await _initKeptRegions();
     }
     _videoController!.addListener(_onVideoUpdate);
     await _applyTrackVolumes();
     _ensureBrollControllers(project); // restore B-roll players for saved overlays
+    if (project.clips.length >= 2) _loadAllClipThumbs(project);
   }
 
   Future<void> _initKeptRegions() async {
@@ -1561,6 +1590,676 @@ class _EditorScreenState extends State<EditorScreen>
     _toast(tr('ed.videoCut'));
   }
 
+  /// Unambiguous filler words (lo / th / en). Kept conservative on purpose so
+  /// meaningful words are never removed.
+  static const Set<String> _fillerWords = {
+    // Lao
+    'ເອີ', 'ເອີ້', 'ເອິ', 'ອື', 'ອືມ', 'ອ້າ', 'ເອ່ີ',
+    // Thai
+    'เออ', 'เอ้อ', 'เอ่อ', 'อ่า', 'อืม', 'เอิ่ม', 'อ่ะ', 'อึ', 'เอ้',
+    // English
+    'um', 'umm', 'uh', 'uhh', 'uhm', 'er', 'err', 'hmm', 'ah', 'eh',
+  };
+
+  String _normFiller(String w) => w
+      .toLowerCase()
+      .replaceAll(RegExp(r'[\s.,!?…ๆฯ"”“\-]+'), '')
+      .trim();
+
+  /// Auto-remove filler words ("um / uh / เออ / อืม / ເອີ") from the whole
+  /// project: cut each filler word's video+audio span (via removedRanges, the
+  /// same proven path as manual cuts) and clean it out of the caption text.
+  /// Offline + free — uses the word-level timings from transcription.
+  /// Append another video clip to the END of the current one (CapCut-style).
+  /// Merges the files natively (lossless when compatible, else re-encode), then
+  /// reloads the player. Existing subtitles/cuts sit before the join so they
+  /// stay valid; the appended footage has no captions until re-transcribed.
+  Future<void> _appendClip(ProjectProvider provider) async {
+    final project = provider.currentProject;
+    if (project == null || project.videoPath == null) return;
+    _pauseForEdit();
+
+    final picked = await FilePicker.platform.pickFiles(
+      type: FileType.video,
+      allowMultiple: false,
+    );
+    final newPath = picked?.files.firstOrNull?.path;
+    if (newPath == null) return;
+
+    setState(() => _appendingClip = true);
+    try {
+      final meta = await MediaInfoService.meta(
+          newPath, '${project.id}_clip${DateTime.now().microsecondsSinceEpoch}');
+      provider.pushHistory();
+      // First append on a single-video project → seed clip 0 from videoPath.
+      if (project.clips.isEmpty) {
+        final m0 = await MediaInfoService.meta(
+            project.videoPath!, '${project.id}_clip0');
+        project.clips.add(VideoClip(
+          id: '${DateTime.now().microsecondsSinceEpoch}_0',
+          path: project.videoPath!,
+          durationMs: m0.durationMs > 0 ? m0.durationMs : null,
+        ));
+      }
+      project.clips.add(VideoClip(
+        id: '${DateTime.now().microsecondsSinceEpoch}_n',
+        path: newPath,
+        durationMs: meta.durationMs > 0 ? meta.durationMs : null,
+      ));
+      provider.commit();
+      setState(() => _appendingClip = false);
+      _toast(project.segments.isNotEmpty
+          ? tr('ed.clipAddedReTranscribe')
+          : tr('ed.clipAdded'));
+    } catch (e) {
+      if (mounted) setState(() => _appendingClip = false);
+      _toast(tr('ed.clipAddFail'));
+    }
+  }
+
+  /// Swap the preview player over to [path] (used when the first clip changes
+  /// via reorder/delete). Existing edits stay; sequential playback is stage 3.
+  Future<void> _loadVideoFile(String path) async {
+    final project = context.read<ProjectProvider>().currentProject;
+    if (project == null) return;
+    if (project.videoPath == path && _videoController != null) return;
+    final old = _videoController;
+    old?.removeListener(_onVideoUpdate);
+    await old?.pause();
+    project.videoPath = path;
+    final c = VideoPlayerController.file(
+      File(path),
+      videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
+    );
+    await c.initialize();
+    c.addListener(_onVideoUpdate);
+    _videoController = c;
+    _activeClip = 0;
+    try { await old?.dispose(); } catch (_) {}
+    if (mounted) {
+      setState(() {
+        _duration = project.clips.length >= 2
+            ? Duration(milliseconds: _clipsTotalMs(project))
+            : c.value.duration;
+        _position = Duration.zero;
+      });
+    }
+    await _applyTrackVolumes();
+    _loadTimelineOnsets();
+  }
+
+  void _deleteClip(ProjectProvider provider, int index) {
+    final project = provider.currentProject;
+    if (project == null) return;
+    final clips = project.clips;
+    if (index < 0 || index >= clips.length) return;
+    if (clips.length <= 1) {
+      _toast(tr('ed.clipMinOne'));
+      return;
+    }
+    provider.pushHistory();
+    clips.removeAt(index);
+    _mcSelected = -1;
+    provider.commit();
+    setState(() {});
+    if (clips.length >= 2 && _clipPlayer != null) {
+      _refreshClipPlayer(project);
+    } else {
+      _loadVideoFile(clips.first.path); // dropped to a single clip
+    }
+    _toast(tr('ed.clipDeleted'));
+  }
+
+  /// Finish a long-press drag of clip [ci]: figure out where it was dropped and
+  /// reorder the clips list accordingly.
+  void _commitClipDrag(
+      ProjectProvider provider, int ci, double cLeft, double leftPad) {
+    final dx = _dragClipDx;
+    setState(() {
+      _dragClipIndex = -1;
+      _dragClipDx = 0;
+    });
+    final project = provider.currentProject;
+    if (project == null || ci < 0 || ci >= project.clips.length) return;
+    final bounds = _clipBounds(project);
+    final b = bounds[ci];
+    // Centre of the dragged block (px) → global ms → which slot it landed on.
+    final origCenterPx = b.start / 1000.0 * _pxPerSec + leftPad + (b.dur / 1000.0 * _pxPerSec) / 2;
+    final newCenterPx = origCenterPx + dx;
+    final newCenterMs = ((newCenterPx - leftPad) / _pxPerSec * 1000).round();
+    int target = bounds.indexWhere((x) => newCenterMs >= x.start && newCenterMs < x.end);
+    if (target < 0) target = newCenterMs < 0 ? 0 : project.clips.length - 1;
+    if (target == ci) return;
+    provider.pushHistory();
+    final c = project.clips.removeAt(ci);
+    final dest = (target > ci ? target - 1 : target).clamp(0, project.clips.length);
+    project.clips.insert(dest, c);
+    _mcSelected = dest;
+    provider.commit();
+    setState(() {});
+    if (_clipPlayer != null) {
+      _refreshClipPlayer(project);
+    } else {
+      _loadVideoFile(project.clips.first.path);
+    }
+    _toast(tr('ed.clipMoved'));
+  }
+
+  /// Reorder the selected clip block left (-1) or right (+1) on the timeline.
+  void _mcMove(ProjectProvider provider, int dir) {
+    final project = provider.currentProject;
+    if (project == null) return;
+    final clips = project.clips;
+    final i = _mcSelected;
+    final j = i + dir;
+    if (i < 0 || i >= clips.length || j < 0 || j >= clips.length) return;
+    provider.pushHistory();
+    final c = clips.removeAt(i);
+    clips.insert(j, c);
+    _mcSelected = j;
+    provider.commit();
+    setState(() {});
+    if (_clipPlayer != null) {
+      _refreshClipPlayer(project);
+    } else {
+      _loadVideoFile(clips.first.path);
+    }
+  }
+
+  /// Split the selected clip into two at the playhead (CapCut ✂️).
+  void _mcSplit(ProjectProvider provider) {
+    final project = provider.currentProject;
+    if (project == null) return;
+    final clips = project.clips;
+    final i = _mcSelected;
+    if (i < 0 || i >= clips.length) return;
+    final bounds = _clipBounds(project)[i];
+    final g = _position.inMilliseconds;
+    if (g <= bounds.start + 200 || g >= bounds.end - 200) {
+      _toast(tr('ed.movePlayhead'));
+      return;
+    }
+    final clip = clips[i];
+    final localSplit = clip.trimStartMs + (g - bounds.start); // source-time ms
+    provider.pushHistory();
+    final a = clip.copy(newId: '${DateTime.now().microsecondsSinceEpoch}_a')
+      ..trimEndMs = localSplit;
+    final b = clip.copy(newId: '${DateTime.now().microsecondsSinceEpoch}_b')
+      ..trimStartMs = localSplit;
+    clips.removeAt(i);
+    clips.insert(i, b);
+    clips.insert(i, a);
+    _mcSelected = i;
+    provider.commit();
+    setState(() {});
+    if (_clipPlayer != null) _refreshClipPlayer(project);
+    _toast(tr('ed.clipCut'));
+  }
+
+  // ───────────────── Stage 3: multi-clip sequential preview ─────────────────
+  // When a project has ≥2 clips they play back-to-back on one virtual timeline.
+  // `_position`/`_duration` stay GLOBAL (sum of clips); `_videoController` is the
+  // ACTIVE clip's player; switching clips swaps the controller (each clip keeps
+  // its own native orientation → no rotation/merge issues).
+
+  bool get _isMultiClip =>
+      (context.read<ProjectProvider>().currentProject?.clips.length ?? 0) >= 2;
+
+  /// Global timeline bounds for each clip: [start,end) ms + its trimmed length.
+  List<({int start, int end, int dur})> _clipBounds(SubtitleProject project) {
+    final out = <({int start, int end, int dur})>[];
+    int cursor = 0;
+    for (final c in project.clips) {
+      final dur = c.effectiveMs > 0 ? c.effectiveMs : 1;
+      out.add((start: cursor, end: cursor + dur, dur: dur));
+      cursor += dur;
+    }
+    return out;
+  }
+
+  int _clipsTotalMs(SubtitleProject project) {
+    int t = 0;
+    for (final c in project.clips) {
+      t += c.effectiveMs > 0 ? c.effectiveMs : 1;
+    }
+    return t;
+  }
+
+  /// Switch the active clip's controller. [localSeekMs] (relative to the clip's
+  /// own start, before trim) seeks within it; -1 = start of the clip.
+  Future<void> _switchToClip(int index,
+      {bool play = false, int localSeekMs = -1}) async {
+    final project = context.read<ProjectProvider>().currentProject;
+    if (project == null || index < 0 || index >= project.clips.length) return;
+    _switchingClip = true; // set synchronously so concurrent calls bail
+    final clip = project.clips[index];
+    final old = _videoController;
+    try {
+      old?.removeListener(_onVideoUpdate);
+      await old?.pause();
+      final c = VideoPlayerController.file(
+        File(clip.path),
+        videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
+      );
+      await c.initialize();
+      final seekMs = localSeekMs >= 0 ? localSeekMs : clip.trimStartMs;
+      await c.seekTo(Duration(milliseconds: seekMs));
+      _videoController = c;
+      _activeClip = index;
+      try { await old?.dispose(); } catch (_) {}
+      await _applyTrackVolumes();
+      if (play) await c.play();
+      c.addListener(_onVideoUpdate); // add LAST so it never fires mid-swap
+    } finally {
+      _switchingClip = false;
+    }
+  }
+
+  /// Seek the GLOBAL multi-clip timeline to [globalMs] via the native player.
+  Future<void> _seekGlobal(int globalMs, {bool play = false}) async {
+    final project = context.read<ProjectProvider>().currentProject;
+    if (project == null) return;
+    final bounds = _clipBounds(project);
+    if (bounds.isEmpty) return;
+    final g = globalMs.clamp(0, _clipsTotalMs(project));
+    int idx = bounds.indexWhere((b) => g >= b.start && g < b.end);
+    if (idx < 0) idx = bounds.length - 1;
+    final localInClip = g - bounds[idx].start; // 0-based within the clipped item
+    final cp = _clipPlayer;
+    if (cp != null) {
+      await cp.seek(idx, localInClip);
+      if (play) {
+        await cp.play();
+        _anchorPosMs = g;
+        _anchorWallMs = DateTime.now().millisecondsSinceEpoch;
+        _scrollTicker?.start();
+      }
+      if (mounted) {
+        setState(() {
+          _position = Duration(milliseconds: g);
+          if (play) _isPlaying = true;
+        });
+      }
+    }
+  }
+
+  /// Create the native gapless player, feed it the clip playlist, and start
+  /// polling its position for the timeline.
+  Future<void> _initClipPlayer(SubtitleProject project) async {
+    final cp = ClipPlayerController();
+    final tid = await cp.create();
+    await cp.setClips(
+      project.clips.map((c) => c.path).toList(),
+      trimStarts: project.clips.map((c) => c.trimStartMs).toList(),
+      trimEnds: project.clips.map((c) => c.trimEndMs ?? -1).toList(),
+    );
+    await cp.refreshSize();
+    await cp.setVolume(project.originalMuted ? 0.0 : project.originalVolume);
+    _clipPlayer = cp;
+    _clipTextureId = tid;
+    if (mounted) {
+      setState(() {
+        _duration = Duration(milliseconds: _clipsTotalMs(project));
+        _position = Duration.zero;
+      });
+    }
+    _loadAllClipThumbs(project);
+    _startClipPoll();
+  }
+
+  /// Re-feed the playlist after clips change (reorder / split / delete).
+  Future<void> _refreshClipPlayer(SubtitleProject project) async {
+    final cp = _clipPlayer;
+    if (cp == null) return;
+    await cp.setClips(
+      project.clips.map((c) => c.path).toList(),
+      trimStarts: project.clips.map((c) => c.trimStartMs).toList(),
+      trimEnds: project.clips.map((c) => c.trimEndMs ?? -1).toList(),
+    );
+    await cp.refreshSize();
+    if (mounted) {
+      setState(() {
+        _duration = Duration(milliseconds: _clipsTotalMs(project));
+        _position = Duration.zero;
+        _isPlaying = false;
+      });
+    }
+  }
+
+  void _startClipPoll() {
+    _clipPoll?.cancel();
+    _clipPoll = Timer.periodic(const Duration(milliseconds: 120), (_) async {
+      final cp = _clipPlayer;
+      if (cp == null || !mounted) return;
+      final project = context.read<ProjectProvider>().currentProject;
+      if (project == null) return;
+      final p = await cp.position();
+      final idx = (p['index'] as num?)?.toInt() ?? 0;
+      final posMs = (p['posMs'] as num?)?.toInt() ?? 0;
+      final playing = p['playing'] == true;
+      final ended = p['ended'] == true;
+      final bounds = _clipBounds(project);
+      final global =
+          (idx < bounds.length ? bounds[idx].start : 0) + posMs;
+      if (cp.videoW == 0) await cp.refreshSize();
+      if (!mounted) return;
+      _position =
+          Duration(milliseconds: global.clamp(0, _clipsTotalMs(project)));
+      _anchorPosMs = _position.inMilliseconds;
+      _anchorWallMs = DateTime.now().millisecondsSinceEpoch;
+      if (ended && _isPlaying) {
+        setState(() => _isPlaying = false);
+        _scrollTicker?.stop();
+      } else if (playing != _isPlaying) {
+        setState(() => _isPlaying = playing);
+      }
+    });
+  }
+
+  /// Load filmstrip thumbnails for each clip (for the inline multi-clip track).
+  Future<void> _loadAllClipThumbs(SubtitleProject project) async {
+    for (final c in project.clips) {
+      if (_clipThumbs.containsKey(c.id)) continue;
+      try {
+        final t = await ThumbnailService.extract(c.path, maxCount: 10);
+        if (!mounted) return;
+        if (t.isNotEmpty) setState(() => _clipThumbs[c.id] = t);
+      } catch (_) {}
+    }
+  }
+
+  void _autoRemoveFiller(ProjectProvider provider) {
+    final project = provider.currentProject;
+    if (project == null || project.segments.isEmpty) {
+      _toast(tr('ed.textEditNoWords'));
+      return;
+    }
+    _pauseForEdit();
+    final n = _applyWordRemoval(
+      provider,
+      remove: (seg, i) => _fillerWords.contains(_normFiller(seg.words![i])),
+      removeWhole: (seg) => _fillerWords.contains(_normFiller(seg.text)),
+    );
+    _toast(n == 0 ? tr('ed.fillerNone') : tr('ed.fillerDone', {'n': n}));
+  }
+
+  /// Core word-removal engine shared by "remove filler" and "text-based edit".
+  /// For each kept-timing word where [remove] returns true, its time span is
+  /// cut (added to removedRanges, the proven manual-cut path) and the word is
+  /// stripped from the caption. [removeWhole] handles segments without per-word
+  /// timings (whole-segment drop). Returns how many words were removed.
+  int _applyWordRemoval(
+    ProjectProvider provider, {
+    required bool Function(SubtitleSegment seg, int wordIndex) remove,
+    bool Function(SubtitleSegment seg)? removeWhole,
+  }) {
+    final project = provider.currentProject;
+    if (project == null || project.segments.isEmpty) return 0;
+
+    final newRanges = <List<int>>[];
+    final rebuilt = <SubtitleSegment>[];
+    int removedCount = 0;
+
+    for (final seg in project.segments) {
+      final words = seg.words;
+      final timings = seg.wordTimings;
+
+      if (words != null &&
+          timings != null &&
+          words.length == timings.length &&
+          words.isNotEmpty) {
+        final keep = <int>[];
+        for (int i = 0; i < words.length; i++) {
+          if (remove(seg, i)) {
+            int start = timings[i].inMilliseconds;
+            int end = (i + 1 < timings.length)
+                ? timings[i + 1].inMilliseconds
+                : seg.endTime.inMilliseconds;
+            // Inset the cut edges slightly so we slice inside the word, not at
+            // its exact boundary — word timings are ~±50ms estimates, and a cut
+            // landing mid-phoneme of the NEIGHBOUR word sounds like a click.
+            if (end - start > 200) {
+              start += 40;
+              end -= 40;
+            }
+            if (end > start) newRanges.add([start, end]);
+            removedCount++;
+          } else {
+            keep.add(i);
+          }
+        }
+        if (keep.length == words.length) {
+          rebuilt.add(seg); // nothing removed here
+          continue;
+        }
+        if (keep.isEmpty) {
+          newRanges.add(
+              [seg.startTime.inMilliseconds, seg.endTime.inMilliseconds]);
+          continue;
+        }
+        final newWords = [for (final i in keep) words[i]];
+        final newTimings = [for (final i in keep) timings[i]];
+        final indexMap = {for (int n = 0; n < keep.length; n++) keep[n]: n};
+        final newEmphasis = seg.emphasis
+            ?.where(indexMap.containsKey)
+            .map((e) => indexMap[e]!)
+            .toList();
+        final c = seg.copy();
+        c.words = newWords;
+        c.wordTimings = newTimings;
+        c.text = joinWordsSmart(newWords);
+        c.startTime = newTimings.first;
+        c.emphasis = (newEmphasis != null && newEmphasis.isNotEmpty)
+            ? newEmphasis
+            : null;
+        rebuilt.add(c);
+      } else {
+        // No per-word timings → optional whole-segment drop.
+        if (removeWhole != null && removeWhole(seg)) {
+          newRanges.add(
+              [seg.startTime.inMilliseconds, seg.endTime.inMilliseconds]);
+          removedCount++;
+        } else {
+          rebuilt.add(seg);
+        }
+      }
+    }
+
+    if (removedCount == 0) return 0;
+
+    provider.pushHistory();
+    project.segments = rebuilt;
+    project.removedRanges = _normalizeRanges([
+      ...project.removedRanges,
+      ...newRanges,
+    ]);
+    provider.commit();
+    setState(() {});
+    return removedCount;
+  }
+
+  /// Text-based editing (Descript/CapCut style): show the whole transcript as
+  /// tappable word chips; tap to mark words for deletion; apply → the marked
+  /// words' video+audio spans are cut and stripped from the captions.
+  void _showTextEditSheet(ProjectProvider provider) {
+    final project = provider.currentProject;
+    if (project == null || project.segments.isEmpty) {
+      _toast(tr('ed.noSubtitle'));
+      return;
+    }
+    _pauseForEdit();
+
+    // Only segments with per-word timings can be word-cut.
+    final editable = project.segments.where((s) =>
+        s.words != null &&
+        s.wordTimings != null &&
+        s.words!.length == s.wordTimings!.length &&
+        s.words!.isNotEmpty);
+    if (editable.isEmpty) {
+      _toast(tr('ed.textEditNoWords'));
+      return;
+    }
+
+    final selected = <String>{}; // keys: "<segId>:<wordIndex>"
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppColors.surface,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setSheet) {
+            return DraggableScrollableSheet(
+              initialChildSize: 0.7,
+              minChildSize: 0.4,
+              maxChildSize: 0.92,
+              expand: false,
+              builder: (ctx, scrollCtrl) {
+                return Column(
+                  children: [
+                    const SizedBox(height: 8),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.edit_note_rounded,
+                              color: Color(0xFF42A5F5), size: 20),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              tr('ed.textEditTitle'),
+                              style: const TextStyle(
+                                color: AppColors.textPrimary,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 16,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                      child: Text(
+                        tr('ed.textEditHint'),
+                        style: const TextStyle(
+                            color: AppColors.textSecondary, fontSize: 12),
+                      ),
+                    ),
+                    const Divider(height: 1, color: AppColors.border),
+                    Expanded(
+                      child: ListView(
+                        controller: scrollCtrl,
+                        padding: const EdgeInsets.all(14),
+                        children: [
+                          for (final seg in project.segments)
+                            if (seg.words != null &&
+                                seg.wordTimings != null &&
+                                seg.words!.length == seg.wordTimings!.length &&
+                                seg.words!.isNotEmpty)
+                              Padding(
+                                padding: const EdgeInsets.only(bottom: 12),
+                                child: Wrap(
+                                  spacing: 6,
+                                  runSpacing: 6,
+                                  children: [
+                                    for (int i = 0;
+                                        i < seg.words!.length;
+                                        i++)
+                                      _wordChip(
+                                        seg.words![i],
+                                        selected.contains('${seg.id}:$i'),
+                                        () => setSheet(() {
+                                          final k = '${seg.id}:$i';
+                                          if (!selected.remove(k)) {
+                                            selected.add(k);
+                                          }
+                                        }),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                        ],
+                      ),
+                    ),
+                    SafeArea(
+                      top: false,
+                      child: Padding(
+                        padding: const EdgeInsets.all(14),
+                        child: SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton.icon(
+                            onPressed: selected.isEmpty
+                                ? null
+                                : () {
+                                    Navigator.pop(ctx);
+                                    final n = _applyWordRemoval(
+                                      provider,
+                                      remove: (seg, i) =>
+                                          selected.contains('${seg.id}:$i'),
+                                    );
+                                    _toast(tr('ed.textEditDone', {'n': n}));
+                                  },
+                            icon: const Icon(Icons.content_cut_rounded,
+                                size: 18),
+                            label: Text(selected.isEmpty
+                                ? tr('ed.textEditNone')
+                                : tr('ed.textEditApply',
+                                    {'n': selected.length})),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: AppColors.accent,
+                              foregroundColor: Colors.white,
+                              minimumSize: const Size(0, 50),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                );
+              },
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _wordChip(String word, bool selected, VoidCallback onTap) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+        decoration: BoxDecoration(
+          color: selected
+              ? AppColors.accent.withValues(alpha: 0.18)
+              : AppColors.surfaceLight,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: selected ? AppColors.accent : AppColors.border,
+          ),
+        ),
+        child: Text(
+          word,
+          style: TextStyle(
+            color: selected ? AppColors.accent : AppColors.textPrimary,
+            fontSize: 14,
+            decoration:
+                selected ? TextDecoration.lineThrough : TextDecoration.none,
+            decorationColor: AppColors.accent,
+            decorationThickness: 2,
+          ),
+        ),
+      ),
+    );
+  }
+
   /// Delete the currently-selected video clip (removes its span + ripples).
   void _deleteSelectedClip(ProjectProvider provider) {
     final project = provider.currentProject;
@@ -1581,13 +2280,61 @@ class _EditorScreenState extends State<EditorScreen>
 
   void _onVideoUpdate() {
     if (!mounted) return;
-    final v = _videoController!.value;
+    // Guard against the listener firing on a controller that is being swapped
+    // out / disposed during a multi-clip transition (was a crash source).
+    final vc = _videoController;
+    if (vc == null || !vc.value.isInitialized) return;
+    final v = vc.value;
     final pos = v.position;
     final playing = v.isPlaying;
     _position = pos; // cheap field update (no rebuild) for scroll math
     if (!playing) _scrollTicker?.stop();
 
+    // Release the scroll hold once the video genuinely starts advancing (or a
+    // short safety timeout), then re-anchor so interpolation starts clean.
+    if (playing && _waitingFirstPlayFrame) {
+      final advanced = pos.inMilliseconds > _playStartPosMs;
+      final timedOut =
+          DateTime.now().millisecondsSinceEpoch - _anchorWallMs > 300;
+      if (advanced || timedOut) {
+        _waitingFirstPlayFrame = false;
+        _anchorPosMs = pos.inMilliseconds;
+        _anchorWallMs = DateTime.now().millisecondsSinceEpoch;
+      }
+    }
+
     final project = context.read<ProjectProvider>().currentProject;
+
+    // ── Multi-clip: map the active clip's local position onto the global
+    // timeline and auto-advance to the next clip when the current one ends. ──
+    if (project != null && project.clips.length >= 2) {
+      final bounds = _clipBounds(project);
+      if (_activeClip < bounds.length) {
+        final clip = project.clips[_activeClip];
+        final clipEndMs =
+            clip.trimEndMs ?? (clip.durationMs ?? v.duration.inMilliseconds);
+        final localMs = pos.inMilliseconds;
+        final global = bounds[_activeClip].start + (localMs - clip.trimStartMs);
+        _position =
+            Duration(milliseconds: global.clamp(0, _clipsTotalMs(project)));
+        if (playing && !_switchingClip && localMs >= clipEndMs - 120) {
+          if (_activeClip + 1 < project.clips.length) {
+            _switchToClip(_activeClip + 1, play: true);
+          } else {
+            _videoController?.pause();
+            _scrollTicker?.stop();
+          }
+          return;
+        }
+        final now = DateTime.now().millisecondsSinceEpoch;
+        if (playing != _isPlaying || now - _lastUiTickMs >= 80) {
+          _lastUiTickMs = now;
+          setState(() => _isPlaying = playing);
+        }
+        _syncTimelineScroll();
+        return;
+      }
+    }
 
     // Auto-skip removed/cut spans ONLY while actually playing. While paused or
     // scrubbing, leave the playhead exactly where the user put it (otherwise
@@ -1689,6 +2436,8 @@ class _EditorScreenState extends State<EditorScreen>
   void dispose() {
     _scrubDebounce?.cancel();
     _mixerSaveDebounce?.cancel();
+    _clipPoll?.cancel();
+    _clipPlayer?.dispose();
     _scrollTicker?.dispose();
     _videoController?.removeListener(_onVideoUpdate);
     _videoController?.dispose();
@@ -1782,6 +2531,28 @@ class _EditorScreenState extends State<EditorScreen>
   }
 
   Future<void> _togglePlay() async {
+    // Multi-clip uses the native gapless player (no single _videoController).
+    final mcProject = context.read<ProjectProvider>().currentProject;
+    if (mcProject != null && mcProject.clips.length >= 2 && _clipPlayer != null) {
+      _scrubDebounce?.cancel();
+      if (_isPlaying) {
+        await _clipPlayer!.pause();
+        _scrollTicker?.stop();
+        if (mounted) setState(() => _isPlaying = false);
+      } else {
+        final total = _clipsTotalMs(mcProject);
+        if (_position.inMilliseconds >= total - 200) {
+          await _seekGlobal(0, play: true);
+        } else {
+          await _clipPlayer!.play();
+          _anchorPosMs = _position.inMilliseconds;
+          _anchorWallMs = DateTime.now().millisecondsSinceEpoch;
+          _scrollTicker?.start();
+          if (mounted) setState(() => _isPlaying = true);
+        }
+      }
+      return;
+    }
     final c = _videoController;
     if (c == null) return;
     _scrubDebounce?.cancel(); // drop any pending scrub seek
@@ -1791,10 +2562,26 @@ class _EditorScreenState extends State<EditorScreen>
       _pauseBgMusic();
       _pauseBroll();
       _scrollTicker?.stop();
+      _waitingFirstPlayFrame = false;
       _scrollTimelineToPosition(); // settle exactly on the current position
       _lastSfxTickMs = -1;
     } else {
       final project = context.read<ProjectProvider>().currentProject;
+      // Multi-clip native player: play / restart-at-end.
+      if (project != null && project.clips.length >= 2 && _clipPlayer != null) {
+        final total = _clipsTotalMs(project);
+        if (_position.inMilliseconds >= total - 200) {
+          await _seekGlobal(0, play: true);
+        } else {
+          await _clipPlayer!.play();
+          _playStartPosMs = _position.inMilliseconds;
+          _anchorPosMs = _playStartPosMs;
+          _anchorWallMs = DateTime.now().millisecondsSinceEpoch;
+          _scrollTicker?.start();
+          setState(() => _isPlaying = true);
+        }
+        return;
+      }
       final posMs = c.value.position.inMilliseconds;
       // "At end" = real end, OR (with Auto-Cut) past the last kept region.
       bool atEnd = _duration > Duration.zero &&
@@ -1813,9 +2600,11 @@ class _EditorScreenState extends State<EditorScreen>
       _resumeAiVoice();
       _resumeBgMusic();
       _syncBroll(project);
-      _anchorPosMs = c.value.position.inMilliseconds;
+      _playStartPosMs = c.value.position.inMilliseconds;
+      _anchorPosMs = _playStartPosMs;
       _anchorWallMs = DateTime.now().millisecondsSinceEpoch;
       _lastSfxTickMs = _anchorPosMs - 1;
+      _waitingFirstPlayFrame = true; // hold scroll until the video really rolls
       _scrollTicker?.start(); // drives scroll + smooth subtitle animation
     }
   }
@@ -1841,6 +2630,11 @@ class _EditorScreenState extends State<EditorScreen>
       _scrollTicker?.stop();
       _isPlaying = false;
       _lastSfxTickMs = -1;
+    }
+    // Multi-clip: pos is on the GLOBAL timeline → load the right clip + seek.
+    if (_isMultiClip) {
+      _seekGlobal(pos.inMilliseconds);
+      return;
     }
     _videoController?.seekTo(pos);
     _seekAiVoice(pos);
@@ -2364,6 +3158,62 @@ class _EditorScreenState extends State<EditorScreen>
           200.0,
           360.0,
         );
+
+        // ── Multi-clip: render the native gapless player's texture. ──
+        if ((project?.clips.length ?? 0) >= 2 && _clipTextureId != null) {
+          final ar = (_clipPlayer != null &&
+                  _clipPlayer!.videoW > 0 &&
+                  _clipPlayer!.videoH > 0)
+              ? _clipPlayer!.videoW / _clipPlayer!.videoH
+              : 9 / 16;
+          return Container(
+            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            height: previewHeight,
+            decoration: BoxDecoration(
+              color: Colors.black,
+              borderRadius: BorderRadius.circular(AppRadius.lg),
+              border: Border.all(color: AppColors.border),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(AppRadius.lg),
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  Center(
+                    child: AspectRatio(
+                      aspectRatio: ar,
+                      child: Texture(textureId: _clipTextureId!),
+                    ),
+                  ),
+                  // Play/pause tap layer.
+                  Positioned.fill(
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: _togglePlay,
+                      child: AnimatedOpacity(
+                        opacity: _isPlaying ? 0.0 : 1.0,
+                        duration: const Duration(milliseconds: 150),
+                        child: Center(
+                          child: Container(
+                            width: 56,
+                            height: 56,
+                            decoration: BoxDecoration(
+                              color: Colors.black.withValues(alpha: 0.4),
+                              shape: BoxShape.circle,
+                            ),
+                            child: const Icon(Icons.play_arrow,
+                                color: Colors.white, size: 34),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }
+
         final controller = _videoController;
         return Container(
           margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
@@ -3860,6 +4710,9 @@ class _EditorScreenState extends State<EditorScreen>
   /// video_player reports the position only a few times per second.
   void _onScrollTick(Duration _) {
     if (!_isPlaying) return;
+    // Don't interpolate scroll until the video has actually begun advancing,
+    // otherwise the timeline jumps ahead then snaps back on the first frame.
+    if (_waitingFirstPlayFrame) return;
     final estMs =
         _anchorPosMs + (DateTime.now().millisecondsSinceEpoch - _anchorWallMs);
     // Smooth timeline scroll (timeline tab only).
@@ -4131,6 +4984,10 @@ class _EditorScreenState extends State<EditorScreen>
     final removed = project?.removedRanges ?? const <List<int>>[];
     final clips = project != null ? _videoClips(project) : const <({int start, int end})>[];
     final totalMs = _duration.inMilliseconds;
+    // Multi-clip inline filmstrip (each source clip = its own block + divider).
+    final mc = (project?.clips.length ?? 0) >= 2;
+    final mcBounds =
+        mc ? _clipBounds(project!) : const <({int start, int end, int dur})>[];
 
     // Trim handle for a video clip: drag left/right edge → record the trimmed
     // slice as a removedRange (CapCut-style direct trim).
@@ -4193,26 +5050,118 @@ class _EditorScreenState extends State<EditorScreen>
             borderRadius: BorderRadius.circular(6),
             child: Stack(
               children: [
-                for (int i = 0; i < _thumbs.length; i++)
-                  Positioned(
-                    left: _thumbs[i].ms / 1000.0 * _pxPerSec + leftPad,
-                    top: 0,
-                    height: height,
-                    width: ((i + 1 < _thumbs.length
-                                ? _thumbs[i + 1].ms - _thumbs[i].ms
-                                : 2000) /
-                            1000.0 *
-                            _pxPerSec) +
-                        1,
-                    child: Image.file(
-                      File(_thumbs[i].path),
-                      fit: BoxFit.cover,
-                      gaplessPlayback: true,
-                      cacheHeight: 160,
-                      errorBuilder: (_, __, ___) =>
-                          Container(color: AppColors.surfaceLight),
+                if (mc) ...[
+                  // Each source clip = its OWN block (rounded + border + gap),
+                  // CapCut/Premiere style. Tap a block to select + jump to it.
+                  for (int ci = 0; ci < project!.clips.length; ci++)
+                    Builder(builder: (_) {
+                      final clip = project.clips[ci];
+                      final b = mcBounds[ci];
+                      final cLeft = b.start / 1000.0 * _pxPerSec + leftPad;
+                      final cW = (b.dur / 1000.0 * _pxPerSec).clamp(8.0, 1e6);
+                      final ts = _clipThumbs[clip.id] ?? const [];
+                      final sel = _mcSelected == ci;
+                      final dragging = _dragClipIndex == ci;
+                      return Positioned(
+                        left: cLeft + 1.5 + (dragging ? _dragClipDx : 0),
+                        top: 0,
+                        height: height,
+                        width: (cW - 3).clamp(6.0, 1e6),
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () {
+                            _pauseForEdit();
+                            setState(() {
+                              _mcSelected = ci;
+                              _selectedIndex = null;
+                              _selectedSfxId = null;
+                              _selectedClipIndex = null;
+                              _selectedImageId = null;
+                            });
+                            _seekGlobal(b.start);
+                            _scrollTimelineToPosition();
+                          },
+                          // Long-press + drag a block to reorder it (CapCut).
+                          onLongPressStart: (_) {
+                            _pauseForEdit();
+                            setState(() {
+                              _mcSelected = ci;
+                              _dragClipIndex = ci;
+                              _dragClipDx = 0;
+                            });
+                          },
+                          onLongPressMoveUpdate: (d) {
+                            setState(() => _dragClipDx = d.offsetFromOrigin.dx);
+                          },
+                          onLongPressEnd: (_) =>
+                              _commitClipDrag(provider, ci, cLeft, leftPad),
+                          child: Opacity(
+                            opacity: dragging ? 0.75 : 1.0,
+                            child: Container(
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(7),
+                              border: Border.all(
+                                color: sel
+                                    ? Colors.white
+                                    : const Color(0xFF7C4DFF),
+                                width: sel ? 2.0 : 1.2,
+                              ),
+                            ),
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(6),
+                              child: ts.isEmpty
+                                  ? Container(
+                                      color: AppColors.surfaceLight,
+                                      alignment: Alignment.center,
+                                      child: const Icon(
+                                          Icons.movie_creation_outlined,
+                                          color: AppColors.textHint,
+                                          size: 16),
+                                    )
+                                  : Row(
+                                      children: [
+                                        for (final t in ts)
+                                          Expanded(
+                                            child: Image.file(
+                                              File(t.path),
+                                              fit: BoxFit.cover,
+                                              gaplessPlayback: true,
+                                              cacheHeight: 160,
+                                              errorBuilder: (_, __, ___) =>
+                                                  Container(
+                                                      color: AppColors
+                                                          .surfaceLight),
+                                            ),
+                                          ),
+                                      ],
+                                    ),
+                            ),
+                          ),
+                          ),
+                        ),
+                      );
+                    }),
+                ] else
+                  for (int i = 0; i < _thumbs.length; i++)
+                    Positioned(
+                      left: _thumbs[i].ms / 1000.0 * _pxPerSec + leftPad,
+                      top: 0,
+                      height: height,
+                      width: ((i + 1 < _thumbs.length
+                                  ? _thumbs[i + 1].ms - _thumbs[i].ms
+                                  : 2000) /
+                              1000.0 *
+                              _pxPerSec) +
+                          1,
+                      child: Image.file(
+                        File(_thumbs[i].path),
+                        fit: BoxFit.cover,
+                        gaplessPlayback: true,
+                        cacheHeight: 160,
+                        errorBuilder: (_, __, ___) =>
+                            Container(color: AppColors.surfaceLight),
+                      ),
                     ),
-                  ),
                 // Dim removed (cut) ranges.
                 for (final r in removed)
                   Positioned(
@@ -4228,10 +5177,43 @@ class _EditorScreenState extends State<EditorScreen>
                           color: Colors.redAccent, size: 12),
                     ),
                   ),
+                // Auto-Cut: shade the silence gaps that WILL be trimmed on
+                // export, so the result is visible before committing.
+                if ((project?.isAutoCut ?? false) && _keptRegions.isNotEmpty)
+                  ...(() {
+                    final gaps = <List<int>>[];
+                    int cursor = 0;
+                    for (final r in _keptRegions) {
+                      if (r[0] > cursor + 80) gaps.add([cursor, r[0]]);
+                      cursor = r[1];
+                    }
+                    if (totalMs > cursor + 80) gaps.add([cursor, totalMs]);
+                    return [
+                      for (final g in gaps)
+                        Positioned(
+                          left: g[0] / 1000.0 * _pxPerSec + leftPad,
+                          top: 0,
+                          height: height,
+                          width: ((g[1] - g[0]) / 1000.0 * _pxPerSec)
+                              .clamp(2.0, 100000.0),
+                          child: IgnorePointer(
+                            child: Container(
+                              color: const Color(0xFFE040FB)
+                                  .withValues(alpha: 0.30),
+                              alignment: Alignment.center,
+                              child: const Icon(Icons.content_cut,
+                                  color: Color(0xFFE040FB), size: 11),
+                            ),
+                          ),
+                        ),
+                    ];
+                  })(),
               ],
             ),
           ),
-          // Clip outlines + tap-to-select + split dividers.
+          // Clip outlines + tap-to-select + split dividers (single-video cuts).
+          // Skipped for multi-clip projects — the per-clip blocks above handle it.
+          if (!mc)
           for (int ci = 0; ci < clips.length; ci++)
             Builder(builder: (_) {
               final clip = clips[ci];
@@ -4376,14 +5358,18 @@ class _EditorScreenState extends State<EditorScreen>
     ProjectProvider provider,
     List<SubtitleSegment> segments,
   ) {
-    if (segments.isEmpty) return const SizedBox.shrink();
     final project = provider.currentProject;
     if (project == null) return const SizedBox.shrink();
+    // Show the toolbar even with no subtitles when this is a multi-clip project
+    // (Edit-Clip mode) so clip tools are reachable.
+    if (segments.isEmpty && project.clips.length < 2) {
+      return const SizedBox.shrink();
+    }
 
     int target = (_selectedIndex != null && _selectedIndex! < segments.length)
         ? _selectedIndex!
         : -1;
-    if (target < 0) {
+    if (target < 0 && segments.isNotEmpty) {
       for (int k = 0; k < segments.length; k++) {
         if (_position >= segments[k].startTime &&
             _position <= segments[k].endTime) {
@@ -4392,8 +5378,10 @@ class _EditorScreenState extends State<EditorScreen>
         }
       }
     }
-    if (target < 0) target = _activeSegmentIndex.clamp(0, segments.length - 1);
-    final i = target;
+    if (target < 0 && segments.isNotEmpty) {
+      target = _activeSegmentIndex.clamp(0, segments.length - 1);
+    }
+    final i = target; // -1 when there are no segments (multi-clip edit mode)
 
     final isSfxSelected = _selectedSfxId != null;
 
@@ -4412,7 +5400,10 @@ class _EditorScreenState extends State<EditorScreen>
           : (highlight ? const Color(0xFFFFD700) : AppColors.textSecondary));
       return GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTap: onTap,
+        onTap: () {
+          HapticFeedback.selectionClick(); // subtle tap feedback (CapCut-feel)
+          onTap();
+        },
         child: Container(
           width: 72,
           padding: const EdgeInsets.symmetric(vertical: 4),
@@ -4454,7 +5445,20 @@ class _EditorScreenState extends State<EditorScreen>
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (_selectedImageId != null) ...[
+              if (_mcSelected >= 0 &&
+                  (provider.currentProject?.clips.length ?? 0) >= 2) ...[
+                // A clip block is selected → clip actions (reorder/split/delete).
+                item(Icons.chevron_left, tr('ed.clipMoveLeft'),
+                    () => _mcMove(provider, -1)),
+                item(Icons.chevron_right, tr('ed.clipMoveRight'),
+                    () => _mcMove(provider, 1)),
+                item(Icons.content_cut_rounded, tr('ed.split'),
+                    () => _mcSplit(provider),
+                    customColor: const Color(0xFF42A5F5)),
+                item(Icons.delete_outline, tr('ed.delete'),
+                    () => _deleteClip(provider, _mcSelected),
+                    danger: true),
+              ] else if (_selectedImageId != null) ...[
                 // Image overlay toolbar: resize, rotate, delete.
                 item(
                   Icons.photo_size_select_large,
@@ -4668,6 +5672,9 @@ class _EditorScreenState extends State<EditorScreen>
                 _autoSyncing ? () {} : () => _autoEmoji(provider),
                 customColor: const Color(0xFFFFB703),
               ),
+              item(Icons.tag, tr('ed.autoHook'),
+                  () => _autoHook(provider),
+                  customColor: const Color(0xFFFFB703)),
 
               // 3. Auto-Cut ✂️ Button
               item(
@@ -4690,7 +5697,23 @@ class _EditorScreenState extends State<EditorScreen>
                 highlight: project.removedRanges.isNotEmpty,
               ),
 
-              // ── Track tools (moved from the Timeline header) ──
+              // 3c. Remove filler words ("um/uh/เออ/อืม/ເອີ") — tightens speech
+              // by cutting each filler word's time span (offline, no AI needed).
+              item(
+                Icons.cleaning_services_rounded,
+                tr('ed.removeFiller'),
+                () => _autoRemoveFiller(provider),
+                customColor: const Color(0xFFFF7043),
+              ),
+
+              // 3d. Text-based editing: tap words in the transcript to cut them.
+              item(
+                Icons.edit_note_rounded,
+                tr('ed.textEdit'),
+                () => _showTextEditSheet(provider),
+                customColor: const Color(0xFF42A5F5),
+              ),
+
               item(Icons.music_note, tr('ed.sfxBtn'),
                   () => _showAddSfxSheet(provider)),
               item(Icons.auto_awesome, tr('ed.autoSfxBtn'),
@@ -4698,6 +5721,9 @@ class _EditorScreenState extends State<EditorScreen>
                   customColor: const Color(0xFFFFB703)),
               item(Icons.tune, tr('ed.mixerBtn'),
                   () => _showAudioMixerSheet(provider)),
+              item(Icons.library_music, tr('ed.webSfx'),
+                  () => _showWebSfxSheet(provider),
+                  customColor: const Color(0xFF00BFA5)),
               item(Icons.image_outlined, tr('ed.image'),
                   () => _pickImageOverlay(provider)),
               item(Icons.video_library_outlined, tr('ed.broll'),
@@ -4712,61 +5738,60 @@ class _EditorScreenState extends State<EditorScreen>
               item(Icons.auto_awesome_motion, tr('ed.autoVisual'),
                   () => _showAutoVisualSheet(provider),
                   customColor: const Color(0xFF7C4DFF)),
-              item(Icons.tag, tr('ed.autoHook'),
-                  () => _autoHook(provider),
-                  customColor: const Color(0xFFFFB703)),
-              item(Icons.library_music, tr('ed.webSfx'),
-                  () => _showWebSfxSheet(provider),
-                  customColor: const Color(0xFF00BFA5)),
               item(Icons.blur_on_rounded, tr('ed.bgBlur'),
                   () => _toggleBgBlur(provider),
                   customColor: (provider.currentProject?.bgBlur ?? false)
                       ? AppColors.primary
                       : AppColors.textHint),
 
-              // Divider line between global AI tools and segment tools
-              Container(
-                width: 1,
-                height: 24,
-                margin: const EdgeInsets.symmetric(horizontal: 6),
-                color: AppColors.border,
-              ),
+              // Segment-specific tools (only when a caption exists at playhead).
+              if (segments.isNotEmpty && i >= 0 && i < segments.length) ...[
+                // Divider line between global AI tools and segment tools
+                Container(
+                  width: 1,
+                  height: 24,
+                  margin: const EdgeInsets.symmetric(horizontal: 6),
+                  color: AppColors.border,
+                ),
 
-              // 4. Split Button
-              item(Icons.content_cut, tr('ed.cut'), () => _splitAtPlayhead(provider, i)),
+                // 4. Split Button
+                item(Icons.content_cut, tr('ed.cut'),
+                    () => _splitAtPlayhead(provider, i)),
 
-              // 5. Merge Button
-              item(Icons.merge, tr('ed.merge'), () => _mergeWithNext(provider, i)),
+                // 5. Merge Button
+                item(Icons.merge, tr('ed.merge'),
+                    () => _mergeWithNext(provider, i)),
 
-              // 6. Copy Button
-              item(
-                Icons.copy_all_outlined,
-                tr('ed.duplicate'),
-                () => _duplicateSegment(provider, i),
-              ),
+                // 6. Copy Button
+                item(
+                  Icons.copy_all_outlined,
+                  tr('ed.duplicate'),
+                  () => _duplicateSegment(provider, i),
+                ),
 
-              // 7. Edit Button
-              item(
-                Icons.edit_outlined,
-                tr('ed.edit'),
-                () => _editSegment(segments[i], i, provider),
-              ),
+                // 7. Edit Button
+                item(
+                  Icons.edit_outlined,
+                  tr('ed.edit'),
+                  () => _editSegment(segments[i], i, provider),
+                ),
 
-              // 8. Style Button
-              item(
-                Icons.palette_outlined,
-                tr('ed.tab.style'),
-                () => _showSegmentStyleSheet(segments[i], i, provider),
-                highlight: segments[i].hasStyleOverride,
-              ),
+                // 8. Style Button
+                item(
+                  Icons.palette_outlined,
+                  tr('ed.tab.style'),
+                  () => _showSegmentStyleSheet(segments[i], i, provider),
+                  highlight: segments[i].hasStyleOverride,
+                ),
 
-              // 9. Delete Button
-              item(
-                Icons.delete_outline,
-                tr('ed.delete'),
-                () => _deleteSegment(provider, i),
-                danger: true,
-              ),
+                // 9. Delete Button
+                item(
+                  Icons.delete_outline,
+                  tr('ed.delete'),
+                  () => _deleteSegment(provider, i),
+                  danger: true,
+                ),
+              ],
               ],
             ],
           ),
@@ -4810,6 +5835,38 @@ class _EditorScreenState extends State<EditorScreen>
     return (blockLanes, laneEndTimes.length);
   }
 
+  /// Stack image/B-roll overlays into separate lanes so overlapping clips don't
+  /// sit on top of each other on one row (like CapCut's overlay tracks).
+  (Map<String, int>, int) _calculateOverlayLanes(List<ImageOverlay> overlays) {
+    if (overlays.isEmpty) return ({}, 0);
+
+    final sorted = List<ImageOverlay>.from(overlays)
+      ..sort((a, b) => a.startTime.compareTo(b.startTime));
+    final lanes = <String, int>{};
+    final laneEndTimes = <int>[]; // end ms for each lane
+
+    for (final ov in sorted) {
+      final startMs = ov.startTime.inMilliseconds;
+      final endMs = ov.endTime.inMilliseconds;
+
+      int assignedLane = -1;
+      for (int i = 0; i < laneEndTimes.length; i++) {
+        if (laneEndTimes[i] <= startMs) {
+          assignedLane = i;
+          laneEndTimes[i] = endMs;
+          break;
+        }
+      }
+      if (assignedLane == -1) {
+        assignedLane = laneEndTimes.length;
+        laneEndTimes.add(endMs);
+      }
+      lanes[ov.id] = assignedLane;
+    }
+
+    return (lanes, laneEndTimes.length);
+  }
+
   /// AI-voice track bar (spans the clip duration at its offset). Drag to move,
   /// tap to select (shows the AI toolbar), and it opens the mixer via toolbar.
   /// Timeline bars for image overlays (one row, like SFX). Drag to move,
@@ -4819,11 +5876,15 @@ class _EditorScreenState extends State<EditorScreen>
     double leftPad,
     int totalMs,
     double top,
-    double h,
-  ) {
+    double h, {
+    Map<String, int> lanes = const {},
+    double laneGap = 4.0,
+  }) {
     final project = provider.currentProject;
     if (project == null) return const [];
     return project.imageOverlays.map((ov) {
+      final lane = lanes[ov.id] ?? 0;
+      final rowTop = top + lane * (h + laneGap);
       final left = (ov.startTime.inMilliseconds / 1000.0) * _pxPerSec + leftPad;
       final w = (((ov.endTime.inMilliseconds - ov.startTime.inMilliseconds) /
                   1000.0) *
@@ -4872,7 +5933,7 @@ class _EditorScreenState extends State<EditorScreen>
           );
 
       return Positioned(
-        top: top,
+        top: rowTop,
         left: left,
         width: w,
         height: h,
@@ -5565,12 +6626,71 @@ class _EditorScreenState extends State<EditorScreen>
     }).toList();
   }
 
+  /// Bottom tools shown when a clip block on the timeline is selected:
+  /// reorder (move left/right), split at playhead, delete.
+  Widget _buildClipToolbar(ProjectProvider provider) {
+    final project = provider.currentProject;
+    if (_mcSelected < 0 || project == null || project.clips.length < 2) {
+      return const SizedBox.shrink();
+    }
+    Widget btn(IconData icon, String label, VoidCallback onTap,
+        {bool danger = false}) {
+      final col = danger ? AppColors.accent : AppColors.textSecondary;
+      return GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: Container(
+          width: 72,
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, size: 20, color: col),
+              const SizedBox(height: 4),
+              Text(label,
+                  textAlign: TextAlign.center,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      color: col, fontSize: 10, fontWeight: FontWeight.w600)),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 2, 12, 8),
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFF7C4DFF)),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceAround,
+        children: [
+          btn(Icons.chevron_left, tr('ed.clipMoveLeft'),
+              () => _mcMove(provider, -1)),
+          btn(Icons.chevron_right, tr('ed.clipMoveRight'),
+              () => _mcMove(provider, 1)),
+          btn(Icons.content_cut_rounded, tr('ed.split'),
+              () => _mcSplit(provider)),
+          btn(Icons.delete_outline, tr('ed.delete'),
+              () => _deleteClip(provider, _mcSelected), danger: true),
+        ],
+      ),
+    );
+  }
+
 Widget _buildTimelineTab() {
     return Consumer<ProjectProvider>(
       builder: (context, provider, _) {
         final project = provider.currentProject;
         final segments = project?.segments ?? [];
-        if (project == null || segments.isEmpty) {
+        // The timeline shows the video filmstrip + clip track even when there
+        // are no subtitles yet (so clips can be cut/trimmed in Edit-Clip mode).
+        if (project == null || project.videoPath == null) {
           return Center(
             child: Text(
               tr('ed.noSubtitle'),
@@ -5580,7 +6700,9 @@ Widget _buildTimelineTab() {
         }
         final totalMs = _duration.inMilliseconds > 0
             ? _duration.inMilliseconds
-            : segments.last.endTime.inMilliseconds + 2000;
+            : (segments.isNotEmpty
+                ? segments.last.endTime.inMilliseconds + 2000
+                : 10000);
 
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -5622,7 +6744,6 @@ Widget _buildTimelineTab() {
                 ],
               ),
             ),
-            // (contextual action toolbar moved to the bottom — _buildSegToolbar)
             Expanded(
               child: LayoutBuilder(
                 builder: (context, constraints) {
@@ -5650,8 +6771,15 @@ Widget _buildTimelineTab() {
                   final hasAiTrack = project.aiVoicePath != null;
                   final imgTop = aiTop + (hasAiTrack ? sfxH + gap : 0);
                   final hasImages = project.imageOverlays.isNotEmpty;
+                  final ovLaneResult =
+                      _calculateOverlayLanes(project.imageOverlays);
+                  final overlayLanes = ovLaneResult.$1;
+                  final numOverlayLanes = math.max(1, ovLaneResult.$2);
+                  // Total height of the (multi-lane) overlay track.
+                  final imgTrackH =
+                      numOverlayLanes * sfxH + (numOverlayLanes - 1) * gap;
                   final totalDynamicHeight =
-                      (hasImages ? imgTop + sfxH : aiTop + sfxH) + 40.0;
+                      (hasImages ? imgTop + imgTrackH : aiTop + sfxH) + 40.0;
                   return Listener(
                     onPointerDown: (e) {
                       _ptrs[e.pointer] = e.position;
@@ -5723,6 +6851,25 @@ Widget _buildTimelineTab() {
                                                 .clamp(0, totalMs);
                                         _seekTo(Duration(milliseconds: ms));
                                         _scrollTimelineToPosition();
+                                        // Multi-clip: tapping the timeline selects
+                                        // the clip block under the tap (robust —
+                                        // no reliance on the block's own gesture).
+                                        if (project.clips.length >= 2) {
+                                          final bounds = _clipBounds(project);
+                                          int idx = bounds.indexWhere((b) =>
+                                              ms >= b.start && ms < b.end);
+                                          if (idx < 0 && bounds.isNotEmpty) {
+                                            idx = bounds.length - 1;
+                                          }
+                                          setState(() {
+                                            _mcSelected = idx;
+                                            _selectedIndex = null;
+                                            _selectedSfxId = null;
+                                            _selectedClipIndex = null;
+                                            _selectedImageId = null;
+                                          });
+                                          return;
+                                        }
                                         if (_selectedIndex != null ||
                                             _selectedSfxId != null ||
                                             _selectedClipIndex != null ||
@@ -5802,7 +6949,7 @@ Widget _buildTimelineTab() {
                                     ..._buildInteractiveSfxBlocks(project.sfxBlocks, blockLanes, provider, leftPad, totalMs, sfxTop, sfxH),
                                   if (project.aiVoicePath != null)
                                     _buildAiVoiceTrackBar(provider, leftPad, totalMs, aiTop, sfxH),
-                                  ..._buildImageOverlayBars(provider, leftPad, totalMs, imgTop, sfxH),
+                                  ..._buildImageOverlayBars(provider, leftPad, totalMs, imgTop, sfxH, lanes: overlayLanes, laneGap: gap),
                                   ],
                                 ),
                               ),
@@ -6790,6 +7937,9 @@ Widget _buildTimelineTab() {
       setDlg?.call(() {});
     }
 
+    // Per-step outcome (true=done, false=failed) → shown as ✓/✗ at the end so
+    // the user can SEE which steps actually ran (e.g. Gemini 503 mid-pipeline).
+    final results = <String, bool>{};
     try {
       provider.pushHistory();
       final segs = project.segments.map((s) => s.copy()).toList();
@@ -6802,7 +7952,10 @@ Widget _buildTimelineTab() {
         try {
           await GeminiSpeechService(apiKey: apiKey)
               .proofreadSegments(segments: segs, language: project.language);
-        } catch (_) {}
+          results['proofread'] = true;
+        } catch (_) {
+          results['proofread'] = false;
+        }
       }
 
       // Karaoke word units (so the colour sweep moves word-by-word).
@@ -6811,7 +7964,10 @@ Widget _buildTimelineTab() {
         try {
           await LaoWordService.refineToRealWords(segs, locale: project.language);
           await LaoWordService.ensureWordUnits(segs, locale: project.language);
-        } catch (_) {}
+          results['karaoke'] = true;
+        } catch (_) {
+          results['karaoke'] = false;
+        }
       }
 
       // Emoji + highlight via Gemini (best-effort; quota-safe internally).
@@ -6819,7 +7975,10 @@ Widget _buildTimelineTab() {
         step(tr('ed.autoEditStepEmoji'));
         try {
           await GeminiSpeechService(apiKey: apiKey).autoEmojiHighlight(segs);
-        } catch (_) {}
+          results['emoji'] = true;
+        } catch (_) {
+          results['emoji'] = false;
+        }
       }
       provider.updateSegments(segs, recordHistory: false);
       if (S['emoji'] == true) {
@@ -6851,24 +8010,29 @@ Widget _buildTimelineTab() {
             sfxCount++;
           }
         }
+        results['sfx'] = true;
       }
 
       // Fade IN/OUT at the very start & end.
       if (S['fade'] == true) {
         step(tr('ed.autoEditStepFade'));
         _addAutoFades(provider);
+        results['fade'] = true;
       }
 
       // Subtle punch-in zoom on emphasised lines.
       if (S['zoom'] == true) {
         step(tr('ed.autoEditStepZoom'));
         _addAutoZooms(provider, segs);
+        results['zoom'] = true;
       }
 
       // Cut silence (Auto-Cut) if not already on.
       if (S['cut'] == true) {
         step(tr('ed.autoEditStepCut'));
-        if (!project.isAutoCut && project.videoPath != null) {
+        if (project.isAutoCut) {
+          results['cut'] = true; // already on
+        } else if (project.videoPath != null) {
           try {
             if (_keptRegions.isEmpty) {
               final flat =
@@ -6882,17 +8046,27 @@ Widget _buildTimelineTab() {
             if (_keptRegions.isNotEmpty) {
               project.isAutoCut = true;
               provider.updateProject(project);
+              results['cut'] = true;
+            } else {
+              results['cut'] = false;
             }
-          } catch (_) {}
+          } catch (_) {
+            results['cut'] = false;
+          }
         }
       }
 
       // Auto B-roll (heavy: network downloads) — last.
       int brollCount = 0;
       if (S['broll'] == true && hasKey) {
-        brollCount = await _runAutoBrollCore(provider, apiKey,
-            onStep: (i, n) =>
-                step(tr('ed.autoBrollStep', {'i': i, 'n': n})));
+        try {
+          brollCount = await _runAutoBrollCore(provider, apiKey,
+              onStep: (i, n) =>
+                  step(tr('ed.autoBrollStep', {'i': i, 'n': n})));
+          results['broll'] = brollCount > 0;
+        } catch (_) {
+          results['broll'] = false;
+        }
       }
 
       provider.commit();
@@ -6900,11 +8074,7 @@ Widget _buildTimelineTab() {
       if (mounted) {
         Navigator.of(context, rootNavigator: true).pop();
         setState(() {});
-        final extra = [
-          if (sfxCount > 0) '$sfxCount SFX',
-          if (brollCount > 0) '$brollCount B-roll',
-        ].join(' · ');
-        _toast('${tr('ed.autoEditDone')}${extra.isNotEmpty ? ' · $extra' : ''}');
+        _showAutoEditSummary(results, sfxCount, brollCount);
       }
     } catch (e) {
       if (mounted) {
@@ -6914,9 +8084,130 @@ Widget _buildTimelineTab() {
     }
   }
 
+  /// Remove every auto-added emoji + emphasis ("punch word") highlight from all
+  /// subtitle lines — the off-switch for Auto Emoji.
+  void _clearEmoji(ProjectProvider provider) {
+    final project = provider.currentProject;
+    if (project == null) return;
+    provider.pushHistory();
+    final segs = project.segments.map((s) => s.copy()).toList();
+    for (final s in segs) {
+      s.emoji = null;
+      s.emphasis = null;
+    }
+    provider.updateSegments(segs);
+    if (mounted) setState(() {});
+    _toast(tr('ed.emojiRemoved'));
+  }
+
+  /// Auto Edit result checklist: which steps ran ✓ and which failed ✗ (e.g.
+  /// a Gemini 503 mid-pipeline) so the user isn't left guessing.
+  void _showAutoEditSummary(Map<String, bool> results, int sfxCount, int brollCount) {
+    if (results.isEmpty) {
+      _toast(tr('ed.autoEditDone'));
+      return;
+    }
+    const labels = <String, String>{
+      'proofread': 'ed.aeProofread',
+      'karaoke': 'ed.aeKaraoke',
+      'emoji': 'ed.aeEmoji',
+      'sfx': 'ed.aeSfx',
+      'fade': 'ed.aeFade',
+      'zoom': 'ed.aeZoom',
+      'cut': 'ed.aeCut',
+      'broll': 'ed.aeBroll',
+    };
+    String suffix(String k) {
+      if (k == 'sfx' && sfxCount > 0) return ' ($sfxCount)';
+      if (k == 'broll' && brollCount > 0) return ' ($brollCount)';
+      return '';
+    }
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text(tr('ed.autoEditDone'),
+            style: const TextStyle(
+                color: AppColors.textPrimary,
+                fontSize: 16,
+                fontWeight: FontWeight.bold)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            for (final e in results.entries)
+              if (labels.containsKey(e.key))
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 3),
+                  child: Row(children: [
+                    Icon(e.value ? Icons.check_circle : Icons.cancel,
+                        size: 17,
+                        color: e.value ? AppColors.success : AppColors.accent),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text('${tr(labels[e.key]!)}${suffix(e.key)}',
+                          style: const TextStyle(
+                              color: AppColors.textSecondary, fontSize: 13)),
+                    ),
+                  ]),
+                ),
+            if (results.values.any((v) => !v)) ...[
+              const SizedBox(height: 8),
+              Text(tr('ed.aeRetryHint'),
+                  style:
+                      const TextStyle(color: AppColors.textHint, fontSize: 11.5)),
+            ],
+          ],
+        ),
+        actions: [
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text(tr('ed.ok')),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _autoEmoji(ProjectProvider provider) async {
     final project = provider.currentProject;
     if (project == null || project.segments.isEmpty) return;
+
+    // If emojis already exist, offer to regenerate or remove them all.
+    final hasEmoji = project.segments
+        .any((s) => (s.emoji ?? '').isNotEmpty || (s.emphasis?.isNotEmpty ?? false));
+    if (hasEmoji) {
+      final choice = await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: AppColors.surface,
+          title: Text(tr('ed.emojiExistTitle'),
+              style: const TextStyle(color: Colors.white)),
+          content: Text(tr('ed.emojiExistMsg'),
+              style: const TextStyle(color: Colors.white70)),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, 'remove'),
+              child: Text(tr('ed.emojiRemove'),
+                  style: const TextStyle(color: AppColors.accent)),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, 'regen'),
+              child: Text(tr('ed.emojiRegen'),
+                  style: const TextStyle(color: AppColors.primary)),
+            ),
+          ],
+        ),
+      );
+      if (choice == 'remove') {
+        _clearEmoji(provider);
+        return;
+      }
+      if (choice != 'regen') return; // dismissed
+    }
+
     if (!_isPro) {
       _showProFeatureDialog(tr('ed.proAutoEmoji'));
       return;
@@ -7166,11 +8457,14 @@ Widget _buildTimelineTab() {
       await LaoWordService.refineToRealWords(segs, locale: project.language);
       // Re-cut subtitles onto the REAL spoken phrases (each subtitle's start/end
       // = the phrase's true boundaries → DURATION matches speech, with pauses).
-      // Prefer Whisper phrase windows (Groq key) — far more accurate for Lao
-      // than energy VAD; fall back to energy VAD, then word-gap re-cut.
+      // Whisper phrase windows (Groq key) are great for languages Whisper knows
+      // — but it CAN'T read Lao, so its Lao timings drift worse and worse over
+      // the clip (same bug fixed in processing v1.2.2). For Lao always use the
+      // language-agnostic energy VAD instead.
       List<List<int>> regions = const [];
       bool usedWhisper = false;
-      final groqKey = await ApiConfig.getGroqKey();
+      final groqKey =
+          project.language == 'lo' ? null : await ApiConfig.getGroqKey();
       if (groqKey != null && groqKey.isNotEmpty) {
         try {
           final wt = await GroqSpeechService(
@@ -7211,9 +8505,24 @@ Widget _buildTimelineTab() {
       // Group syllables into real words (ICU) for word-by-word karaoke.
       await LaoWordService.ensureWordUnits(newSegs, locale: project.language);
 
+      // Never let two captions overlap (same guard as transcription).
+      newSegs.sort((a, b) => a.startTime.compareTo(b.startTime));
+      for (int i = 0; i < newSegs.length - 1; i++) {
+        final cur = newSegs[i];
+        final next = newSegs[i + 1];
+        if (cur.endTime > next.startTime) {
+          cur.endTime = next.startTime.inMilliseconds >
+                  cur.startTime.inMilliseconds
+              ? next.startTime
+              : cur.startTime + const Duration(milliseconds: 300);
+        }
+      }
+
       provider.updateSegments(newSegs);
       setState(() => _syncOffsetMs = 0);
-      final hasGroq = (await ApiConfig.getGroqKey())?.isNotEmpty ?? false;
+      // Groq hint only applies to non-Lao (Lao always uses VAD now).
+      final hasGroq = project.language == 'lo' ||
+          ((await ApiConfig.getGroqKey())?.isNotEmpty ?? false);
       _toast(
         usedWhisper
             ? tr('ed.aiCutSyncWhisper', {'n': newSegs.length})
@@ -9236,17 +10545,6 @@ Widget _buildTimelineTab() {
                 child: ListView(
                   controller: scrollCtrl,
                   children: [
-                    Center(
-                      child: Container(
-                        width: 40,
-                        height: 4,
-                        decoration: BoxDecoration(
-                          color: AppColors.border,
-                          borderRadius: BorderRadius.circular(2),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
                     Row(
                       children: [
                         const Icon(

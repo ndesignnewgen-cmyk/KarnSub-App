@@ -895,10 +895,64 @@ class ShakeEffect {
       );
 }
 
+/// One source clip on a CapCut-style multi-clip timeline. Clips are NOT merged
+/// into a single file — they are played back-to-back (each with its own native
+/// orientation) and concatenated only at export. [trimStartMs]/[trimEndMs] are
+/// in/out points within the source (0/null = whole clip).
+class VideoClip {
+  final String id;
+  String path;
+  int trimStartMs;
+  int? trimEndMs; // null = to the end of the source
+  int? durationMs; // full source duration (cached for the timeline)
+
+  VideoClip({
+    required this.id,
+    required this.path,
+    this.trimStartMs = 0,
+    this.trimEndMs,
+    this.durationMs,
+  });
+
+  /// Length this clip contributes to the timeline (after trim).
+  int get effectiveMs {
+    final end = trimEndMs ?? durationMs ?? 0;
+    final len = end - trimStartMs;
+    return len > 0 ? len : (durationMs ?? 0);
+  }
+
+  VideoClip copy({String? newId}) => VideoClip(
+        id: newId ?? id,
+        path: path,
+        trimStartMs: trimStartMs,
+        trimEndMs: trimEndMs,
+        durationMs: durationMs,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'path': path,
+        'trimStartMs': trimStartMs,
+        if (trimEndMs != null) 'trimEndMs': trimEndMs,
+        if (durationMs != null) 'durationMs': durationMs,
+      };
+
+  static VideoClip fromJson(Map<String, dynamic> j) => VideoClip(
+        id: j['id'] as String,
+        path: j['path'] as String,
+        trimStartMs: (j['trimStartMs'] as num?)?.toInt() ?? 0,
+        trimEndMs: (j['trimEndMs'] as num?)?.toInt(),
+        durationMs: (j['durationMs'] as num?)?.toInt(),
+      );
+}
+
 class SubtitleProject {
   final String id;
   String name;
   String? videoPath;
+  // CapCut-style multi-clip timeline (ordered). Empty = single-video project
+  // (uses [videoPath] as before — fully backward compatible).
+  List<VideoClip> clips;
   String? thumbnailPath;
   AspectRatioMode aspectRatio;
   SubtitlePreset selectedStyle;
@@ -1025,6 +1079,7 @@ class SubtitleProject {
     List<ZoomEffect>? zoomEffects,
     List<FadeEffect>? fadeEffects,
     List<ShakeEffect>? shakeEffects,
+    List<VideoClip>? clips,
     this.bgMusicPath,
     this.bgMusicDurationMs,
     this.bgMusicVolume = 0.45,
@@ -1039,6 +1094,7 @@ class SubtitleProject {
         zoomEffects = zoomEffects ?? [],
         fadeEffects = fadeEffects ?? [],
         shakeEffects = shakeEffects ?? [],
+        clips = clips ?? [],
         createdAt = createdAt ?? DateTime.now();
 }
 

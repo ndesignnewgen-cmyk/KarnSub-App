@@ -67,3 +67,9 @@ android {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // ExoPlayer (Media3) for smooth gapless multi-clip playback (CapCut-style).
+    implementation("androidx.media3:media3-exoplayer:1.4.1")
+    implementation("androidx.media3:media3-common:1.4.1")
+}

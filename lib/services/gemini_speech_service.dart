@@ -1232,13 +1232,19 @@ class GeminiSpeechService {
   Future<List<String>> suggestBrollQueries(List<String> texts) async {
     if (texts.isEmpty) return [];
     final prompt =
-        'For each subtitle line below, give a SHORT English stock-photo search '
-        'query (1-3 words) describing the REAL VISUAL SUBJECT to show as B-roll '
-        '(a concrete, photogenic place/object/scene/food/animal/activity — e.g. '
-        '"mountain lake", "street food", "city at night", "coffee cup", '
-        '"ocean waves", "rice field"). If a line is abstract, filler, a greeting, '
-        'or has nothing concrete to show, return "". Keep the SAME number of '
-        'items (${texts.length}) in order. Return ONLY a JSON array of strings.'
+        'The subtitle lines below are in Lao or Thai. FIRST understand the '
+        'overall topic of the whole script, THEN for each line give a SHORT '
+        'English stock-footage search query (1-3 words) for the REAL VISUAL '
+        'SUBJECT to show as B-roll — a concrete, photogenic '
+        'place/object/scene/food/animal/activity matching the line MEANING in '
+        'context (not a word-by-word translation) — e.g. "mountain lake", '
+        '"street food", "city at night", "coffee cup", "ocean waves", '
+        '"rice field". Prefer generic subjects stock sites surely have; for '
+        'specific people/brands/local places use the generic type instead '
+        '(e.g. a Lao temple → "buddhist temple"). If a line is abstract, '
+        'filler, a greeting, or has nothing concrete to show, return "". '
+        'Keep the SAME number of items (${texts.length}) in order. '
+        'Return ONLY a JSON array of strings.'
         '\n\nInput: ${jsonEncode(texts)}';
     final body = jsonEncode({
       'contents': [{'parts': [{'text': prompt}]}],

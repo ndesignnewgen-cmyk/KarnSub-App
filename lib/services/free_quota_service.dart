@@ -19,7 +19,7 @@ class FreeQuotaService {
   // Daily FHD (1080p) export quota for free users. HD (720p) is unlimited.
   static const _exportDateKey = 'fhd_export_date';
   static const _exportCountKey = 'fhd_export_count';
-  static const int freeFhdPerDay = 1;
+  static const int freeFhdPerDay = 3;
 
   // Daily SRT/VTT subtitle-file export quota for free users.
   static const _srtDateKey = 'srt_export_date';

@@ -65,17 +65,17 @@ class ExportService {
       skipIfExists: false,
     );
 
-    try {
-      File(tempPath).deleteSync();
-    } catch (_) {}
-
     if (!saveResult.isSuccess) {
+      try {
+        File(tempPath).deleteSync();
+      } catch (_) {}
       throw ExportException(
         'ບໍ່ສາມາດບັນທຶກ SRT ໄດ້ (${saveResult.errorMessage ?? ''})',
       );
     }
 
-    return 'Download/SubtitleAI/$fileName';
+    // Keep the temp copy (absolute path) so the caller can share it directly.
+    return tempPath;
   }
 
   /// Export video with subtitles burned in via native MediaCodec + mp4parser muxer.
@@ -403,7 +403,7 @@ class ExportService {
           fileName: fileName,
         );
         onProgress?.call(1.0, 'ສຳເລັດ!');
-        return mixedVideoPath;
+        return mixedVideoPath; // absolute path (mixed_video temp) for sharing
       } catch (e, stack) {
         debugPrint('[ExportService] audio mix failed: $e\n$stack');
         try { File(exportedPath).deleteSync(); } catch (_) {}
@@ -412,7 +412,9 @@ class ExportService {
       }
     } else {
       onProgress?.call(1.0, 'ສຳເລັດ!');
-      return exportedPath;
+      // No audio mix → native saved to gallery and the burned temp file at
+      // tempOutputPath persists; return it (absolute) so it can be shared.
+      return tempOutputPath;
     }
   }
 
@@ -613,7 +615,8 @@ class ExportService {
     try { File(extractedWav).deleteSync(); } catch (_) {}
     try { File(mixedWav).deleteSync(); } catch (_) {}
 
-    return 'Movies/SubtitleAI/$fileName';
+    // mixedVideo persists (saved to gallery + kept on disk) → absolute share path.
+    return mixedVideo;
   }
 
   /// Linear resample of 16-bit mono PCM from [srcRate] to [dstRate], with optional [speed] factor.
