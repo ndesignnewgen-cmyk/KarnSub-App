@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="lo">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KarnSub — ຄູ່ມືໃຊ້ງານ / คู่มือใช้งาน</title>
+<style>
+  :root{
+    --bg:#0B0F16; --surface:#131A24; --surface2:#1D2735; --border:#243140;
+    --primary:#7C6BFF; --primary2:#4F46E5; --accent:#FFCA28; --good:#34D399; --warn:#FFB300; --bad:#FF6B6B;
+    --tx:#EEF3F2; --tx2:#9AAAB4; --hint:#5A6875;
+    --grad:linear-gradient(135deg,#4F46E5,#8C7BFF);
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0;background:var(--bg);color:var(--tx);
+    font-family:"Noto Sans Lao","Leelawadee UI","Segoe UI",system-ui,sans-serif;
+    line-height:1.7;font-size:16px;-webkit-font-smoothing:antialiased;
+  }
+  /* bilingual toggle */
+  body.lo .t{display:none}
+  body.th .l{display:none}
+  a{color:var(--primary);text-decoration:none}
+
+  /* top bar */
+  .top{position:sticky;top:0;z-index:50;background:rgba(11,15,22,.92);
+    backdrop-filter:blur(10px);border-bottom:1px solid var(--border);
+    display:flex;align-items:center;justify-content:space-between;padding:10px 18px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:18px}
+  .logo{width:30px;height:30px;border-radius:9px;background:var(--grad);
+    display:grid;place-items:center;font-size:16px}
+  .langsw{display:flex;background:var(--surface2);border:1px solid var(--border);border-radius:999px;overflow:hidden}
+  .langsw button{border:0;background:transparent;color:var(--tx2);padding:6px 14px;font-weight:700;cursor:pointer;font-size:14px}
+  .langsw button.on{background:var(--grad);color:#fff}
+
+  .wrap{max-width:880px;margin:0 auto;padding:0 18px 80px}
+
+  /* hero */
+  .hero{text-align:center;padding:46px 0 26px}
+  .hero h1{font-size:34px;margin:14px 0 6px;font-weight:800;letter-spacing:-.5px}
+  .hero p{color:var(--tx2);font-size:17px;margin:0 auto;max-width:560px}
+  .pill{display:inline-block;background:var(--surface2);border:1px solid var(--border);
+    color:var(--tx2);border-radius:999px;padding:5px 14px;font-size:13px;margin-top:14px}
+
+  /* TOC */
+  .toc{background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:18px 20px;margin:18px 0 34px}
+  .toc h3{margin:0 0 10px;font-size:15px;color:var(--tx2);font-weight:700;text-transform:uppercase;letter-spacing:1px}
+  .toc ol{margin:0;padding-left:20px;columns:2;column-gap:26px}
+  .toc li{margin:5px 0;break-inside:avoid}
+  @media(max-width:560px){.toc ol{columns:1}}
+
+  /* sections */
+  section{margin:38px 0;scroll-margin-top:70px}
+  .sec-h{display:flex;align-items:center;gap:13px;margin-bottom:6px}
+  .sec-n{flex:none;width:38px;height:38px;border-radius:11px;background:var(--grad);
+    display:grid;place-items:center;font-weight:800;font-size:17px;color:#fff}
+  h2{font-size:23px;margin:0;font-weight:800;letter-spacing:-.3px}
+  .lead{color:var(--tx2);margin:2px 0 16px}
+
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:18px 20px;margin:14px 0}
+  .card h4{margin:0 0 6px;font-size:16px;display:flex;align-items:center;gap:8px}
+  .card p{margin:6px 0;color:var(--tx2)}
+  .ico{font-size:19px}
+
+  ol.steps{counter-reset:s;list-style:none;padding:0;margin:10px 0}
+  ol.steps li{position:relative;padding:8px 0 8px 44px;border-bottom:1px dashed var(--border)}
+  ol.steps li:last-child{border-bottom:0}
+  ol.steps li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:8px;
+    width:28px;height:28px;border-radius:8px;background:var(--surface2);border:1px solid var(--border);
+    color:var(--primary);font-weight:800;display:grid;place-items:center;font-size:14px}
+
+  ul.feat{list-style:none;padding:0;margin:8px 0}
+  ul.feat li{padding:6px 0 6px 26px;position:relative;color:var(--tx2)}
+  ul.feat li::before{content:"▸";position:absolute;left:4px;color:var(--primary);font-weight:800}
+  b,strong{color:var(--tx)}
+
+  .btnchip{display:inline-block;background:var(--surface2);border:1px solid var(--border);border-radius:9px;
+    padding:2px 9px;font-size:13px;color:var(--tx);font-weight:600;white-space:nowrap;margin:1px 0}
+  .gold{color:var(--accent)}
+  .note{background:rgba(124,107,255,.08);border:1px solid rgba(124,107,255,.4);border-radius:13px;
+    padding:12px 16px;margin:14px 0;color:var(--tx2);font-size:15px}
+  .note b{color:var(--primary)}
+  .warnbox{background:rgba(255,179,0,.08);border:1px solid rgba(255,179,0,.45);border-radius:13px;padding:12px 16px;margin:14px 0;color:var(--tx2);font-size:15px}
+  .warnbox b{color:var(--warn)}
+
+  /* table */
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:15px;background:var(--surface);
+    border:1px solid var(--border);border-radius:14px;overflow:hidden}
+  th,td{padding:12px 14px;text-align:left;border-bottom:1px solid var(--border)}
+  th{background:var(--surface2);font-weight:700}
+  td.c,th.c{text-align:center}
+  tr:last-child td{border-bottom:0}
+  .yes{color:var(--good);font-weight:800}
+  .no{color:var(--hint)}
+  .pro-col{background:rgba(124,107,255,.06)}
+
+  .svgwrap{margin:18px 0;text-align:center}
+  .svgwrap svg{max-width:100%;height:auto;border-radius:16px;border:1px solid var(--border);background:var(--surface)}
+  .cap{color:var(--hint);font-size:13px;margin-top:6px}
+
+  .faq{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:6px 18px;margin:10px 0}
+  .faq summary{cursor:pointer;font-weight:700;padding:12px 0;list-style:none}
+  .faq summary::before{content:"+ ";color:var(--primary);font-weight:800}
+  .faq[open] summary::before{content:"– "}
+  .faq p{color:var(--tx2);margin:0 0 14px;padding-left:18px}
+
+  footer{text-align:center;color:var(--hint);font-size:14px;margin-top:50px;padding-top:24px;border-top:1px solid var(--border)}
+
+  @media print{
+    .top{position:static}.langsw,.toc{display:none}
+    body{background:#fff;color:#111}.card,table,.svgwrap svg{break-inside:avoid}
+    body.lo .t,body.th .l{display:none}
+  }
+</style>
+</head>
+<body class="lo">
+
+<div class="top">
+  <div class="brand"><span class="logo">🎬</span> KarnSub</div>
+  <div class="langsw">
+    <button id="bLo" class="on" onclick="setLang('lo')">ລາວ</button>
+    <button id="bTh" onclick="setLang('th')">ไทย</button>
+  </div>
+</div>
+
+<div class="wrap">
+
+  <!-- HERO -->
+  <div class="hero">
+    <div class="svgwrap">
+      <svg viewBox="0 0 360 200" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#4F46E5"/><stop offset="1" stop-color="#8C7BFF"/>
+          </linearGradient>
+          <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#1D2735"/><stop offset="1" stop-color="#0B0F16"/>
+          </linearGradient>
+        </defs>
+        <rect width="360" height="200" fill="url(#sky)"/>
+        <!-- phone -->
+        <rect x="138" y="22" width="84" height="158" rx="14" fill="#0B0F16" stroke="#243140" stroke-width="2"/>
+        <rect x="144" y="30" width="72" height="142" rx="9" fill="#131A24"/>
+        <!-- video scene -->
+        <rect x="144" y="30" width="72" height="142" rx="9" fill="#16202c"/>
+        <circle cx="180" cy="78" r="16" fill="url(#g1)" opacity="0.85"/>
+        <path d="M175 70 l12 8 -12 8 z" fill="#fff"/>
+        <!-- subtitle bar -->
+        <rect x="150" y="128" width="60" height="9" rx="3" fill="#7C6BFF"/>
+        <rect x="156" y="140" width="48" height="7" rx="3" fill="#9AAAB4" opacity="0.6"/>
+        <text x="180" y="136" font-size="6" fill="#fff" text-anchor="middle" font-weight="bold">ສະບາຍດີ ✨</text>
+        <!-- floating emoji/sticker -->
+        <circle cx="118" cy="60" r="15" fill="#FFCA28"/><text x="118" y="65" font-size="14" text-anchor="middle">🔥</text>
+        <circle cx="244" cy="92" r="14" fill="#FF6B6B"/><text x="244" y="97" font-size="13" text-anchor="middle">❤️</text>
+        <circle cx="120" cy="128" r="13" fill="#34D399"/><text x="120" y="133" font-size="12" text-anchor="middle">👍</text>
+        <!-- AI sparkle -->
+        <text x="244" y="48" font-size="16" text-anchor="middle">✨</text>
+      </svg>
+    </div>
+    <h1><span class="l">ຄູ່ມືໃຊ້ງານ KarnSub</span><span class="t">คู่มือใช้งาน KarnSub</span></h1>
+    <p>
+      <span class="l">ສ້າງຊັບໄຕເຕິລ ແລະ ຕັດຕໍ່ຄລິບ short-form ດ້ວຍ AI — ໄວ ງ່າຍ ສວຍ ຮອງຮັບພາສາລາວ ແລະ ໄທ</span>
+      <span class="t">สร้างซับไตเติลและตัดต่อคลิป short-form ด้วย AI — เร็ว ง่าย สวย รองรับภาษาลาวและไทย</span>
+    </p>
+    <div class="pill"><span class="l">📱 ສຳລັບ Android • ໃຊ້ Gemini API Key ຂອງທ່ານເອງ (ຟຣີ)</span><span class="t">📱 สำหรับ Android • ใช้ Gemini API Key ของคุณเอง (ฟรี)</span></div>
+  </div>
+
+  <!-- TOC -->
+  <div class="toc">
+    <h3><span class="l">ສາລະບານ</span><span class="t">สารบัญ</span></h3>
+    <ol>
+      <li><a href="#s1"><span class="l">ກ່ອນເລີ່ມ — ຕ້ອງມີຫຍັງ</span><span class="t">ก่อนเริ่ม — ต้องมีอะไร</span></a></li>
+      <li><a href="#s2"><span class="l">ໃສ່ Gemini Key (ສຳຄັນ)</span><span class="t">ใส่ Gemini Key (สำคัญ)</span></a></li>
+      <li><a href="#s3"><span class="l">ເລີ່ມໃນ 1 ນາທີ</span><span class="t">เริ่มใน 1 นาที</span></a></li>
+      <li><a href="#s4"><span class="l">ສ້າງໂປຣເຈກໃໝ່</span><span class="t">สร้างโปรเจกต์ใหม่</span></a></li>
+      <li><a href="#s5"><span class="l">ຖອດສຽງ &amp; ແປ</span><span class="t">ถอดเสียง &amp; แปล</span></a></li>
+      <li><a href="#s6"><span class="l">ແກ້ຊັບ</span><span class="t">แก้ซับ</span></a></li>
+      <li><a href="#s7"><span class="l">ສໄຕລ໌ຊັບ</span><span class="t">สไตล์ซับ</span></a></li>
+      <li><a href="#s8"><span class="l">ຕຳແໜ່ງຊັບ</span><span class="t">ตำแหน่งซับ</span></a></li>
+      <li><a href="#s9"><span class="l">AI ປຸ່ມດຽວ</span><span class="t">AI ปุ่มเดียว</span></a></li>
+      <li><a href="#s10"><span class="l">ສຽງ &amp; ພາກສຽງ AI</span><span class="t">เสียง &amp; พากย์ AI</span></a></li>
+      <li><a href="#s11"><span class="l">ຮູບ • ສະຕິກເກີ • B-roll</span><span class="t">รูป • สติกเกอร์ • B-roll</span></a></li>
+      <li><a href="#s12"><span class="l">Keyframe (ເຄື່ອນໄຫວ)</span><span class="t">Keyframe (เคลื่อนไหว)</span></a></li>
+      <li><a href="#s13"><span class="l">ຕັດຕໍ່ວິດີໂອ</span><span class="t">ตัดต่อวิดีโอ</span></a></li>
+      <li><a href="#s14"><span class="l">Auto Sync</span><span class="t">Auto Sync</span></a></li>
+      <li><a href="#s15"><span class="l">Export &amp; ແຊร์</span><span class="t">Export &amp; แชร์</span></a></li>
+      <li><a href="#s16"><span class="l">ຟຣີ vs PRO</span><span class="t">ฟรี vs PRO</span></a></li>
+      <li><a href="#s17"><span class="l">ສະໝັກ PRO</span><span class="t">สมัคร PRO</span></a></li>
+      <li><a href="#s18"><span class="l">ເຄັດລັບ</span><span class="t">เคล็ดลับ</span></a></li>
+      <li><a href="#s19"><span class="l">ແກ້ບັນຫາ (FAQ)</span><span class="t">แก้ปัญหา (FAQ)</span></a></li>
+    </ol>
+  </div>
+
+  <!-- 1 -->
+  <section id="s1">
+    <div class="sec-h"><div class="sec-n">1</div><h2><span class="l">ກ່ອນເລີ່ມ — ຕ້ອງມີຫຍັງ</span><span class="t">ก่อนเริ่ม — ต้องมีอะไร</span></h2></div>
+    <p class="lead"><span class="l">KarnSub ໃຊ້ AI ຂອງ Google (Gemini) ໃນການຖອດສຽງ. ທ່ານໃຊ້ key ຂອງຕົນເອງ ຈຶ່ງໃຊ້ໄດ້ຟຣີ ແລະ ປອດໄພ.</span><span class="t">KarnSub ใช้ AI ของ Google (Gemini) ในการถอดเสียง คุณใช้ key ของตัวเอง จึงใช้ได้ฟรีและปลอดภัย</span></p>
+    <div class="card">
+      <ul class="feat">
+        <li><span class="l"><b>ໂທລະສັບ Android</b> (ຕິດຕັ້ງໄຟລ໌ APK ຂອງ KarnSub)</span><span class="t"><b>โทรศัพท์ Android</b> (ติดตั้งไฟล์ APK ของ KarnSub)</span></li>
+        <li><span class="l"><b>Gemini API Key</b> — ຂໍຟຣີຈາກ Google (ເບິ່ງຂັ້ນຕອນຫົວຂໍ້ 2)</span><span class="t"><b>Gemini API Key</b> — ขอฟรีจาก Google (ดูขั้นตอนหัวข้อ 2)</span></li>
+        <li><span class="l"><b>ອິນເຕີເນັດ</b> — ຕ້ອງຕໍ່ເນັດຕອນຖອດສຽງ ແລະ ໂຫຼດ B-roll/ສະຕິກເກີ</span><span class="t"><b>อินเทอร์เน็ต</b> — ต้องต่อเน็ตตอนถอดเสียง และโหลด B-roll/สติกเกอร์</span></li>
+        <li><span class="l"><b>ວິດີໂອ</b> — MP4 / MOV / AVI ຍາວສູງສຸດ 10 ນາທີ</span><span class="t"><b>วิดีโอ</b> — MP4 / MOV / AVI ยาวสูงสุด 10 นาที</span></li>
+      </ul>
+    </div>
+    <div class="note"><span class="l"><b>ໝາຍເຫດ:</b> key ຖືກເກັບໄວ້ໃນເຄື່ອງຂອງທ່ານເທົ່ານັ້ນ ບໍ່ໄດ້ສົ່ງໃຫ້ໃຜ.</span><span class="t"><b>หมายเหตุ:</b> key ถูกเก็บไว้ในเครื่องของคุณเท่านั้น ไม่ได้ส่งให้ใคร</span></div>
+  </section>
+
+  <!-- 2 -->
+  <section id="s2">
+    <div class="sec-h"><div class="sec-n">2</div><h2><span class="l">ໃສ່ Gemini Key (ສຳຄັນ)</span><span class="t">ใส่ Gemini Key (สำคัญ)</span></h2></div>
+    <p class="lead"><span class="l">ນີ້ຄືຂັ້ນຕອນດຽວທີ່ຕ້ອງເຮັດເທື່ອທຳອິດ — ເຮັດເທື່ອດຽວ ໃຊ້ໄດ້ຕະຫຼອດ.</span><span class="t">นี่คือขั้นตอนเดียวที่ต้องทำครั้งแรก — ทำครั้งเดียวใช้ได้ตลอด</span></p>
+    <div class="card">
+      <h4><span class="ico">🔑</span> <span class="l">ວິທີຂໍ Gemini Key (ຟຣີ)</span><span class="t">วิธีขอ Gemini Key (ฟรี)</span></h4>
+      <ol class="steps">
+        <li><span class="l">ເປີດ <b>aistudio.google.com</b> → ລ໋ອກອິນ Google</span><span class="t">เปิด <b>aistudio.google.com</b> → ล็อกอิน Google</span></li>
+        <li><span class="l">ກົດ <b>“Get API key”</b> → <b>“Create API key”</b></span><span class="t">กด <b>“Get API key”</b> → <b>“Create API key”</b></span></li>
+        <li><span class="l">ກ໊ອບລະຫັດ key ທີ່ໄດ້</span><span class="t">ก๊อบรหัส key ที่ได้</span></li>
+        <li><span class="l">ໃນ KarnSub: ໄປ <span class="btnchip">ຕັ້ງຄ່າ</span> → <span class="btnchip">ກະແຈ AI (API Keys)</span> → ວາງ key ໃສ່ Gemini → <span class="btnchip">ບັນທຶກ</span></span><span class="t">ใน KarnSub: ไป <span class="btnchip">ตั้งค่า</span> → <span class="btnchip">คีย์ AI (API Keys)</span> → วาง key ใส่ Gemini → <span class="btnchip">บันทึก</span></span></li>
+      </ol>
+    </div>
+    <div class="card">
+      <h4><span class="ico">🧩</span> <span class="l">Key ເສີມ (ທາງເລືອກ — ໃສ່ກໍ່ດີ)</span><span class="t">Key เสริม (ตัวเลือก — ใส่ก็ดี)</span></h4>
+      <ul class="feat">
+        <li><span class="l"><b>Groq</b> (ຟຣີ, console.groq.com) — ຈັບເວລາທຸກຄຳໃຫ້ຕົງສຽງເປ໊ະ ເໝາະຄາລາໂອເກະ</span><span class="t"><b>Groq</b> (ฟรี, console.groq.com) — จับเวลาทุกคำให้ตรงเสียงเป๊ะ เหมาะคาราโอเกะ</span></li>
+        <li><span class="l"><b>OpenAI</b> — Whisper ຖອດສຽງ (ສຳລັບ ໄທ/ອັງກິດ ໄດ້ດີ)</span><span class="t"><b>OpenAI</b> — Whisper ถอดเสียง (สำหรับ ไทย/อังกฤษ ได้ดี)</span></li>
+        <li><span class="l"><b>Tenor</b> — ຄົ້ນ meme GIF • <b>Freesound</b> — ຄົ້ນ SFX ມີມ</span><span class="t"><b>Tenor</b> — ค้น meme GIF • <b>Freesound</b> — ค้น SFX มีม</span></li>
+      </ul>
+    </div>
+    <div class="warnbox"><span class="l"><b>ສຳລັບຊັບລາວ:</b> ໃຊ້ <b>Gemini</b> ດີສຸດ (ຖອດສຽງ + ແປ). ບໍ່ຈຳເປັນຕ້ອງມີ key ອື່ນກໍ່ໃຊ້ໄດ້.</span><span class="t"><b>สำหรับซับลาว:</b> ใช้ <b>Gemini</b> ดีสุด (ถอดเสียง + แปล) ไม่จำเป็นต้องมี key อื่นก็ใช้ได้</span></div>
+  </section>
+
+  <!-- 3 -->
+  <section id="s3">
+    <div class="sec-h"><div class="sec-n">3</div><h2><span class="l">ເລີ່ມໃນ 1 ນາທີ</span><span class="t">เริ่มใน 1 นาที</span></h2></div>
+    <div class="svgwrap">
+      <svg viewBox="0 0 720 130" xmlns="http://www.w3.org/2000/svg">
+        <defs><linearGradient id="g2" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#4F46E5"/><stop offset="1" stop-color="#8C7BFF"/></linearGradient></defs>
+        <g font-family="sans-serif">
+          <!-- nodes -->
+          <g>
+            <circle cx="72" cy="46" r="26" fill="#131A24" stroke="#7C6BFF" stroke-width="2"/><text x="72" y="54" font-size="22" text-anchor="middle">🎞️</text>
+            <text x="72" y="96" font-size="12" fill="#9AAAB4" text-anchor="middle">1</text>
+          </g>
+          <g>
+            <circle cx="216" cy="46" r="26" fill="#131A24" stroke="#7C6BFF" stroke-width="2"/><text x="216" y="54" font-size="22" text-anchor="middle">⚙️</text>
+            <text x="216" y="96" font-size="12" fill="#9AAAB4" text-anchor="middle">2</text>
+          </g>
+          <g>
+            <circle cx="360" cy="46" r="26" fill="#131A24" stroke="#7C6BFF" stroke-width="2"/><text x="360" y="54" font-size="22" text-anchor="middle">🤖</text>
+            <text x="360" y="96" font-size="12" fill="#9AAAB4" text-anchor="middle">3</text>
+          </g>
+          <g>
+            <circle cx="504" cy="46" r="26" fill="#131A24" stroke="#7C6BFF" stroke-width="2"/><text x="504" y="54" font-size="22" text-anchor="middle">✨</text>
+            <text x="504" y="96" font-size="12" fill="#9AAAB4" text-anchor="middle">4</text>
+          </g>
+          <g>
+            <circle cx="648" cy="46" r="26" fill="url(#g2)"/><text x="648" y="54" font-size="22" text-anchor="middle">📤</text>
+            <text x="648" y="96" font-size="12" fill="#9AAAB4" text-anchor="middle">5</text>
+          </g>
+          <!-- arrows -->
+          <line x1="100" y1="46" x2="188" y2="46" stroke="#243140" stroke-width="2"/>
+          <line x1="244" y1="46" x2="332" y2="46" stroke="#243140" stroke-width="2"/>
+          <line x1="388" y1="46" x2="476" y2="46" stroke="#243140" stroke-width="2"/>
+          <line x1="532" y1="46" x2="620" y2="46" stroke="#243140" stroke-width="2"/>
+        </g>
+      </svg>
+      <div class="cap">
+        <span class="l">ເລືອກວິດີໂອ → ຕັ້ງຄ່າ → AI ຖອດສຽງ → ແຕ່ງ → Export</span>
+        <span class="t">เลือกวิดีโอ → ตั้งค่า → AI ถอดเสียง → แต่ง → Export</span>
+      </div>
+    </div>
+    <ol class="steps">
+      <li><span class="l">ໜ້າຫຼັກ → <span class="btnchip">ສ້າງໂປຣເຈກໃໝ່</span> → ແຕະເລືອກວິດີໂອ</span><span class="t">หน้าหลัก → <span class="btnchip">สร้างโปรเจกต์ใหม่</span> → แตะเลือกวิดีโอ</span></li>
+      <li><span class="l">ເລືອກ <b>ພາສາສຽງເວົ້າ</b>, <b>ພາສາຊັບ</b> ແລະ ສໄຕລ໌ → <span class="btnchip">ສ້າງ Subtitle →</span></span><span class="t">เลือก <b>ภาษาเสียงพูด</b>, <b>ภาษาซับ</b> และสไตล์ → <span class="btnchip">สร้างซับไตเติล →</span></span></li>
+      <li><span class="l">ລໍຖ້າ AI ຖອດສຽງ (ບໍ່ເທົ່າໃດວິນາທີ)</span><span class="t">รอ AI ถอดเสียง (ไม่กี่วินาที)</span></li>
+      <li><span class="l">ໃນໜ້າແກ້ໄຂ — ກົດ <span class="btnchip gold">Auto ✨</span> ໃຫ້ AI ໃສ່ emoji + ໄຮໄລ້ + SFX ໃຫ້ ຫຼື ແຕ່ງເອງ</span><span class="t">ในหน้าแก้ไข — กด <span class="btnchip gold">Auto ✨</span> ให้ AI ใส่ emoji + ไฮไลต์ + SFX ให้ หรือแต่งเอง</span></li>
+      <li><span class="l">ກົດ <span class="btnchip">Export</span> → ບັນທຶກ/ແຊร์ລົງ TikTok, Reels, YouTube</span><span class="t">กด <span class="btnchip">Export</span> → บันทึก/แชร์ลง TikTok, Reels, YouTube</span></li>
+    </ol>
+  </section>
+
+  <!-- 4 -->
+  <section id="s4">
+    <div class="sec-h"><div class="sec-n">4</div><h2><span class="l">ສ້າງໂປຣເຈກໃໝ່</span><span class="t">สร้างโปรเจกต์ใหม่</span></h2></div>
+    <p class="lead"><span class="l">ໜ້າຕັ້ງຄ່າກ່ອນຖອດສຽງ — ຕັ້ງໃຫ້ຖືກ ຊັບຈະອອກມາດີ.</span><span class="t">หน้าตั้งค่าก่อนถอดเสียง — ตั้งให้ถูก ซับจะออกมาดี</span></p>
+    <div class="card">
+      <ul class="feat">
+        <li><span class="l"><b>ຊື່ໂປຣເຈກ</b> — ຕັ້ງເພື່ອຫາງ່າຍພາຍຫຼັງ</span><span class="t"><b>ชื่อโปรเจกต์</b> — ตั้งเพื่อหาง่ายภายหลัง</span></li>
+        <li><span class="l"><b>ອັບໂຫລດວິດີໂອ</b> — ແຕະເລືອກ (MP4/MOV/AVI ≤ 10 ນາທີ)</span><span class="t"><b>อัปโหลดวิดีโอ</b> — แตะเลือก (MP4/MOV/AVI ≤ 10 นาที)</span></li>
+        <li><span class="l"><b>ອັດຕາສ່ວນ</b> — 9:16 (ຕັ້ງ), 1:1, 16:9 ຕາມ platform</span><span class="t"><b>อัตราส่วน</b> — 9:16 (แนวตั้ง), 1:1, 16:9 ตาม platform</span></li>
+        <li><span class="l"><b>ພາສາສຽງເວົ້າ</b> — ລາວ / ໄທ / English / Auto</span><span class="t"><b>ภาษาเสียงพูด</b> — ลาว / ไทย / English / Auto</span></li>
+        <li><span class="l"><b>ພາສາຊັບ</b> + <b>Translation Mode</b>: ບໍ່ແປ / ແປພາສາ / ສອງພາສາ</span><span class="t"><b>ภาษาซับ</b> + <b>Translation Mode</b>: ไม่แปล / แปลภาษา / สองภาษา</span></li>
+        <li><span class="l"><b>ການແບ່ງ Subtitle</b> — ແບ່ງເປັນທ່ອນ ຫຼື ແບ່ງເປັນຄຳ (ສຳລັບຄາລາໂອເກะ)</span><span class="t"><b>การแบ่งซับ</b> — แบ่งเป็นท่อน หรือแบ่งเป็นคำ (สำหรับคาราโอเกะ)</span></li>
+        <li><span class="l"><b>ຄຳໃບ້ / ຊື່ສະເພາະ</b> — ໃສ່ຊື່ຄົນ/ຍີ່ຫໍ້/ສະຖານທີ່ (ຄັ່ນດ້ວຍ ,) AI ຈະສະກົດໃຫ້ຖືກ</span><span class="t"><b>คำใบ้ / ชื่อเฉพาะ</b> — ใส่ชื่อคน/แบรนด์/สถานที่ (คั่นด้วย ,) AI จะสะกดให้ถูก</span></li>
+        <li><span class="l"><b>ກວດທານ AI</b> — ໃຫ້ Gemini ກວດສະກົດຫຼັງຖອດສຽງ (ແນະນຳ)</span><span class="t"><b>ตรวจทาน AI</b> — ให้ Gemini ตรวจสะกดหลังถอดเสียง (แนะนำ)</span></li>
+      </ul>
+    </div>
+    <div class="note"><span class="l">ບໍ່ມີວິດີໂອ? ກົດ <b>“ພິມ subtitle ດ້ວຍຕົນເອງ”</b> ກໍ່ໄດ້.</span><span class="t">ไม่มีวิดีโอ? กด <b>“พิมพ์ซับไตเติลเอง”</b> ก็ได้</span></div>
+  </section>
+
+  <!-- 5 -->
+  <section id="s5">
+    <div class="sec-h"><div class="sec-n">5</div><h2><span class="l">ຖອດສຽງ &amp; ແປ</span><span class="t">ถอดเสียง &amp; แปล</span></h2></div>
+    <div class="card">
+      <h4><span class="ico">🧠</span> <span class="l">ເລືອກ AI ຖອດສຽງ</span><span class="t">เลือก AI ถอดเสียง</span></h4>
+      <ul class="feat">
+        <li><span class="l"><b>♊️ Gemini AI</b> — ແນະນຳສຳລັບຊັບລາວ (ຖອດ + ແປໂດຍກົງ)</span><span class="t"><b>♊️ Gemini AI</b> — แนะนำสำหรับซับ (ถอด + แปลโดยตรง)</span></li>
+        <li><span class="l"><b>⚡️ Groq Whisper</b> — ໄວທີ່ສຸດ + ຈັບເວລາລະອຽດ</span><span class="t"><b>⚡️ Groq Whisper</b> — เร็วที่สุด + จับเวลาละเอียด</span></li>
+        <li><span class="l"><b>🧠 OpenAI Whisper</b> — ຈັບເວລາລະອຽດ (ໄທ/ອັງກິດ)</span><span class="t"><b>🧠 OpenAI Whisper</b> — จับเวลาละเอียด (ไทย/อังกฤษ)</span></li>
+      </ul>
+      <p><span class="l">ຈາກນັ້ນແອັບຈະ: ດຶງສຽງ → ຖອດສຽງ → (ແປ) → ຈັບເວລາ → ສ້າງ Subtitle ✅</span><span class="t">จากนั้นแอปจะ: ดึงเสียง → ถอดเสียง → (แปล) → จับเวลา → สร้างซับไตเติล ✅</span></p>
+    </div>
+    <div class="warnbox"><span class="l"><b>ຊັບລາວ:</b> ແອັບປັບໃຫ້ຈັບເວລາຕາມຊ່ວງສຽງເວົ້າ (VAD) ໃຫ້ຕົງ ບໍ່ drift. ຖ້າຍັງເລື່ອນ ໃຊ້ <b>Auto Sync</b> (ຫົວຂໍ້ 14).</span><span class="t"><b>ซับลาว:</b> แอปปรับให้จับเวลาตามช่วงเสียงพูด (VAD) ให้ตรง ไม่ drift ถ้ายังเลื่อนใช้ <b>Auto Sync</b> (หัวข้อ 14)</span></div>
+  </section>
+
+  <!-- 6 -->
+  <section id="s6">
+    <div class="sec-h"><div class="sec-n">6</div><h2><span class="l">ແກ້ຊັບ</span><span class="t">แก้ซับ</span></h2></div>
+    <p class="lead"><span class="l">ໃນໜ້າແກ້ໄຂ ມີ 4 ແທັບ: <span class="btnchip">ແກ້ຊັບ</span> <span class="btnchip">ໄທມ໌ໄລນ໌</span> <span class="btnchip">ສໄຕລ໌</span> <span class="btnchip">ຕຳແໜ່ງ</span></span><span class="t">ในหน้าแก้ไข มี 4 แท็บ: <span class="btnchip">แก้ซับ</span> <span class="btnchip">ไทม์ไลน์</span> <span class="btnchip">สไตล์</span> <span class="btnchip">ตำแหน่ง</span></span></p>
+    <div class="card">
+      <ul class="feat">
+        <li><span class="l">ແຕະປະໂຫຍກໃດໜຶ່ງ → ແກ້ຂໍ້ຄວາມ / ຕັ້ງເວລາເລີ່ມ-ສິ້ນສຸດ</span><span class="t">แตะประโยคใดประโยคหนึ่ง → แก้ข้อความ / ตั้งเวลาเริ่ม-สิ้นสุด</span></li>
+        <li><span class="l"><span class="btnchip">ເພີ່ມ</span> ປະໂຫຍກໃໝ່ • <span class="btnchip">ລຶບ</span> • <span class="btnchip">ລວມ</span> 2 ປະໂຫຍກ • <span class="btnchip">ຕັດແບ່ງ</span></span><span class="t"><span class="btnchip">เพิ่ม</span> ประโยคใหม่ • <span class="btnchip">ลบ</span> • <span class="btnchip">รวม</span> 2 ประโยค • <span class="btnchip">ตัดแบ่ง</span></span></li>
+        <li><span class="l"><b>ຊັບສອງພາສາ</b> — ແຖວ 1 ພາສາຫຼັກ, ແຖວ 2 ຄຳແປ (ຕັ້ງ style ແຍກໄດ້)</span><span class="t"><b>ซับสองภาษา</b> — แถว 1 ภาษาหลัก, แถว 2 คำแปล (ตั้ง style แยกได้)</span></li>
+        <li><span class="l"><b>ແປ Subtitle</b> — ກົດແປເປັນ ລາວ/ໄທ/ອັງກິດ ດ້ວຍ Gemini</span><span class="t"><b>แปลซับไตเติล</b> — กดแปลเป็น ลาว/ไทย/อังกฤษ ด้วย Gemini</span></li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- 7 -->
+  <section id="s7">
+    <div class="sec-h"><div class="sec-n">7</div><h2><span class="l">ສໄຕລ໌ຊັບ</span><span class="t">สไตล์ซับ</span></h2></div>
+    <p class="lead"><span class="l">ປັບໃຫ້ສວຍ ໂດດເດັ່ນ ດຶງສາຍຕາ.</span><span class="t">ปรับให้สวย โดดเด่น ดึงสายตา</span></p>
+    <div class="card">
+      <h4><span class="ico">🎨</span> <span class="l">ປັບໄດ້ຫຍັງແດ່</span><span class="t">ปรับได้อะไรบ้าง</span></h4>
+      <ul class="feat">
+        <li><span class="l"><b>ແມ່ແບບ (Templates)</b> — ກົດເທື່ອດຽວສວຍ ມີຫຼາຍແບບ</span><span class="t"><b>เทมเพลต (Templates)</b> — กดทีเดียวสวย มีหลายแบบ</span></li>
+        <li><span class="l"><b>ຟອນຕ໌</b> — ມີຟອນລາວ/ໄທ ຫຼາຍແບບ + <b>ນຳເຂົ້າ font</b> (.ttf/.otf) ຂອງເຈົ້າເອງ</span><span class="t"><b>ฟอนต์</b> — มีฟอนต์ลาว/ไทยหลายแบบ + <b>นำเข้า font</b> (.ttf/.otf) ของคุณเอง</span></li>
+        <li><span class="l"><b>ສີໂຕໜັງສື</b> • <b>ນ້ຳໜັກ</b> (ບາງ–ໜາສຸດ) • <b>ຂະໜາດ</b></span><span class="t"><b>สีตัวอักษร</b> • <b>น้ำหนัก</b> (บาง–หนาสุด) • <b>ขนาด</b></span></li>
+        <li><span class="l"><b>Animation</b> ຕອນເຂົ້າ/ອອກ — ຂຶ້ນ, ລົງ, ຊ້າຍ, ເດັ້ງ, ພິມດີດ + ປັບຄວາມໄວ</span><span class="t"><b>Animation</b> ตอนเข้า/ออก — ขึ้น, ลง, ซ้าย, เด้ง, พิมพ์ดีด + ปรับความเร็ว</span></li>
+        <li><span class="l"><b>ໄລ່ສี (Karaoke)</b> — ໄຮໄລ້ທີລະຄຳຕາມຈັງຫວະ + ເລືອກສີໄຮໄລ້</span><span class="t"><b>ไล่สี (Karaoke)</b> — ไฮไลต์ทีละคำตามจังหวะ + เลือกสีไฮไลต์</span></li>
+        <li><span class="l"><b>ຂະຫຍາຍຄຳ (Word Pop)</b> — ຄຳທີ່ໄລ່ສີຈະເດັ້ງໃຫຍ່ຂຶ້ນ</span><span class="t"><b>ขยายคำ (Word Pop)</b> — คำที่ไล่สีจะเด้งใหญ่ขึ้น</span></li>
+      </ul>
+    </div>
+    <div class="note"><span class="l">ປັບ <b>“ສໄຕລ໌ປະໂຫຍກນີ້”</b> ສະເພາະອັນດຽວ ຫຼື ກົດ <b>“ໃຊ້ກັບທຸກປະໂຫຍກ”</b> ໃຫ້ເໝືອນກັນໝົດ.</span><span class="t">ปรับ <b>“สไตล์ประโยคนี้”</b> เฉพาะอันเดียว หรือกด <b>“ใช้กับทุกประโยค”</b> ให้เหมือนกันหมด</span></div>
+  </section>
+
+  <!-- 8 -->
+  <section id="s8">
+    <div class="sec-h"><div class="sec-n">8</div><h2><span class="l">ຕຳແໜ່ງຊັບ</span><span class="t">ตำแหน่งซับ</span></h2></div>
+    <div class="card">
+      <ul class="feat">
+        <li><span class="l">ເລືອກ <span class="btnchip">ເທິງ</span> <span class="btnchip">ກາງ</span> <span class="btnchip">ລຸ່ມ</span> ຫຼື ປັບລະອຽດແນວຕັ້ງ %</span><span class="t">เลือก <span class="btnchip">บน</span> <span class="btnchip">กลาง</span> <span class="btnchip">ล่าง</span> หรือปรับละเอียดแนวตั้ง %</span></li>
+        <li><span class="l"><b>ລາກໂດຍກົງເທິງ preview</b> — ຍ້າຍຊັບໄປຕຳແໜ່ງທີ່ຕ້ອງການໄດ້ເລີຍ</span><span class="t"><b>ลากโดยตรงบน preview</b> — ย้ายซับไปตำแหน่งที่ต้องการได้เลย</span></li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- 9 -->
+  <section id="s9">
+    <div class="sec-h"><div class="sec-n">9</div><h2><span class="l">AI ປຸ່ມດຽວ (ໄຮໄລ້)</span><span class="t">AI ปุ่มเดียว (ไฮไลต์)</span></h2></div>
+    <p class="lead"><span class="l">ໃຫ້ AI ແຕ່ງຄລິບໃຫ້ ປະຫຍັດເວລາ.</span><span class="t">ให้ AI แต่งคลิปให้ ประหยัดเวลา</span></p>
+    <div class="card">
+      <h4><span class="gold">✨</span> <span class="l">Auto ✨ (Auto Emoji)</span><span class="t">Auto ✨ (Auto Emoji)</span></h4>
+      <p><span class="l">AI ອ່ານຄຳເວົ້າ → ໃສ່ <b>emoji</b> + <b>ໄຮໄລ້ຄຳເດັດ</b> + <b>SFX</b> ໃຫ້ອັດຕະໂນມັດ. ຢາກປິດ emoji ກໍ່ກົດເອົາອອກໄດ້.</span><span class="t">AI อ่านคำพูด → ใส่ <b>emoji</b> + <b>ไฮไลต์คำเด็ด</b> + <b>SFX</b> ให้อัตโนมัติ อยากปิด emoji ก็กดเอาออกได้</span></p>
+    </div>
+    <div class="card">
+      <h4><span class="gold">🧰</span> <span class="l">Auto Edit (ຕັດຕໍ່ອັດຕະໂນມັດ)</span><span class="t">Auto Edit (ตัดต่ออัตโนมัติ)</span></h4>
+      <p><span class="l">ເລືອກສະເຕັບທີ່ຢາກໃຫ້ AI ເຮັດ ແລ້ວກົດເລີ່ມ:</span><span class="t">เลือกสเต็ปที่อยากให้ AI ทำ แล้วกดเริ่ม:</span></p>
+      <ul class="feat">
+        <li><span class="l">ກວດຄຳຜິດ • ຕັດຄຳ Karaoke • Emoji + ໄຮໄລ້ • SFX • Fade ເຂົ້າ-ອອກ • Zoom ຊ່ວງເນັ້ນ • ຕັດຊ່ວງງຽບ • Auto B-roll</span><span class="t">ตรวจคำผิด • ตัดคำ Karaoke • Emoji + ไฮไลต์ • SFX • Fade เข้า-ออก • Zoom ช่วงเน้น • ตัดช่วงเงียบ • Auto B-roll</span></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4><span class="gold">🎯</span> <span class="l">Auto ອື່ນໆ</span><span class="t">Auto อื่นๆ</span></h4>
+      <ul class="feat">
+        <li><span class="l"><b>Auto B-roll</b> — AI ໃສ່ວິດີໂອ/ຮູບ stock ຕາມເນື້ອຫາ</span><span class="t"><b>Auto B-roll</b> — AI ใส่วิดีโอ/ภาพ stock ตามเนื้อหา</span></li>
+        <li><span class="l"><b>Auto Meme</b> — ໃສ່ GIF ມີມ ຕາມຈັງຫວະ</span><span class="t"><b>Auto Meme</b> — ใส่ GIF มีม ตามจังหวะ</span></li>
+        <li><span class="l"><b>Auto Hook</b> — AI ຄິດ hook + caption + hashtag ໃຫ້</span><span class="t"><b>Auto Hook</b> — AI คิด hook + caption + hashtag ให้</span></li>
+      </ul>
+    </div>
+    <div class="warnbox"><span class="l">ຖ້າຂັ້ນໃດຂຶ້ນ ✗ ມັກເປັນຍ້ອນ server Gemini ແໜ້ນ (503) — ລໍ ໜ້ອຍໜຶ່ງ ແລ້ວກົດຂັ້ນນັ້ນຄືນ.</span><span class="t">ถ้าขั้นไหนขึ้น ✗ มักเป็นเพราะ server Gemini แน่น (503) — รอสักครู่แล้วกดขั้นนั้นใหม่</span></div>
+  </section>
+
+  <!-- 10 -->
+  <section id="s10">
+    <div class="sec-h"><div class="sec-n">10</div><h2><span class="l">ສຽງ &amp; ພາກສຽງ AI</span><span class="t">เสียง &amp; พากย์ AI</span></h2></div>
+    <div class="card">
+      <h4><span class="ico">🎚️</span> <span class="l">ປັບສຽງ (Mixer)</span><span class="t">ปรับเสียง (Mixer)</span></h4>
+      <p><span class="l">3 track ແຍກກັນ — <b>ສຽງຫຼັກ</b> / <b>ສຽງ AI</b> / <b>SFX</b> ປັບລະດັບ + ປິດສຽງແຕ່ລະ track ໄດ້.</span><span class="t">3 track แยกกัน — <b>เสียงหลัก</b> / <b>เสียง AI</b> / <b>SFX</b> ปรับระดับ + ปิดเสียงแต่ละ track ได้</span></p>
+    </div>
+    <div class="card">
+      <h4><span class="ico">🗣️</span> <span class="l">ພາກສຽງ AI (Dubbing)</span><span class="t">พากย์เสียง AI (Dubbing)</span></h4>
+      <p><span class="l">Gemini TTS — 30 ສຽງ ຮອງຮັບ ລາວ/ໄທ/ອັງກິດ. ສຽງ AI ວາງເປັນ track ແຍກ ຫຼິ້ນ sync ກັບວິດີໂອ ລາກ/ປັບ/ລຶບ ໄດ້.</span><span class="t">Gemini TTS — 30 เสียง รองรับ ลาว/ไทย/อังกฤษ เสียง AI วางเป็น track แยก เล่น sync กับวิดีโอ ลาก/ปรับ/ลบ ได้</span></p>
+    </div>
+    <div class="card">
+      <h4><span class="ico">🔊</span> <span class="l">SFX &amp; ເພງ</span><span class="t">SFX &amp; เพลง</span></h4>
+      <ul class="feat">
+        <li><span class="l"><b>SFX</b> ໃນແອັບ + <b>SFX web</b> — ຄົ້ນສຽງເອັບເຟັກ 33,000+ ສຽງ (BBC) ▶ ຟັງກ່ອນ</span><span class="t"><b>SFX</b> ในแอป + <b>SFX web</b> — ค้นเสียงเอฟเฟกต์ 33,000+ เสียง (BBC) ▶ ฟังก่อน</span></li>
+        <li><span class="l"><b>SFX ✨ ອັດຕະໂນมัด</b> — AI ໃສ່ສຽງປະກອບໃຫ້ຕາມເນື້ອຫາ</span><span class="t"><b>SFX ✨ อัตโนมัติ</b> — AI ใส่เสียงประกอบให้ตามเนื้อหา</span></li>
+        <li><span class="l"><b>ເພງພື້ນຫຼັງ</b> + <b>Auto-duck</b> (ຫຼຸດສຽງເພງຕອນເວົ້າ)</span><span class="t"><b>เพลงพื้นหลัง</b> + <b>Auto-duck</b> (ลดเสียงเพลงตอนพูด)</span></li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- 11 -->
+  <section id="s11">
+    <div class="sec-h"><div class="sec-n">11</div><h2><span class="l">ຮູບ • ສະຕິກເກີ • B-roll</span><span class="t">รูป • สติกเกอร์ • B-roll</span></h2></div>
+    <div class="card">
+      <h4><span class="ico">😊</span> <span class="l">ສະຕິກເກີ (ໃໝ່!)</span><span class="t">สติกเกอร์ (ใหม่!)</span></h4>
+      <p><span class="l">ກົດ <span class="btnchip gold">ສະຕິກເກີ</span> → 2 ແທັບ:</span><span class="t">กด <span class="btnchip gold">สติกเกอร์</span> → 2 แท็บ:</span></p>
+      <ul class="feat">
+        <li><span class="l"><b>Emoji</b> — emoji ສີສວຍ ແບ່ງໝວດ (ໜ້າ / ມື / ເດັ່ນ / ສັນຍາລັກ / ສິ່ງຂອງ)</span><span class="t"><b>Emoji</b> — emoji สีสวย แบ่งหมวด (หน้า / มือ / เด่น / สัญลักษณ์ / สิ่งของ)</span></li>
+        <li><span class="l"><b>ໄອຄອນ</b> — ຄົ້ນໄອຄອນຫຼາຍແສນແບບ (ພິມຄຳອັງກິດ ເຊັ່ນ heart, star)</span><span class="t"><b>ไอคอน</b> — ค้นไอคอนหลายแสนแบบ (พิมพ์คำอังกฤษ เช่น heart, star)</span></li>
+      </ul>
+      <p><span class="l">ໃສ່ແລ້ວ ລາກ / ຍ່ໍ-ຂະຫຍາຍ / ໝຸນ / ໃສ່ keyframe ໄດ້.</span><span class="t">ใส่แล้ว ลาก / ย่อ-ขยาย / หมุน / ใส่ keyframe ได้</span></p>
+    </div>
+    <div class="card">
+      <h4><span class="ico">🖼️</span> <span class="l">ຮູບ &amp; B-roll</span><span class="t">รูป &amp; B-roll</span></h4>
+      <ul class="feat">
+        <li><span class="l"><b>ຮູບ</b> — ໃສ່ຮູບຈາກເຄື່ອງ • <b>ຮູບ web</b> — ຄົ້ນຮູບຟຣີ license ສະອາດ</span><span class="t"><b>รูป</b> — ใส่รูปจากเครื่อง • <b>รูป web</b> — ค้นรูปฟรี license สะอาด</span></li>
+        <li><span class="l"><b>B-roll</b> ວິດີໂອຈາກເຄື່ອງ • <b>B-roll web</b> — ຄົ້ນວິດີໂອ stock ຟຣີ (Pixabay/Pexels)</span><span class="t"><b>B-roll</b> วิดีโอจากเครื่อง • <b>B-roll web</b> — ค้นวิดีโอ stock ฟรี (Pixabay/Pexels)</span></li>
+        <li><span class="l">ຕັ້ງ <b>ເຕັມຈໍ</b> ຫຼື <b>ບໍ່ເຕັມຈໍ</b> (ປັບຂະໜາດ/ຍ້າຍ/ໝຸນ/ກັບດ້ານ)</span><span class="t">ตั้ง <b>เต็มจอ</b> หรือ <b>ไม่เต็มจอ</b> (ปรับขนาด/ย้าย/หมุน/พลิก)</span></li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- 12 -->
+  <section id="s12">
+    <div class="sec-h"><div class="sec-n">12</div><h2><span class="l">Keyframe (ເຄື່ອນໄຫວແບບ CapCut)</span><span class="t">Keyframe (เคลื่อนไหวแบบ CapCut)</span></h2></div>
+    <div class="card">
+      <ul class="feat">
+        <li><span class="l">ໃສ່ keyframe ໃຫ້ <b>ຮູບ/ສະຕິກເກີ/B-roll</b> — ຍ້າຍຕຳແໜ່ງ, ຂະໜາດ, ໝຸນ, ໂປ່ງໃສ (opacity)</span><span class="t">ใส่ keyframe ให้ <b>รูป/สติกเกอร์/B-roll</b> — ย้ายตำแหน่ง, ขนาด, หมุน, ความโปร่งใส (opacity)</span></li>
+        <li><span class="l"><b>Zoom / Pan วิดีໂอ</b> — ໃຊ້ນິ້ວ pinch/ລາກ ເທິງ preview ສ້າງ keyframe ຊູມເຂົ້າ-ອອກ</span><span class="t"><b>Zoom / Pan วิดีโอ</b> — ใช้นิ้ว pinch/ลาก บน preview สร้าง keyframe ซูมเข้า-ออก</span></li>
+        <li><span class="l">ແກ້/ລຶບ keyframe + ເລືອກ curve (ease) ໄດ້</span><span class="t">แก้/ลบ keyframe + เลือก curve (ease) ได้</span></li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- 13 -->
+  <section id="s13">
+    <div class="sec-h"><div class="sec-n">13</div><h2><span class="l">ຕັດຕໍ່ວິດີໂອ</span><span class="t">ตัดต่อวิดีโอ</span></h2></div>
+    <div class="card">
+      <ul class="feat">
+        <li><span class="l"><b>AI Auto-Cut ⚡</b> — ຕັດຊ່ວງງຽບ (dead air) ອັດຕະໂນມັດ + ປັບຄວາມເຂັ້ມ (ນຸ້ມ/ກາງ/ແໜ້ນ)</span><span class="t"><b>AI Auto-Cut ⚡</b> — ตัดช่วงเงียบ (dead air) อัตโนมัติ + ปรับความเข้ม (นุ่ม/กลาง/แน่น)</span></li>
+        <li><span class="l"><b>ລບคำน้ำ</b> — ຕັດຄຳ ເອີ/ອື່ມ/ເອີ ໂດຍບໍ່ຕ້ອງໃຊ້ AI</span><span class="t"><b>ลบคำน้ำ</b> — ตัดคำ เออ/อืม โดยไม่ต้องใช้ AI</span></li>
+        <li><span class="l"><b>ຕັດດ້ວຍຂໍ້ຄວາມ</b> — ແຕະຄຳໃນ transcript ເພື່ອຕັດຄຳນັ້ນອອກ</span><span class="t"><b>ตัดด้วยข้อความ</b> — แตะคำใน transcript เพื่อตัดคำนั้นออก</span></li>
+        <li><span class="l"><b>ຕັດຄລິບ / Split / trim</b> — ຊັບ/SFX/ສຽງ AI ເລື່ອນຕາມ (ripple) ໃຫ້ອັດຕະໂນມັດ</span><span class="t"><b>ตัดคลิป / Split / trim</b> — ซับ/SFX/เสียง AI เลื่อนตาม (ripple) ให้อัตโนมัติ</span></li>
+        <li><span class="l"><b>ພື້ນຫຼັງເບລີ (BG Blur)</b> — ເຮັດໃຫ້ວິດີໂອ 9:16 ມີພື້ນຫຼັງນຸ້ມ</span><span class="t"><b>พื้นหลังเบลอ (BG Blur)</b> — ทำให้วิดีโอ 9:16 มีพื้นหลังนุ่ม</span></li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- 14 -->
+  <section id="s14">
+    <div class="sec-h"><div class="sec-n">14</div><h2>Auto Sync</h2></div>
+    <div class="card">
+      <p><span class="l">ຖ້າຊັບເລື່ອນບໍ່ຕົງສຽງ — ກົດ <b>Auto Sync</b> ໃຫ້ AI ຈັບເວລາທຸກປະໂຫຍກໃຫ້ຕົງສຽງເວົ້າຄືນ (ສຳລັບລາວໃຊ້ການກວດຊ່ວງສຽງ VAD, ສຳລັບໄທ/ອັງກິດໃຊ້ Whisper ຖ້າມີ key).</span><span class="t">ถ้าซับเลื่อนไม่ตรงเสียง — กด <b>Auto Sync</b> ให้ AI จับเวลาทุกประโยคให้ตรงเสียงพูดใหม่ (สำหรับลาวใช้การตรวจช่วงเสียง VAD, สำหรับไทย/อังกฤษใช้ Whisper ถ้ามี key)</span></p>
+    </div>
+  </section>
+
+  <!-- 15 -->
+  <section id="s15">
+    <div class="sec-h"><div class="sec-n">15</div><h2><span class="l">Export &amp; ແຊร์</span><span class="t">Export &amp; แชร์</span></h2></div>
+    <div class="card">
+      <ul class="feat">
+        <li><span class="l"><b>Video + Subtitle (Burn-in)</b> — ຊັບຕິດໃນວິດີໂອ ໂພສໄດ້ເລີຍ</span><span class="t"><b>Video + Subtitle (Burn-in)</b> — ซับติดในวิดีโอ โพสต์ได้เลย</span></li>
+        <li><span class="l"><b>SRT File</b> — ໄຟລ໌ຊັບແຍກ (ສຳລັບ YouTube/ໂປຣແກຣມຕັດຕໍ່)</span><span class="t"><b>SRT File</b> — ไฟล์ซับแยก (สำหรับ YouTube/โปรแกรมตัดต่อ)</span></li>
+        <li><span class="l"><b>ຄຸນນະພາບ</b> — FHD (1080p) ຫຼື HD (720p)</span><span class="t"><b>คุณภาพ</b> — FHD (1080p) หรือ HD (720p)</span></li>
+        <li><span class="l"><b>ແຊร์ / ໂພສ</b> — ສົ່ງເຂົ້າ TikTok, Reels, YouTube ໄດ້ໂດຍກົງ</span><span class="t"><b>แชร์ / โพสต์</b> — ส่งเข้า TikTok, Reels, YouTube ได้โดยตรง</span></li>
+      </ul>
+    </div>
+    <div class="warnbox"><span class="l">ຢ່າປິດແອັບ ຫຼື ລັອກໜ້າຈໍ ໃນຂະນະ Export. ຄລິບທີ່ມີ effect/B-roll ຫຼາຍ ຈະໃຊ້ເວລາ render ດົນກວ່າ.</span><span class="t">อย่าปิดแอปหรือล็อกหน้าจอขณะ Export คลิปที่มี effect/B-roll เยอะจะใช้เวลา render นานกว่า</span></div>
+  </section>
+
+  <!-- 16 -->
+  <section id="s16">
+    <div class="sec-h"><div class="sec-n">16</div><h2><span class="l">ຟຣີ vs PRO</span><span class="t">ฟรี vs PRO</span></h2></div>
+    <table>
+      <tr><th><span class="l">ຄຸນສົມບັດ</span><span class="t">คุณสมบัติ</span></th><th class="c"><span class="l">ຟຣີ</span><span class="t">ฟรี</span></th><th class="c pro-col">PRO ✨</th></tr>
+      <tr><td><span class="l">ຖອດສຽງ + ສ້າງຊັບ AI</span><span class="t">ถอดเสียง + สร้างซับ AI</span></td><td class="c yes">✓</td><td class="c pro-col yes">✓</td></tr>
+      <tr><td><span class="l">ສໄຕລ໌ + ແມ່ແບບ + Karaoke</span><span class="t">สไตล์ + เทมเพลต + Karaoke</span></td><td class="c yes">✓</td><td class="c pro-col yes">✓</td></tr>
+      <tr><td><span class="l">ຕັດຕໍ່ (Auto-Cut / ລບคำน้ำ)</span><span class="t">ตัดต่อ (Auto-Cut / ลบคำน้ำ)</span></td><td class="c yes">✓</td><td class="c pro-col yes">✓</td></tr>
+      <tr><td><span class="l">SFX + ສະຕິກເກີ + ຮູບ</span><span class="t">SFX + สติกเกอร์ + รูป</span></td><td class="c yes">✓</td><td class="c pro-col yes">✓</td></tr>
+      <tr><td><span class="l">ບໍ່ມີ watermark</span><span class="t">ไม่มี watermark</span></td><td class="c no">✗</td><td class="c pro-col yes">✓</td></tr>
+      <tr><td><span class="l">ຊັບສອງພາສາ</span><span class="t">ซับสองภาษา</span></td><td class="c no">✗</td><td class="c pro-col yes">✓</td></tr>
+      <tr><td><span class="l">ພາກສຽງ AI (Dubbing)</span><span class="t">พากย์เสียง AI (Dubbing)</span></td><td class="c no">✗</td><td class="c pro-col yes">✓</td></tr>
+      <tr><td><span class="l">B-roll วิดีໂอ + Auto B-roll/Meme</span><span class="t">B-roll วิดีโอ + Auto B-roll/Meme</span></td><td class="c no">✗</td><td class="c pro-col yes">✓</td></tr>
+      <tr><td><span class="l">Export FHD (1080p)</span><span class="t">Export FHD (1080p)</span></td><td class="c"><span class="l">3 ຄັ້ງ/ມື້</span><span class="t">3 ครั้ง/วัน</span></td><td class="c pro-col yes"><span class="l">ບໍ່ຈຳກັດ</span><span class="t">ไม่จำกัด</span></td></tr>
+    </table>
+  </section>
+
+  <!-- 17 -->
+  <section id="s17">
+    <div class="sec-h"><div class="sec-n">17</div><h2><span class="l">ສະໝັກ PRO</span><span class="t">สมัคร PRO</span></h2></div>
+    <div class="card">
+      <h4><span class="gold">💎</span> <span class="l">PRO — 39,000 ກີບ/ເດືອນ</span><span class="t">PRO — 39,000 กีบ/เดือน</span></h4>
+      <p><span class="l">ເຂົ້າ <span class="btnchip">ຕັ້ງຄ່າ</span> → ເລືອກວິທີ:</span><span class="t">เข้า <span class="btnchip">ตั้งค่า</span> → เลือกวิธี:</span></p>
+      <ul class="feat">
+        <li><span class="l"><b>ຈ່າຍ QR (Auto)</b> — ສະແກນ QR ຈ່າຍ → ຖ່າຍ slip ອັບໂຫຼດ → ລະບົບກວດແລ້ວເປີດ PRO ໃຫ້ທັນທີ</span><span class="t"><b>จ่าย QR (Auto)</b> — สแกน QR จ่าย → ถ่าย slip อัปโหลด → ระบบตรวจแล้วเปิด PRO ให้ทันที</span></li>
+        <li><span class="l"><b>ໃສ່ລະຫັດ PRO (Key)</b> — ຖ້າມີລະຫັດແລ້ວ ໃສ່ → ກົດ ເປີດໃຊ້</span><span class="t"><b>ใส่รหัส PRO (Key)</b> — ถ้ามีรหัสแล้ว ใส่ → กด เปิดใช้</span></li>
+        <li><span class="l"><b>ຕິດຕໍ່ຜ່ານ WhatsApp</b> — ສຳລັບຄຳຖາມ ຫຼື ຊື້ດ້ວຍຕົນເອງ</span><span class="t"><b>ติดต่อผ่าน WhatsApp</b> — สำหรับคำถาม หรือซื้อด้วยตัวเอง</span></li>
+      </ul>
+      <p><span class="l">💡 ແນະນຳ <b>Sign in ດ້ວຍ Google</b> ກ່ອນ ເພື່ອເຊື່ອມ PRO ກັບບັນຊີ — ປ່ຽນເຄື່ອງກໍ່ບໍ່ຫາย.</span><span class="t">💡 แนะนำ <b>Sign in ด้วย Google</b> ก่อน เพื่อเชื่อม PRO กับบัญชี — เปลี่ยนเครื่องก็ไม่หาย</span></p>
+    </div>
+  </section>
+
+  <!-- 18 -->
+  <section id="s18">
+    <div class="sec-h"><div class="sec-n">18</div><h2><span class="l">ເຄັດລັບໃຫ້ຄລິບປັງ</span><span class="t">เคล็ดลับให้คลิปปัง</span></h2></div>
+    <div class="card">
+      <ul class="feat">
+        <li><span class="l">ໃສ່ <b>ຄຳໃບ້/ຊື່ສະເພาะ</b> ກ່ອນຖອດສຽງ → ຊື່ຍີ່ຫໍ້/ຄົນ ສະກົດຖືກ</span><span class="t">ใส่ <b>คำใบ้/ชื่อเฉพาะ</b> ก่อนถอดเสียง → ชื่อแบรนด์/คน สะกดถูก</span></li>
+        <li><span class="l">ເປີດ <b>ກວດທານ AI</b> ໃຫ້ຊັບສະອາດ ບໍ່ມີຄຳຜິດ</span><span class="t">เปิด <b>ตรวจทาน AI</b> ให้ซับสะอาด ไม่มีคำผิด</span></li>
+        <li><span class="l">ໃຊ້ <b>Karaoke + Word Pop</b> + <b>Auto ✨</b> → ຄລິບເບິ່ງເປັນມືອາຊີບ ດຶງສາຍຕາ</span><span class="t">ใช้ <b>Karaoke + Word Pop</b> + <b>Auto ✨</b> → คลิปดูมืออาชีพ ดึงสายตา</span></li>
+        <li><span class="l">ໃສ່ <b>Groq key</b> (ຟຣີ) ຖ້າຢາກໃຫ້ Karaoke ຕົງທຸກຄຳ</span><span class="t">ใส่ <b>Groq key</b> (ฟรี) ถ้าอยากให้ Karaoke ตรงทุกคำ</span></li>
+        <li><span class="l">ໃຊ້ <b>Auto-Cut</b> ຕັດຊ່ວງງຽບ → ຄລິບກະທັດຮັດ ຄົນເບິ່ງຈົນຈົບ</span><span class="t">ใช้ <b>Auto-Cut</b> ตัดช่วงเงียบ → คลิปกระชับ คนดูจนจบ</span></li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- 19 -->
+  <section id="s19">
+    <div class="sec-h"><div class="sec-n">19</div><h2><span class="l">ແກ້ບັນຫາ (FAQ)</span><span class="t">แก้ปัญหา (FAQ)</span></h2></div>
+
+    <details class="faq"><summary><span class="l">ຖອດສຽງບໍ່ໄດ້ / ຂຶ້ນ error</span><span class="t">ถอดเสียงไม่ได้ / ขึ้น error</span></summary>
+      <p><span class="l">ກວດວ່າໃສ່ <b>Gemini key</b> ໃນ ຕັ້ງຄ່າ ແລ້ວບໍ ແລະ ຕໍ່ <b>ອິນເຕີເນັດ</b> ຢູ່. ຖ້າຂຶ້ນ <b>503</b> ແມ່ນ server Google ແໜ້ນ — ລໍ ໜ້ອຍໜຶ່ງ ແລ້ວລອງໃໝ່.</span><span class="t">ตรวจว่าใส่ <b>Gemini key</b> ในตั้งค่าแล้วหรือยัง และต่อ <b>อินเทอร์เน็ต</b> อยู่ ถ้าขึ้น <b>503</b> คือ server Google แน่น — รอสักครู่แล้วลองใหม่</span></p>
+    </details>
+    <details class="faq"><summary><span class="l">ຊັບບໍ່ຕົງສຽງ / ເລື່ອນ</span><span class="t">ซับไม่ตรงเสียง / เลื่อน</span></summary>
+      <p><span class="l">ກົດ <b>Auto Sync</b> (ຫົວຂໍ້ 14). ຖ້າຍັງ — ໃສ່ <b>Groq key</b> ຟຣີ ເພື່ອຈັບເວລາລະອຽດ ຫຼື ປັບເວລາເລີ່ມ-ສິ້ນສຸດ ດ້ວຍມືແຕ່ລະປະໂຫຍກ.</span><span class="t">กด <b>Auto Sync</b> (หัวข้อ 14) ถ้ายัง — ใส่ <b>Groq key</b> ฟรีเพื่อจับเวลาละเอียด หรือปรับเวลาเริ่ม-สิ้นสุดด้วยมือแต่ละประโยค</span></p>
+    </details>
+    <details class="faq"><summary><span class="l">ຄຳສະກົດຜິດ</span><span class="t">คำสะกดผิด</span></summary>
+      <p><span class="l">ໃສ່ <b>ຄຳໃບ້/ຊື່ສະເພາະ</b> ກ່ອນຖອດສຽງ + ເປີດ <b>ກວດທານ AI</b>. ຫຼື ແຕະປະໂຫຍກນັ້ນ ແກ້ດ້ວຍມື.</span><span class="t">ใส่ <b>คำใบ้/ชื่อเฉพาะ</b> ก่อนถอดเสียง + เปิด <b>ตรวจทาน AI</b> หรือแตะประโยคนั้นแก้ด้วยมือ</span></p>
+    </details>
+    <details class="faq"><summary><span class="l">ມີ watermark ຕອນ Export</span><span class="t">มี watermark ตอน Export</span></summary>
+      <p><span class="l">watermark ມີໃນຮຸ່ນຟຣີ. ສະໝັກ <b>PRO</b> (ຫົວຂໍ້ 17) ເພື່ອເອົາ watermark ອອກ + ປົດລັອກທຸກຟີເຈີ.</span><span class="t">watermark มีในรุ่นฟรี สมัคร <b>PRO</b> (หัวข้อ 17) เพื่อเอา watermark ออก + ปลดล็อกทุกฟีเจอร์</span></p>
+    </details>
+    <details class="faq"><summary><span class="l">Export FHD ບໍ່ໄດ້ / ໝົດໂຄຕ້າ</span><span class="t">Export FHD ไม่ได้ / หมดโควต้า</span></summary>
+      <p><span class="l">ຮຸ່ນຟຣີໄດ້ FHD 3 ຄັ້ງ/ມື້. ໝົດແລ້ວເລືອກ <b>Export HD (720p)</b> ໄດ້ບໍ່ຈຳກັດ ຫຼື ສະໝັກ PRO.</span><span class="t">รุ่นฟรีได้ FHD 3 ครั้ง/วัน หมดแล้วเลือก <b>Export HD (720p)</b> ได้ไม่จำกัด หรือสมัคร PRO</span></p>
+    </details>
+    <details class="faq"><summary><span class="l">B-roll / ສະຕິກເກີ ໂຫຼດບໍ່ຂຶ້ນ</span><span class="t">B-roll / สติกเกอร์ โหลดไม่ขึ้น</span></summary>
+      <p><span class="l">ຕ້ອງຕໍ່ <b>ອິນເຕີເນັດ</b> (ດຶງຈາກເວັບ). ລອງພິມຄຳຄົ້ນເປັນ <b>ພາສາອັງກິດ</b> ໄດ້ຜົນดีกว่า.</span><span class="t">ต้องต่อ <b>อินเทอร์เน็ต</b> (ดึงจากเว็บ) ลองพิมพ์คำค้นเป็น <b>ภาษาอังกฤษ</b> ได้ผลดีกว่า</span></p>
+    </details>
+  </section>
+
+  <footer>
+    <p><span class="l">ຂອບໃຈທີ່ໃຊ້ KarnSub 💜 — ມີຄຳຖາມ ຕິດຕໍ່ທີມງານໄດ້ສະເໝີ</span><span class="t">ขอบคุณที่ใช้ KarnSub 💜 — มีคำถามติดต่อทีมงานได้เสมอ</span></p>
+    <p>KarnSub • <span class="l">ສ້າງຊັບ AI ລາວ-ໄທ</span><span class="t">สร้างซับ AI ลาว-ไทย</span></p>
+  </footer>
+</div>
+
+<script>
+  function setLang(l){
+    document.body.className=l;
+    document.documentElement.lang=l;
+    document.getElementById('bLo').classList.toggle('on',l==='lo');
+    document.getElementById('bTh').classList.toggle('on',l==='th');
+    try{localStorage.setItem('ks_guide_lang',l);}catch(e){}
+  }
+  (function(){
+    var saved='lo';
+    try{saved=localStorage.getItem('ks_guide_lang')||'lo';}catch(e){}
+    setLang(saved);
+  })();
+</script>
+</body>
+</html>
