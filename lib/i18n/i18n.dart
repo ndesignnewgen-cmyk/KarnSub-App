@@ -382,6 +382,31 @@ const Map<String, Map<String, String>> _strings = {
     'th': 'ดึงรูปฟรี (license สะอาด) → วางบนวิดีโอ ตรงเวลานี้',
   },
   'ed.webImageFail': {'lo': 'ໂຫຼດຮູບບໍ່ໄດ້ — ລອງຮູບອື່ນ', 'th': 'โหลดรูปไม่ได้ — ลองรูปอื่น'},
+  // Sticker picker (Twemoji emoji + Iconify icon search)
+  'ed.sticker': {'lo': 'ສະຕິກເກີ', 'th': 'สติกเกอร์'},
+  'ed.stickerTitle': {'lo': 'ສະຕິກເກີ & ໄອຄອນ', 'th': 'สติกเกอร์ & ไอคอน'},
+  'ed.stickerHelp': {
+    'lo': 'ເລືອກ emoji ຫຼື ຄົ້ນໄອຄອນ → ວາງเທິງວິດີໂອ ຕົງເວລານີ້',
+    'th': 'เลือก emoji หรือค้นไอคอน → วางบนวิดีโอ ตรงเวลานี้',
+  },
+  'ed.stickerEmoji': {'lo': 'Emoji', 'th': 'Emoji'},
+  'ed.stickerIcon': {'lo': 'ໄອຄອນ', 'th': 'ไอคอน'},
+  'ed.stickerSearchHint': {
+    'lo': 'ຄົ້ນໄອຄອນ (ອັງກິດ) ເຊັ່ນ heart, star, like',
+    'th': 'ค้นไอคอน (อังกฤษ) เช่น heart, star, like',
+  },
+  'ed.stickerSearchEmpty': {
+    'lo': 'ພິມຄຳຄົ້ນ (ອັງກິດ) ແລ້ວກົດຄົ້ນຫາ',
+    'th': 'พิมพ์คำค้น (อังกฤษ) แล้วกดค้นหา',
+  },
+  'ed.stickerInserting': {'lo': 'ກຳລັງໃສ່ສະຕິກເກີ...', 'th': 'กำลังใส่สติกเกอร์...'},
+  'ed.stickerAdded': {'lo': 'ໃສ່ສະຕິກເກີແລ້ວ ✓', 'th': 'ใส่สติกเกอร์แล้ว ✓'},
+  'ed.stickerFail': {'lo': 'ໃສ່ສະຕິກເກີບໍ່ໄດ້ — ລອງໃໝ່', 'th': 'ใส่สติกเกอร์ไม่ได้ — ลองใหม่'},
+  'ed.cat_faces': {'lo': 'ໜ້າ', 'th': 'หน้า'},
+  'ed.cat_gestures': {'lo': 'ມື', 'th': 'มือ'},
+  'ed.cat_hot': {'lo': 'ເດັ່ນ', 'th': 'เด่น'},
+  'ed.cat_symbols': {'lo': 'ສັນຍາລັກ', 'th': 'สัญลักษณ์'},
+  'ed.cat_objects': {'lo': 'ສິ່ງຂອງ', 'th': 'สิ่งของ'},
   'ed.webSfx': {'lo': 'SFX web', 'th': 'SFX web'},
   'ed.webSfxHint': {'lo': 'ພິມຄຳຄົ້ນ (ອັງກິດໄດ້ຜົນດີ) ເຊັ່ນ explosion, rain', 'th': 'พิมพ์คำค้น (อังกฤษได้ผลดี) เช่น explosion, rain'},
   'ed.webSfxHelp': {

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart' show Ticker;
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:provider/provider.dart';
 import 'package:video_player/video_player.dart';
 import 'package:audioplayers/audioplayers.dart';
@@ -27,6 +28,7 @@ import '../services/export_service.dart';
 import '../services/subtitle_export_service.dart';
 import '../services/image_search_service.dart';
 import '../services/sfx_search_service.dart';
+import '../services/sticker_service.dart';
 import '../services/lao_font_service.dart';
 import '../services/custom_font_service.dart';
 import '../services/lao_word_service.dart';
@@ -5726,6 +5728,9 @@ class _EditorScreenState extends State<EditorScreen>
                   customColor: const Color(0xFF00BFA5)),
               item(Icons.image_outlined, tr('ed.image'),
                   () => _pickImageOverlay(provider)),
+              item(Icons.emoji_emotions_outlined, tr('ed.sticker'),
+                  () => _showStickerSheet(provider),
+                  customColor: const Color(0xFFFFCA28)),
               item(Icons.video_library_outlined, tr('ed.broll'),
                   () => _pickVideoOverlay(provider),
                   customColor: const Color(0xFF7C4DFF)),
@@ -9187,6 +9192,276 @@ Widget _buildTimelineTab() {
                         Text(tr('ed.webImageInserting'),
                             style: const TextStyle(color: AppColors.textHint, fontSize: 12)),
                       ]),
+                    ),
+                ],
+              ),
+            ),
+          );
+        });
+      },
+    );
+  }
+
+  /// Sticker picker — browse Twemoji emoji (colourful) or search any free icon
+  /// (Iconify). The chosen SVG is rasterised to PNG and dropped in as an
+  /// [ImageOverlay] at the playhead, so drag/scale/keyframe/export all reuse the
+  /// existing overlay pipeline.
+  void _showStickerSheet(ProjectProvider provider) {
+    if (provider.currentProject == null) return;
+    _pauseForEdit();
+    HapticFeedback.selectionClick();
+    const cats = ['faces', 'gestures', 'hot', 'symbols', 'objects'];
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppColors.surface,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) {
+        int tab = 0; // 0 = emoji, 1 = icon search
+        String cat = cats.first;
+        final queryCtrl = TextEditingController();
+        List<String> iconResults = [];
+        bool loading = false;
+        bool inserting = false;
+
+        return StatefulBuilder(builder: (ctx, setSheet) {
+          Future<void> insert(String svgUrl, {required bool tinted}) async {
+            if (inserting) return;
+            setSheet(() => inserting = true);
+            final path = await StickerService.downloadAsPng(svgUrl,
+                size: 384, prefix: tinted ? 'icon' : 'emoji');
+            if (path == null) {
+              setSheet(() => inserting = false);
+              _toast(tr('ed.stickerFail'));
+              return;
+            }
+            final startMs = _position.inMilliseconds;
+            final endMs = (startMs + 3000).clamp(0, _duration.inMilliseconds);
+            final overlay = ImageOverlay(
+              id: const Uuid().v4(),
+              path: path,
+              startTime: Duration(milliseconds: startMs),
+              endTime: Duration(
+                  milliseconds: endMs <= startMs ? startMs + 3000 : endMs),
+              scale: 0.3,
+            );
+            provider.addImageOverlay(overlay);
+            if (ctx.mounted) Navigator.pop(ctx);
+            if (mounted) {
+              setState(() => _selectedImageId = overlay.id);
+              _toast(tr('ed.stickerAdded'));
+            }
+          }
+
+          Future<void> runSearch() async {
+            FocusScope.of(ctx).unfocus();
+            if (queryCtrl.text.trim().isEmpty) return;
+            setSheet(() => loading = true);
+            final r = await StickerService.searchIcons(queryCtrl.text.trim());
+            setSheet(() {
+              iconResults = r;
+              loading = false;
+            });
+          }
+
+          Widget tile(Widget child, VoidCallback onTap) => GestureDetector(
+                onTap: inserting ? null : onTap,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: AppColors.surfaceLight,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  padding: const EdgeInsets.all(8),
+                  child: child,
+                ),
+              );
+
+          final emojiNames = StickerService.emojiCategories[cat] ?? const [];
+
+          return SafeArea(
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(
+                  16, 16, 16, MediaQuery.of(ctx).viewInsets.bottom + 16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(children: [
+                    const Icon(Icons.emoji_emotions,
+                        color: Color(0xFFFFCA28)),
+                    const SizedBox(width: 8),
+                    Text(tr('ed.stickerTitle'),
+                        style: const TextStyle(
+                            color: AppColors.textPrimary,
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold)),
+                  ]),
+                  const SizedBox(height: 4),
+                  Text(tr('ed.stickerHelp'),
+                      style: const TextStyle(
+                          color: AppColors.textHint, fontSize: 11)),
+                  const SizedBox(height: 10),
+                  // Emoji vs Icon-search toggle.
+                  Row(children: [
+                    for (int t = 0; t < 2; t++)
+                      Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: ChoiceChip(
+                          label: Text(
+                              t == 0 ? tr('ed.stickerEmoji') : tr('ed.stickerIcon')),
+                          selected: tab == t,
+                          showCheckmark: false,
+                          labelStyle: TextStyle(
+                              color: tab == t
+                                  ? Colors.white
+                                  : AppColors.textSecondary,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600),
+                          selectedColor: AppColors.primary,
+                          backgroundColor: AppColors.surfaceLight,
+                          onSelected: (_) => setSheet(() => tab = t),
+                        ),
+                      ),
+                  ]),
+                  const SizedBox(height: 10),
+                  if (tab == 0) ...[
+                    // Category chips.
+                    SizedBox(
+                      height: 34,
+                      child: ListView(
+                        scrollDirection: Axis.horizontal,
+                        children: [
+                          for (final c in cats)
+                            Padding(
+                              padding: const EdgeInsets.only(right: 8),
+                              child: ChoiceChip(
+                                label: Text(tr('ed.cat_$c')),
+                                selected: cat == c,
+                                showCheckmark: false,
+                                labelStyle: TextStyle(
+                                    color: cat == c
+                                        ? Colors.white
+                                        : AppColors.textSecondary,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600),
+                                selectedColor: const Color(0xFFFFCA28),
+                                backgroundColor: AppColors.surfaceLight,
+                                onSelected: (_) => setSheet(() => cat = c),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    SizedBox(
+                      height: 300,
+                      child: GridView.builder(
+                        gridDelegate:
+                            const SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: 5,
+                          crossAxisSpacing: 8,
+                          mainAxisSpacing: 8,
+                        ),
+                        itemCount: emojiNames.length,
+                        itemBuilder: (_, i) {
+                          final url =
+                              StickerService.twemojiSvgUrl(emojiNames[i]);
+                          return tile(
+                            SvgPicture.network(url,
+                                placeholderBuilder: (_) => const Center(
+                                    child: SizedBox(
+                                        width: 16,
+                                        height: 16,
+                                        child: CircularProgressIndicator(
+                                            strokeWidth: 2)))),
+                            () => insert(url, tinted: false),
+                          );
+                        },
+                      ),
+                    ),
+                  ] else ...[
+                    Row(children: [
+                      Expanded(
+                        child: TextField(
+                          controller: queryCtrl,
+                          style: const TextStyle(
+                              color: AppColors.textPrimary, fontSize: 14),
+                          textInputAction: TextInputAction.search,
+                          onSubmitted: (_) => runSearch(),
+                          decoration: InputDecoration(
+                            hintText: tr('ed.stickerSearchHint'),
+                            hintStyle: const TextStyle(color: AppColors.textHint),
+                            filled: true,
+                            fillColor: AppColors.surfaceLight,
+                            border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                borderSide: BorderSide.none),
+                            contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 14, vertical: 12),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      IconButton(
+                        onPressed: loading ? null : runSearch,
+                        icon: const Icon(Icons.search, color: AppColors.primary),
+                      ),
+                    ]),
+                    const SizedBox(height: 10),
+                    SizedBox(
+                      height: 280,
+                      child: loading
+                          ? const Center(
+                              child: CircularProgressIndicator(
+                                  color: AppColors.primary))
+                          : iconResults.isEmpty
+                              ? Center(
+                                  child: Text(tr('ed.stickerSearchEmpty'),
+                                      textAlign: TextAlign.center,
+                                      style: const TextStyle(
+                                          color: AppColors.textHint)))
+                              : GridView.builder(
+                                  gridDelegate:
+                                      const SliverGridDelegateWithFixedCrossAxisCount(
+                                    crossAxisCount: 5,
+                                    crossAxisSpacing: 8,
+                                    mainAxisSpacing: 8,
+                                  ),
+                                  itemCount: iconResults.length,
+                                  itemBuilder: (_, i) {
+                                    final url = StickerService.iconifySvgUrl(
+                                        iconResults[i],
+                                        color: 'white');
+                                    return tile(
+                                      SvgPicture.network(url,
+                                          placeholderBuilder: (_) => const SizedBox(
+                                              width: 16,
+                                              height: 16,
+                                              child: CircularProgressIndicator(
+                                                  strokeWidth: 2))),
+                                      () => insert(url, tinted: true),
+                                    );
+                                  },
+                                ),
+                    ),
+                  ],
+                  if (inserting)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            const SizedBox(
+                                width: 14,
+                                height: 14,
+                                child: CircularProgressIndicator(strokeWidth: 2)),
+                            const SizedBox(width: 8),
+                            Text(tr('ed.stickerInserting'),
+                                style: const TextStyle(
+                                    color: AppColors.textHint, fontSize: 12)),
+                          ]),
                     ),
                 ],
               ),
