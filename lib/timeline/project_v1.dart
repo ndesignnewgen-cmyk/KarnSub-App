@@ -1,25 +1,34 @@
 import '../models/subtitle_style_model.dart';
 import '../services/storage_service.dart';
+import 'export_plan.dart';
 import 'timeline_model.dart';
 
-/// v2 [ProjectTimeline] → v1 [SubtitleProject], so the multi-track editor can
-/// drive today's preview player and exporter until the unified engine
-/// (phase 3) replaces them.
+/// v2 [ProjectTimeline] → v1 [SubtitleProject], so today's preview player and
+/// exporter can render what the multi-track editor made.
 ///
-/// The main track becomes a v1 multi-clip list (times are then already on the
-/// cut timeline, so no removedRanges are needed). A main track with a single
-/// clip uses `videoPath` + removedRanges instead (v1 needs ≥ 2 clips for clip
-/// mode) and every other time is shifted back by the clip's in-point.
+/// Two layouts:
+///  * default (preview / classic editor): the main track becomes a v1
+///    multi-clip list on the cut timeline (a single clip uses `videoPath` +
+///    a removed head instead, since v1 clip mode needs ≥ 2 clips);
+///  * [plan] (save / export): ONE file + `removedRanges` on that file's clock
+///    (see [ExportPlan]); every other time is mapped onto that clock. This is
+///    the only layout the exporter renders correctly.
 ///
-/// Things v1 can't express are reported in [V1Projection.lossy] (they keep
-/// living in the timeline; only the old preview/export won't show them).
+/// [rendered] maps element ids to PNGs drawn in Flutter (text layers, shapes,
+/// masked images — see layer_render.dart); those export as image overlays.
+/// Transitions are expressed with the exporter's effects (fade / zoom /
+/// shake). Whatever still can't be shown is listed in [V1Projection.lossy].
 class V1Projection {
   final SubtitleProject project;
   final List<String> lossy;
   const V1Projection(this.project, this.lossy);
 }
 
-V1Projection projectToV1(ProjectTimeline t) {
+/// Transition kinds the current exporter can render (via its effects).
+const exportableTransitions = {'fade', 'zoom', 'shake'};
+
+V1Projection projectToV1(ProjectTimeline t,
+    {ExportPlan? plan, Map<String, String> rendered = const {}}) {
   final lossy = <String>{};
   final s = Map<String, dynamic>.of(t.settings)..remove('v1Dropped');
 
@@ -27,8 +36,8 @@ V1Projection projectToV1(ProjectTimeline t) {
   final main = t.mainTrack;
   final mainEls = main?.elements ?? const <TimelineElement>[];
   final clips = <Map<String, dynamic>>[];
-  var offset = 0; // added to every non-main time (single-clip mode)
-  final removed = <List<int>>[];
+  var offset = 0; // single-clip default layout: added to every other time
+  var removed = <List<int>>[];
   String? videoPath;
   int? videoDurationMs;
   for (final e in mainEls) {
@@ -46,24 +55,32 @@ V1Projection projectToV1(ProjectTimeline t) {
       'trimEndMs': e.trimOutMs,
     });
   }
-  if (clips.length == 1) {
-    final c = clips.single;
-    videoPath = c['path'] as String;
-    final tin = c['trimStartMs'] as int;
-    final tout = c['trimEndMs'] as int;
-    if (tin > 0) removed.add([0, tin]);
-    videoDurationMs = tout; // the tail after the out-point is simply not there
-    offset = tin;
-    clips.clear();
-  } else if (clips.isNotEmpty) {
-    videoPath = clips.first['path'] as String;
-    videoDurationMs = t.mainTrack!.endMs;
-  }
-  int at(int ms) => ms + offset;
 
-  if (t.transitions.isNotEmpty) lossy.add('transitions');
-  if (t.tracksOf(TrackKind.text).any((x) => x.elements.isNotEmpty)) lossy.add('text');
-  if (t.tracksOf(TrackKind.shape).any((x) => x.elements.isNotEmpty)) lossy.add('shape');
+  int Function(int) atS;
+  int Function(int) atE;
+  if (plan != null && clips.isNotEmpty) {
+    videoPath = plan.videoPath;
+    removed = plan.removed.map((r) => List<int>.of(r)).toList();
+    videoDurationMs = plan.originalMs;
+    clips.clear();
+    atS = plan.toOriginal;
+    atE = plan.toOriginalEnd;
+  } else {
+    if (clips.length == 1) {
+      final c = clips.single;
+      videoPath = c['path'] as String;
+      final tin = c['trimStartMs'] as int;
+      if (tin > 0) removed.add([0, tin]);
+      videoDurationMs = c['trimEndMs'] as int; // nothing after the out-point
+      offset = tin;
+      clips.clear();
+    } else if (clips.isNotEmpty) {
+      videoPath = clips.first['path'] as String;
+      videoDurationMs = t.mainTrack!.endMs;
+    }
+    atS = (ms) => ms + offset;
+    atE = atS;
+  }
 
   // ── Everything else ──
   final segments = <Map<String, dynamic>>[];
@@ -72,6 +89,38 @@ V1Projection projectToV1(ProjectTimeline t) {
   final fades = <Map<String, dynamic>>[];
   final shakes = <Map<String, dynamic>>[];
   final sfx = <Map<String, dynamic>>[];
+
+  Map<String, dynamic> overlay(TimelineElement e, String path, ElementTransform tr,
+          List<Keyframe> kfs, bool cover, bool isVideo) =>
+      {
+        'id': e.id,
+        'path': path,
+        'startMs': atS(e.startMs),
+        'endMs': atE(e.endMs),
+        'x': tr.x,
+        'y': tr.y,
+        'scale': tr.scale,
+        'rotation': tr.rotation,
+        'flipH': tr.flipH,
+        'isVideo': isVideo,
+        'cover': cover,
+        'opacity': tr.opacity,
+        'keyframes': [
+          for (final k in kfs)
+            {
+              'timeMs': atS(e.startMs + k.timeMs),
+              'x': k.t.x,
+              'y': k.t.y,
+              'scale': k.t.scale,
+              'rotation': k.t.rotation,
+              'opacity': k.t.opacity,
+              // The exporter knows easings 0–5; a custom bezier is closest
+              // to ease-in-out.
+              'easing': k.easing == 6 ? 3 : k.easing,
+            },
+        ],
+      };
+
   for (final tr in t.tracks) {
     if (tr.kind == TrackKind.mainVideo || tr.hidden) continue;
     for (final e in tr.elements) {
@@ -82,21 +131,35 @@ V1Projection projectToV1(ProjectTimeline t) {
             'id': e.id,
             'text': e.text,
             // v1 segment keys (see StorageService.segmentToJson).
-            'start': at(e.startMs),
-            'end': at(e.endMs),
+            'start': atS(e.startMs),
+            'end': atE(e.endMs),
             if (e.wordStartsMs != null)
-              'wordTimings': e.wordStartsMs!.map((w) => at(e.startMs + w)).toList(),
+              'wordTimings': e.wordStartsMs!.map((w) => atS(e.startMs + w)).toList(),
           });
         case ImageElement():
-          if (e.mask != null || e.blend != LayerBlend.normal) lossy.add('maskBlend');
-          overlays.add(_overlay(e.id, e.src, at(e.startMs), at(e.endMs), e.transform,
-              e.keyframes, e.cover, false, at(e.startMs)));
+          if (e.blend != LayerBlend.normal) lossy.add('maskBlend');
+          final png = rendered[e.id];
+          if (e.mask != null && png == null) lossy.add('maskBlend');
+          overlays.add(overlay(e, png ?? e.src, e.transform, e.keyframes, e.cover, false));
         case VideoElement():
           if (e.mask != null || e.blend != LayerBlend.normal) lossy.add('maskBlend');
-          overlays.add(_overlay(e.id, e.src, at(e.startMs), at(e.endMs), e.transform,
-              e.keyframes, e.cover, true, at(e.startMs)));
+          overlays.add(overlay(e, e.src, e.transform, e.keyframes, e.cover, true));
+        case TextElement():
+          final png = rendered[e.id];
+          if (png == null) {
+            lossy.add('text');
+          } else {
+            overlays.add(overlay(e, png, e.transform, e.keyframes, false, false));
+          }
+        case ShapeElement():
+          final png = rendered[e.id];
+          if (png == null) {
+            lossy.add('shape');
+          } else {
+            overlays.add(overlay(e, png, e.transform, e.keyframes, false, false));
+          }
         case EffectElement():
-          final base = {'id': e.id, 'startMs': at(e.startMs), 'endMs': at(e.endMs)};
+          final base = {'id': e.id, 'startMs': atS(e.startMs), 'endMs': atE(e.endMs)};
           switch (e.effect) {
             case 'zoom':
               zooms.add({
@@ -107,7 +170,7 @@ V1Projection projectToV1(ProjectTimeline t) {
                 'focusY': e.params['focusY'] ?? 0.5,
                 'keyframes': [
                   for (final k in (e.params['keyframes'] as List? ?? const []))
-                    {...(k as Map), 'timeMs': at(e.startMs + (k['timeMs'] as num).toInt())},
+                    {...(k as Map), 'timeMs': atS(e.startMs + (k['timeMs'] as num).toInt())},
                 ],
               });
             case 'fade':
@@ -132,7 +195,7 @@ V1Projection projectToV1(ProjectTimeline t) {
           }
           if (tr.kind == TrackKind.voice && e.id == 'aivoice') {
             s['aiVoicePath'] = e.src;
-            s['aiVoiceOffsetMs'] = at(e.startMs);
+            s['aiVoiceOffsetMs'] = atS(e.startMs);
             s['aiVoiceTrimStartMs'] = e.trimInMs;
             s['aiVoiceTrimEndMs'] = e.trimInMs + (e.durationMs * e.speed).round();
             s['aiVoiceDurationMs'] = s['aiVoiceTrimEndMs'];
@@ -146,7 +209,7 @@ V1Projection projectToV1(ProjectTimeline t) {
           sfx.add({
             'id': e.id,
             'type': type.index,
-            'startMs': at(e.startMs),
+            'startMs': atS(e.startMs),
             'durationMs': e.durationMs,
             if (e.trimInMs != 0) 'trimStartMs': e.trimInMs,
             'volume': e.volume,
@@ -159,9 +222,30 @@ V1Projection projectToV1(ProjectTimeline t) {
             s['sfxVolume'] = tr.volume;
             s['sfxMuted'] = tr.muted;
           }
-        case TextElement() || ShapeElement():
-          break; // reported above
       }
+    }
+  }
+
+  // ── Transitions → the exporter's own effects ──
+  for (final x in t.transitions) {
+    final at = main?.elements.where((e) => e.id == x.fromId).firstOrNull?.endMs;
+    if (at == null) continue;
+    final half = x.durationMs ~/ 2;
+    if (half <= 0) continue;
+    final a = atS((at - half).clamp(0, at)), b = atE(at), c = atS(at), d = atE(at + half);
+    switch (x.kind) {
+      case 'fade':
+        fades.add({'id': '${x.fromId}_tout', 'startMs': a, 'endMs': b, 'toBlack': true});
+        fades.add({'id': '${x.fromId}_tin', 'startMs': c, 'endMs': d, 'toBlack': false});
+      case 'zoom':
+        zooms.add({'id': '${x.fromId}_zout', 'startMs': a, 'endMs': b, 'fromScale': 1.0, 'toScale': 1.35,
+            'focusX': 0.5, 'focusY': 0.5, 'keyframes': <Map>[]});
+        zooms.add({'id': '${x.fromId}_zin', 'startMs': c, 'endMs': d, 'fromScale': 1.35, 'toScale': 1.0,
+            'focusX': 0.5, 'focusY': 0.5, 'keyframes': <Map>[]});
+      case 'shake':
+        shakes.add({'id': '${x.fromId}_shk', 'startMs': a, 'endMs': d, 'intensity': 0.05});
+      default:
+        lossy.add('transitions');
     }
   }
 
@@ -196,32 +280,3 @@ V1Projection projectToV1(ProjectTimeline t) {
   };
   return V1Projection(StorageService.projectFromJson(json), lossy.toList()..sort());
 }
-
-Map<String, dynamic> _overlay(String id, String src, int a, int b, ElementTransform t,
-        List<Keyframe> kfs, bool cover, bool isVideo, int startAbs) =>
-    {
-      'id': id,
-      'path': src,
-      'startMs': a,
-      'endMs': b,
-      'x': t.x,
-      'y': t.y,
-      'scale': t.scale,
-      'rotation': t.rotation,
-      'flipH': t.flipH,
-      'isVideo': isVideo,
-      'cover': cover,
-      'opacity': t.opacity,
-      'keyframes': [
-        for (final k in kfs)
-          {
-            'timeMs': startAbs + k.timeMs,
-            'x': k.t.x,
-            'y': k.t.y,
-            'scale': k.t.scale,
-            'rotation': k.t.rotation,
-            'opacity': k.t.opacity,
-            'easing': k.easing,
-          },
-      ],
-    };

@@ -20,11 +20,17 @@ class ProcessingScreen extends StatefulWidget {
   final String aiEngine;
   final bool isReTranscribing;
 
+  /// When set, the finished subtitles are handed back here (and the screen
+  /// pops) instead of replacing the current project's segments. Used by the
+  /// Pro Editor, which transcribes the EDITED timeline's audio.
+  final void Function(List<SubtitleSegment> segments)? onResult;
+
   const ProcessingScreen({
     super.key,
     required this.videoPath,
     this.aiEngine = 'gemini',
     this.isReTranscribing = false,
+    this.onResult,
   });
 
   @override
@@ -362,6 +368,12 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
       }
 
       _fixSubtitleOverlaps(segments); // no two captions on screen at once
+      if (widget.onResult != null) {
+        widget.onResult!(segments);
+        await Future.delayed(const Duration(milliseconds: 500));
+        if (mounted) Navigator.pop(context);
+        return;
+      }
       context.read<ProjectProvider>().updateSegments(segments);
 
       await Future.delayed(const Duration(milliseconds: 700));

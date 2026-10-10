@@ -1,14 +1,19 @@
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../i18n/i18n.dart';
 import '../theme/app_theme.dart';
 import '../timeline/timeline_model.dart';
 import 'pro_editor_controller.dart';
 
-/// CapCut-style multi-track timeline: the playhead stays in the middle and
-/// the tracks scroll under it.
+/// Video frames for the filmstrip: source path → (source ms, jpeg path).
+typedef ThumbMap = Map<String, List<({int ms, String path})>>;
+
+/// CapCut-style multi-track timeline (design screens 01–02): the playhead
+/// stays in the middle and the tracks scroll under it.
 ///   * one-finger drag on empty space → scrub (and scroll tracks vertically)
 ///   * two-finger pinch → zoom
 ///   * tap a block → select (tap empty space → deselect)
@@ -21,6 +26,10 @@ class ProTimelineView extends StatefulWidget {
   final VoidCallback onScrubEnd;
   final VoidCallback onAddClip;
   final void Function(Track track)? onTrackMenu;
+  final ThumbMap thumbs;
+  final VoidCallback? onCover;
+  final void Function(String fromId, String toId)? onTransition;
+  final VoidCallback? onKeyframe;
 
   const ProTimelineView({
     super.key,
@@ -30,39 +39,65 @@ class ProTimelineView extends StatefulWidget {
     required this.onScrubEnd,
     required this.onAddClip,
     this.onTrackMenu,
+    this.thumbs = const {},
+    this.onCover,
+    this.onTransition,
+    this.onKeyframe,
   });
 
   static const double rulerH = 24;
-  static const double mainH = 54;
-  static const double thinH = 28;
-  static const double gap = 4;
-  static const double gutterW = 46;
+  static const double mainH = 56;
+  static const double barH = 14; // thin overlay tracks (stickers, PiP, effects…)
+  static const double subH = 24;
+  static const double audioH = 22;
+  static const double gap = 5;
+  static const double gutterW = 78;
   static const double handleW = 18;
 
-  /// Display order: overlay tracks above the main track, sound/subtitles below.
+  static const overlayKinds = {
+    TrackKind.video, TrackKind.sticker, TrackKind.text, TrackKind.shape, TrackKind.effect,
+  };
+
+  /// Display order: overlay tracks above the main track, subtitles and
+  /// sound below (subtitle → music → voice → sfx → other audio).
   static List<Track> rows(ProjectTimeline t) {
-    const above = {
-      TrackKind.video, TrackKind.sticker, TrackKind.text, TrackKind.shape, TrackKind.effect,
-    };
+    int below(TrackKind k) => switch (k) {
+          TrackKind.subtitle => 0,
+          TrackKind.music => 1,
+          TrackKind.voice => 2,
+          TrackKind.sfx => 3,
+          _ => 4,
+        };
+    final under = t.tracks
+        .where((x) => !overlayKinds.contains(x.kind) && x.kind != TrackKind.mainVideo)
+        .toList()
+      ..sort((a, b) => below(a.kind).compareTo(below(b.kind)));
     return [
-      ...t.tracks.where((x) => above.contains(x.kind)).toList().reversed,
+      ...t.tracks.where((x) => overlayKinds.contains(x.kind)).toList().reversed,
       ...t.tracks.where((x) => x.kind == TrackKind.mainVideo),
-      ...t.tracks.where((x) => !above.contains(x.kind) && x.kind != TrackKind.mainVideo),
+      ...under,
     ];
   }
 
+  static double rowHeight(Track t) => switch (t.kind) {
+        TrackKind.mainVideo => mainH,
+        TrackKind.subtitle => subH,
+        _ when overlayKinds.contains(t.kind) => barH,
+        _ => audioH,
+      };
+
   static Color colorFor(TrackKind k) => switch (k) {
         TrackKind.mainVideo => const Color(0xFF2B3A50),
-        TrackKind.video => const Color(0xFF3B82F6),
+        TrackKind.video => const Color(0xFF4F8BF0),
         TrackKind.sticker => const Color(0xFFF5B100),
         TrackKind.text => const Color(0xFFFF8A3D),
         TrackKind.shape => const Color(0xFFE879F9),
         TrackKind.effect => const Color(0xFF34D399),
-        TrackKind.subtitle => AppColors.primaryDark,
-        TrackKind.music => const Color(0xFF0F766E),
-        TrackKind.voice => const Color(0xFFA23B72),
-        TrackKind.sfx => const Color(0xFFB91C1C),
-        TrackKind.audio => const Color(0xFF0E7490),
+        TrackKind.subtitle => const Color(0xFF5B4FD6),
+        TrackKind.music => const Color(0xFF145C55),
+        TrackKind.voice => const Color(0xFF8A2D63),
+        TrackKind.sfx => const Color(0xFFA32A2A),
+        TrackKind.audio => const Color(0xFF0E5E70),
       };
 
   @override
@@ -78,22 +113,19 @@ class _ProTimelineViewState extends State<ProTimelineView> {
   bool _scrubbing = false;
   bool _rawDrag = false; // a trim handle owns the pointer
 
-  // Trim drag.
   String? _trimId;
   bool _trimLeft = true;
   double _trimStartX = 0;
   int _trimOrigMs = 0;
 
-  // Move drag.
   String? _moveId;
   int _moveOrigStart = 0;
   double _moveStartX = 0;
 
-  double _rowH(Track t) =>
-      t.kind == TrackKind.mainVideo ? ProTimelineView.mainH : ProTimelineView.thinH;
+  double _rowH(Track t) => ProTimelineView.rowHeight(t);
 
   List<(Track, double)> _layout(List<Track> rows) {
-    var y = ProTimelineView.rulerH + ProTimelineView.gap - _vScroll;
+    var y = ProTimelineView.rulerH + ProTimelineView.gap + 4 - _vScroll;
     return [
       for (final r in rows)
         () {
@@ -107,7 +139,7 @@ class _ProTimelineViewState extends State<ProTimelineView> {
   double _contentH(List<Track> rows) =>
       ProTimelineView.rulerH +
       rows.fold<double>(0, (a, r) => a + _rowH(r) + ProTimelineView.gap) +
-      ProTimelineView.gap;
+      ProTimelineView.gap * 2;
 
   @override
   void initState() {
@@ -134,7 +166,7 @@ class _ProTimelineViewState extends State<ProTimelineView> {
     if (mounted) setState(() {});
   }
 
-  // ── Background gestures: scrub / vertical scroll / pinch zoom ────────────
+  // ── Background gestures ──────────────────────────────────────────────────
 
   void _onScaleStart(ScaleStartDetails d) {
     if (_rawDrag) return;
@@ -156,9 +188,7 @@ class _ProTimelineViewState extends State<ProTimelineView> {
       return;
     }
     final dx = d.focalPointDelta.dx;
-    if (dx != 0) {
-      widget.onScrub((c.playhead.value - dx * 1000 / c.pxPerSec).round());
-    }
+    if (dx != 0) widget.onScrub((c.playhead.value - dx * 1000 / c.pxPerSec).round());
     final maxV = math.max(0.0, contentH - viewH);
     final nv = (_vScroll - d.focalPointDelta.dy).clamp(0.0, maxV);
     if (nv != _vScroll) setState(() => _vScroll = nv);
@@ -171,7 +201,7 @@ class _ProTimelineViewState extends State<ProTimelineView> {
     }
   }
 
-  // ── Trim handles (raw pointers, so they never fight the scrub gesture) ───
+  // ── Trim (raw pointers so they never fight the scrub gesture) ────────────
 
   void _trimDown(TimelineElement e, bool left, PointerDownEvent ev) {
     _rawDrag = true;
@@ -186,8 +216,7 @@ class _ProTimelineViewState extends State<ProTimelineView> {
   void _trimMove(PointerMoveEvent ev) {
     final id = _trimId;
     if (id == null) return;
-    final ms = _trimOrigMs + c.pxToMs(ev.position.dx - _trimStartX);
-    c.trimTo(id, leftEdge: _trimLeft, ms: ms);
+    c.trimTo(id, leftEdge: _trimLeft, ms: _trimOrigMs + c.pxToMs(ev.position.dx - _trimStartX));
   }
 
   void _trimUp() {
@@ -217,9 +246,9 @@ class _ProTimelineViewState extends State<ProTimelineView> {
     var target = found.$1;
     if (box != null) {
       final y = box.globalToLocal(d.globalPosition).dy;
-      for (final (tr, top) in layout) {
-        if (y >= top && y < top + _rowH(tr) + ProTimelineView.gap) {
-          target = tr;
+      for (final (track, top) in layout) {
+        if (y >= top && y < top + _rowH(track) + ProTimelineView.gap) {
+          target = track;
           break;
         }
       }
@@ -243,6 +272,7 @@ class _ProTimelineViewState extends State<ProTimelineView> {
       final rows = ProTimelineView.rows(c.timeline);
       final contentH = _contentH(rows);
       final layout = _layout(rows);
+      final selTrack = c.primaryTrack?.id;
       return ClipRect(
         child: ValueListenableBuilder<int>(
           valueListenable: c.playhead,
@@ -275,60 +305,49 @@ class _ProTimelineViewState extends State<ProTimelineView> {
               ),
             ];
 
-            for (final (tr, top) in layout) {
-              final rh = _rowH(tr);
+            for (final (track, top) in layout) {
+              final rh = _rowH(track);
               if (top + rh < ProTimelineView.rulerH || top > h) continue;
-              // Track-level long press (empty part of the row) → track menu.
-              children.add(Positioned(
-                left: 0,
-                right: 0,
-                top: top,
-                height: rh,
-                child: IgnorePointer(
-                  child: Container(
-                    color: tr.kind == TrackKind.mainVideo
-                        ? Colors.transparent
-                        : Colors.white.withValues(alpha: 0.025),
-                  ),
-                ),
-              ));
-              for (final e in tr.elements) {
+              // Other tracks dim while something is selected (design 02).
+              final dim = selTrack != null && selTrack != track.id;
+              for (final e in track.elements) {
                 final l = xOf(e.startMs), r = xOf(e.endMs);
-                if (r < -40 || l > w + 40) continue; // off screen
-                children.add(_block(tr, e, l, r - l, top, rh, layout));
-                if (c.selected.contains(e.id) && !tr.locked) {
-                  // Handles sit just OUTSIDE the block as their own widgets so
-                  // their whole area is touchable.
-                  children.add(_handle(e, true, l - ProTimelineView.handleW, top, rh));
-                  children.add(_handle(e, false, r, top, rh));
+                if (r < -40 || l > w + 40) continue;
+                children.add(_block(track, e, l, r - l, top, rh, layout, w, dim));
+                if (c.selected.contains(e.id) && !track.locked) {
+                  const ht = ProTimelineView.handleW;
+                  final isMain = track.kind == TrackKind.mainVideo;
+                  children.add(_handle(e, true, l - ht, isMain ? top : top - 4, isMain ? rh : rh + 8));
+                  children.add(_handle(e, false, r, isMain ? top : top - 4, isMain ? rh : rh + 8));
                 }
               }
-              if (tr.kind == TrackKind.mainVideo) {
-                final endX = xOf(tr.endMs);
+              if (track.kind == TrackKind.mainVideo) {
+                children.addAll(_transitionMarkers(track, top, rh, xOf, w));
+                final endX = xOf(track.endMs);
                 if (endX < w + 40) {
                   children.add(Positioned(
-                    left: endX + 8,
-                    top: top + (rh - 36) / 2,
+                    left: endX + 10,
+                    top: top + (rh - 38) / 2,
                     child: _addButton(),
                   ));
                 }
                 children.add(Positioned(
                   left: 0,
-                  top: top,
+                  top: top - 2,
                   width: ProTimelineView.gutterW,
-                  height: rh,
-                  child: _gutter(tr),
+                  height: rh + 4,
+                  child: _gutter(track),
                 ));
-              } else if (tr.muted || tr.locked || tr.hidden) {
+              } else if (track.muted || track.locked || track.hidden) {
                 children.add(Positioned(
                   left: 4,
-                  top: top + 4,
-                  child: IgnorePointer(child: _flags(tr)),
+                  top: top + (rh - 12) / 2,
+                  child: IgnorePointer(child: _flags(track)),
                 ));
               }
             }
 
-            if (rows.isEmpty || c.timeline.mainTrack == null) {
+            if (c.timeline.mainTrack == null) {
               children.add(Positioned(
                 left: w / 2 + 12,
                 top: ProTimelineView.rulerH + 20,
@@ -336,7 +355,27 @@ class _ProTimelineViewState extends State<ProTimelineView> {
               ));
             }
 
-            // Playhead.
+            if (c.primary != null && widget.onKeyframe != null) {
+              children.add(Positioned(
+                right: 10,
+                top: ProTimelineView.rulerH + 6,
+                child: GestureDetector(
+                  key: const Key('pe_keyframe'),
+                  onTap: widget.onKeyframe,
+                  child: Container(
+                    width: 34,
+                    height: 34,
+                    decoration: BoxDecoration(
+                      color: AppColors.surfaceLight,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(Icons.control_point_duplicate,
+                        size: 18, color: AppColors.textPrimary),
+                  ),
+                ),
+              ));
+            }
+
             children.add(Positioned(
               left: w / 2 - 1,
               top: 0,
@@ -351,66 +390,179 @@ class _ProTimelineViewState extends State<ProTimelineView> {
     });
   }
 
+  List<Widget> _transitionMarkers(
+      Track track, double top, double rh, double Function(int) xOf, double w) {
+    final out = <Widget>[];
+    final els = track.elements;
+    for (var i = 0; i + 1 < els.length; i++) {
+      final a = els[i], b = els[i + 1];
+      if (a.endMs != b.startMs) continue;
+      final x = xOf(a.endMs);
+      if (x < -20 || x > w + 20) continue;
+      final has = c.timeline.transitions.any((t) => t.fromId == a.id && t.toId == b.id);
+      out.add(Positioned(
+        key: Key('pe_tr_${a.id}'),
+        left: x - 11,
+        top: top + (rh - 22) / 2,
+        child: GestureDetector(
+          onTap: widget.onTransition == null ? null : () => widget.onTransition!(a.id, b.id),
+          child: Container(
+            width: 22,
+            height: 22,
+            decoration: BoxDecoration(
+              color: has ? AppColors.primary : Colors.white,
+              borderRadius: BorderRadius.circular(5),
+              boxShadow: const [BoxShadow(blurRadius: 3, color: Colors.black45)],
+            ),
+            child: Icon(Icons.compare_arrows, size: 14, color: has ? Colors.white : Colors.black87),
+          ),
+        ),
+      ));
+    }
+    return out;
+  }
+
   Widget _addButton() => GestureDetector(
         key: const Key('pe_addClip'),
         onTap: widget.onAddClip,
         child: Container(
-          width: 36,
-          height: 36,
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(8),
-          ),
+          width: 38,
+          height: 38,
+          decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(8)),
           child: const Icon(Icons.add, color: Colors.black),
         ),
       );
 
-  Widget _gutter(Track tr) => GestureDetector(
-        key: const Key('pe_mainGutter'),
-        onTap: () => c.setTrack(tr.id, muted: !tr.muted),
-        onLongPress: widget.onTrackMenu == null ? null : () => widget.onTrackMenu!(tr),
-        child: Container(
-          color: AppColors.background,
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(tr.muted ? Icons.volume_off : Icons.volume_up,
-                  size: 18, color: tr.muted ? AppColors.accent : AppColors.textSecondary),
-              const SizedBox(height: 2),
-              Text(tr.muted ? 'ປິດສຽງ' : 'ສຽງ',
-                  style: const TextStyle(color: AppColors.textHint, fontSize: 9)),
-            ],
+  Widget _gutterTile(IconData icon, String label, VoidCallback? onTap,
+          {Key? key, Color color = AppColors.textSecondary, VoidCallback? onLong}) =>
+      Expanded(
+        child: GestureDetector(
+          key: key,
+          onTap: onTap,
+          onLongPress: onLong,
+          child: Container(
+            margin: const EdgeInsets.symmetric(horizontal: 2),
+            decoration: BoxDecoration(
+              color: AppColors.surfaceLight,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(icon, size: 16, color: color),
+                const SizedBox(height: 3),
+                Text(label,
+                    maxLines: 1,
+                    overflow: TextOverflow.clip,
+                    style: const TextStyle(color: AppColors.textHint, fontSize: 8.5)),
+              ],
+            ),
           ),
         ),
       );
 
-  Widget _flags(Track tr) => Row(
+  Widget _gutter(Track track) => Container(
+        color: AppColors.background,
+        padding: const EdgeInsets.fromLTRB(4, 2, 4, 2),
+        child: Row(
+          children: [
+            _gutterTile(
+              track.muted ? Icons.volume_off : Icons.volume_up,
+              tr('pe.gutter.mute'),
+              () => c.setTrack(track.id, muted: !track.muted),
+              key: const Key('pe_mainGutter'),
+              color: track.muted ? AppColors.accent : AppColors.textSecondary,
+              onLong: widget.onTrackMenu == null ? null : () => widget.onTrackMenu!(track),
+            ),
+            _gutterTile(Icons.edit_outlined, tr('pe.gutter.cover'), widget.onCover,
+                key: const Key('pe_cover')),
+          ],
+        ),
+      );
+
+  Widget _flags(Track track) => Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (tr.muted) const Icon(Icons.volume_off, size: 12, color: Colors.white70),
-          if (tr.locked) const Icon(Icons.lock, size: 12, color: Colors.white70),
-          if (tr.hidden) const Icon(Icons.visibility_off, size: 12, color: Colors.white70),
+          if (track.muted) const Icon(Icons.volume_off, size: 12, color: Colors.white70),
+          if (track.locked) const Icon(Icons.lock, size: 12, color: Colors.white70),
+          if (track.hidden) const Icon(Icons.visibility_off, size: 12, color: Colors.white70),
         ],
       );
 
-  Widget _block(Track tr, TimelineElement e, double left, double width, double top,
-      double rh, List<(Track, double)> layout) {
+  String _labelFor(Track track, TimelineElement e) {
+    String base(String p) => p.split(RegExp(r'[\\/]')).last;
+    switch (e) {
+      case SubtitleElement():
+        return e.text;
+      case TextElement():
+        return e.text;
+      case AudioElement():
+        if (track.kind == TrackKind.voice && e.id == 'aivoice') return tr('pe.aiVoice');
+        var name = e.label ?? base(e.src).replaceFirst('sfx:', '');
+        if (track.kind == TrackKind.music && (e.label == null || e.label == 'music')) {
+          final file = base(e.src);
+          final dot = file.lastIndexOf('.');
+          name = dot > 0 ? file.substring(0, dot) : file;
+        }
+        if (track.kind == TrackKind.music) {
+          return track.duck ? '♪ $name · ${tr('pe.duck')}' : '♪ $name';
+        }
+        return name;
+      case EffectElement():
+        return e.effect;
+      case ShapeElement():
+        return e.shape;
+      case ImageElement():
+        return base(e.src);
+      case VideoElement():
+        return '${(e.durationMs / 1000).toStringAsFixed(1)}s';
+    }
+  }
+
+  Widget _block(Track track, TimelineElement e, double left, double width, double top, double rh,
+      List<(Track, double)> layout, double viewW, bool dimOther) {
     final selected = c.selected.contains(e.id);
-    final color = ProTimelineView.colorFor(tr.kind);
-    final dim = tr.hidden || tr.muted && isAudioKind(tr.kind);
-    final label = switch (e) {
-      SubtitleElement() => e.text,
-      TextElement() => e.text,
-      AudioElement() => e.label ?? e.src.split(RegExp(r'[\\/]')).last.replaceFirst('sfx:', ''),
-      EffectElement() => e.effect,
-      ShapeElement() => e.shape,
-      ImageElement() => e.src.split(RegExp(r'[\\/]')).last,
-      VideoElement() => tr.kind == TrackKind.mainVideo
-          ? '${(e.durationMs / 1000).toStringAsFixed(1)}s'
-          : e.src.split(RegExp(r'[\\/]')).last,
-    };
-    final speedBadge = e is VideoElement && e.speed != 1 ? '${e.speed}×' : null;
+    final isMain = track.kind == TrackKind.mainVideo;
+    final isBar = ProTimelineView.overlayKinds.contains(track.kind);
+    final color = ProTimelineView.colorFor(track.kind);
+    final dim = dimOther || track.hidden || (track.muted && isAudioKind(track.kind));
     final bw = math.max(2.0, width);
+
+    Widget body;
+    if (isMain) {
+      body = _filmstrip(e as VideoElement, left, bw, rh, viewW, selected);
+    } else if (isBar && !selected) {
+      // Thin coloured bar (design 01); a full block when selected.
+      body = Center(
+        child: Container(
+          height: 7,
+          decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(4)),
+        ),
+      );
+    } else {
+      body = Container(
+        margin: const EdgeInsets.symmetric(horizontal: 0.5),
+        padding: const EdgeInsets.symmetric(horizontal: 6),
+        decoration: BoxDecoration(
+          color: color,
+          borderRadius: BorderRadius.circular(5),
+          border: Border.all(
+            color: selected ? Colors.white : Colors.transparent,
+            width: selected ? 2 : 0,
+          ),
+        ),
+        alignment: Alignment.centerLeft,
+        child: bw < 24 || isBar
+            ? null
+            : Text(_labelFor(track, e),
+                maxLines: 1,
+                overflow: TextOverflow.clip,
+                softWrap: false,
+                style: const TextStyle(
+                    color: Colors.white, fontSize: 10.5, fontWeight: FontWeight.w600)),
+      );
+    }
+
     return Positioned(
       key: Key('pe_el_${e.id}'),
       left: left,
@@ -420,58 +572,86 @@ class _ProTimelineViewState extends State<ProTimelineView> {
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTap: () => c.select(e.id),
-        onLongPressStart: tr.locked ? null : (d) => _moveStart(e, d),
+        onLongPressStart: track.locked ? null : (d) => _moveStart(e, d),
         onLongPressMoveUpdate: (d) => _moveUpdate(d, layout),
         onLongPressEnd: (_) => _moveEnd(),
         onLongPressCancel: _moveEnd,
-        child: Stack(
-          clipBehavior: Clip.none,
-          children: [
-            Positioned.fill(
-              child: Opacity(
-                opacity: dim ? 0.45 : 1,
-                child: Container(
-                  margin: const EdgeInsets.symmetric(horizontal: 0.5),
-                  padding: const EdgeInsets.symmetric(horizontal: 6),
-                  decoration: BoxDecoration(
-                    color: color,
-                    borderRadius: BorderRadius.circular(tr.kind == TrackKind.mainVideo ? 6 : 5),
-                    border: Border.all(
-                      color: selected ? Colors.white : Colors.black.withValues(alpha: 0.25),
-                      width: selected ? 2 : 1,
-                    ),
-                  ),
-                  alignment: tr.kind == TrackKind.mainVideo
-                      ? Alignment.bottomLeft
-                      : Alignment.centerLeft,
-                  child: bw < 24
-                      ? null
-                      : Text(label,
-                          maxLines: 1,
-                          overflow: TextOverflow.clip,
-                          softWrap: false,
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: tr.kind == TrackKind.mainVideo ? 11 : 10.5,
-                            fontWeight: FontWeight.w600,
-                          )),
-                ),
+        child: AnimatedOpacity(
+          duration: const Duration(milliseconds: 150),
+          opacity: dim ? 0.38 : 1,
+          child: body,
+        ),
+      ),
+    );
+  }
+
+  /// Main-track clip: video frames across the block (design 01).
+  Widget _filmstrip(VideoElement e, double left, double bw, double rh, double viewW, bool selected) {
+    final frames = widget.thumbs[e.src] ?? const [];
+    final tiles = <Widget>[];
+    if (frames.isNotEmpty) {
+      final tileW = rh * 0.78;
+      // Only the tiles that are on screen.
+      final first = math.max(0, ((-left) / tileW).floor());
+      final last = math.min((bw / tileW).ceil(), ((viewW - left) / tileW).ceil());
+      for (var i = first; i < last; i++) {
+        final x = i * tileW;
+        final relMs = ((x + tileW / 2) / c.pxPerSec * 1000).round();
+        final srcMs = e.trimInMs + (relMs * e.speed).round();
+        var best = frames.first;
+        for (final f in frames) {
+          if ((f.ms - srcMs).abs() < (best.ms - srcMs).abs()) best = f;
+        }
+        tiles.add(Positioned(
+          left: x,
+          top: 0,
+          bottom: 0,
+          width: tileW + 0.5,
+          child: Image.file(File(best.path),
+              fit: BoxFit.cover,
+              gaplessPlayback: true,
+              errorBuilder: (_, _, _) => const ColoredBox(color: Color(0xFF2B3A50))),
+        ));
+      }
+    }
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 0.5),
+      decoration: BoxDecoration(
+        color: ProTimelineView.colorFor(TrackKind.mainVideo),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(
+          color: selected ? Colors.white : Colors.black.withValues(alpha: 0.35),
+          width: selected ? 2.5 : 1,
+        ),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Stack(
+        children: [
+          ...tiles,
+          if (bw >= 30)
+            Positioned(
+              left: 6,
+              bottom: 4,
+              child: Text('${(e.durationMs / 1000).toStringAsFixed(1)}s',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    shadows: [Shadow(blurRadius: 3, color: Colors.black)],
+                  )),
+            ),
+          if (e.speed != 1 && bw >= 50)
+            Positioned(
+              right: 5,
+              bottom: 4,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                decoration: BoxDecoration(
+                    color: AppColors.primaryDark, borderRadius: BorderRadius.circular(4)),
+                child: Text('${e.speed}×', style: const TextStyle(color: Colors.white, fontSize: 9)),
               ),
             ),
-            if (speedBadge != null)
-              Positioned(
-                right: 4,
-                bottom: 4,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                  decoration: BoxDecoration(
-                      color: AppColors.primaryDark, borderRadius: BorderRadius.circular(4)),
-                  child: Text(speedBadge,
-                      style: const TextStyle(color: Colors.white, fontSize: 9)),
-                ),
-              ),
-          ],
-        ),
+        ],
       ),
     );
   }
@@ -492,12 +672,12 @@ class _ProTimelineViewState extends State<ProTimelineView> {
             decoration: BoxDecoration(
               color: Colors.white,
               borderRadius: BorderRadius.horizontal(
-                left: left ? const Radius.circular(5) : Radius.zero,
-                right: left ? Radius.zero : const Radius.circular(5),
+                left: left ? const Radius.circular(6) : Radius.zero,
+                right: left ? Radius.zero : const Radius.circular(6),
               ),
             ),
             alignment: Alignment.center,
-            child: Container(width: 2, height: rh * 0.4, color: Colors.black54),
+            child: Container(width: 2.5, height: rh * 0.38, color: Colors.black87),
           ),
         ),
       );
@@ -515,37 +695,34 @@ class _RulerPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final w = size.width;
     double xOf(int ms) => w / 2 + (ms - playhead) * pxPerSec / 1000;
-    final step = _steps.firstWhere((s) => s * pxPerSec / 1000 >= 64, orElse: () => 60000);
+    final step = _steps.firstWhere((s) => s * pxPerSec / 1000 >= 72, orElse: () => 60000);
     final minor = step ~/ 2;
     final from = math.max(0, ((playhead - w / 2 * 1000 / pxPerSec) ~/ minor) * minor);
     final to = playhead + (w / 2 * 1000 / pxPerSec).round() + minor;
-    final tick = Paint()
-      ..color = AppColors.textHint
-      ..strokeWidth = 1;
+    final dot = Paint()..color = AppColors.textHint;
     for (int t = from; t <= to; t += minor) {
       final x = xOf(t);
-      final major = t % step == 0;
-      canvas.drawLine(Offset(x, size.height - (major ? 8 : 4)), Offset(x, size.height), tick);
-      if (major) {
+      if (t % step == 0) {
         final tp = TextPainter(
           text: TextSpan(
               text: _fmt(t),
-              style: const TextStyle(color: AppColors.textSecondary, fontSize: 9, fontFamily: 'monospace')),
+              style: const TextStyle(
+                  color: AppColors.textSecondary, fontSize: 9.5, fontFamily: 'monospace')),
           textDirection: TextDirection.ltr,
         )..layout();
-        tp.paint(canvas, Offset(x - tp.width / 2, 2));
+        tp.paint(canvas, Offset(x - tp.width / 2, 4));
+      } else {
+        canvas.drawCircle(Offset(x, 10), 1.2, dot);
       }
     }
-    final bm = Paint()..color = AppColors.warning;
+    final bm = Paint()..color = const Color(0xFFF5A300);
     for (final b in bookmarks) {
       final x = xOf(b);
       if (x < -6 || x > w + 6) continue;
-      canvas.drawPath(
-          Path()
-            ..moveTo(x - 4, size.height - 10)
-            ..lineTo(x + 4, size.height - 10)
-            ..lineTo(x, size.height - 3)
-            ..close(),
+      canvas.drawRRect(
+          RRect.fromRectAndRadius(
+              Rect.fromCenter(center: Offset(x, size.height - 4), width: 7, height: 5),
+              const Radius.circular(1.5)),
           bm);
     }
   }

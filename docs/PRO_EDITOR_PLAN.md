@@ -1,6 +1,6 @@
 # KarnSub Pro Editor — ແຜນພັດທະນາທັງໝົດ
 
-> ສ້າງ: 2026-10-09 · ສະຖານະ: **ແຜນ (ຍັງບໍ່ເລີ່ມ)**
+> ສ້າງ: 2026-10-09 · ສະຖານະ: **ກຳລັງສ້າງ — ໄລຍະ T,0,1,2 ແລ້ວ; 4–5 ບາງສ່ວນ; P ລໍທົດສອບໃນມືຖື**
 > ໜ້າຕາທີ່ອອກແບບໄວ້ (8 ໜ້າຈໍ): https://claude.ai/artifact/Cuofcc2jtQXqJEoJamyvag
 > ແຮງບັນດານໃຈ: OpenCut classic (MIT) — ເອົາແຕ່ **ແນວຄິດ/ການອອກແບບ**, ບໍ່ copy code (ຄົນລະພາສາ: TS/React vs Flutter/Kotlin)
 
@@ -166,7 +166,7 @@ editor ເກົ່າຍັງເປັນຄ່າເລີ່ມຕົ້ນ.
 - [x] Bookmark ເທິງ ruler
 - [x] ເພີ່ມ PiP ວິດີໂອ (Free 1 ຊັ້ນ, PRO 2 ຊັ້ນ) + ຮູບ/ສະຕິກເກີ + ເພງ + ຕໍ່ clip ທ້າຍແທຣັກຫຼັກ (+)
 - [ ] Preview ໃຊ້ `PreviewEngine` ຈາກໄລຍະ P — ຕອນນີ້ preview ປະກອບໃນ Flutter (`pro_preview.dart`): ວິດີໂອຫຼັກຫຼິ້ນແທ້, ສະຕິກເກີ/ຊັບ/zoom/fade ສະແດງ, **PiP ວິດີໂອຍັງເປັນກ່ອງແທນ (ບໍ່ຫຼິ້ນ)**
-- ຂໍ້ຄວາມ/ຄວາມໄວ/Mask/Animation/Effect/ຟິວເຕີ ມີປຸ່ມແຕ່ສະແດງ "ກຳລັງມາໃນເວີຊັນ 1.7/1.8"
+- ຄວາມໄວ, Mask ເທິງວິດີໂອ, ຟິວເຕີ ມີປຸ່ມແຕ່ສະແດງ "ກຳລັງມາ" (ລໍ engine ໃໝ່)
 
 ### ໄລຍະ 3 — Engine render ດຽວ + proxy  → v1.6
 
@@ -182,18 +182,21 @@ editor ເກົ່າຍັງເປັນຄ່າເລີ່ມຕົ້ນ.
 
 ### ໄລຍະ 4 — ຄວາມສາມາດສ້າງສັນ  → v1.7
 
-- [ ] Text layer ອິດສະຫຼະ + ພື້ນຫຼັງ/ເງົາ/ຂອບ + animation (ໜ້າຈໍ 4)
-- [ ] ຮູບຊົງ: ສີ່ຫຼ່ຽມ, ວົງມົນ, ຫຼາຍຫຼ່ຽມ, ດາວ, ລູກສອນ + ເສັ້ນຂອບ
-- [ ] Mask 10 ແບບ + ຂອບນຸ້ມ + ກັບດ້ານ (ໜ້າຈໍ 3) — ອີງການອອກແບບ `masks/` ຂອງ OpenCut
-- [ ] Blend mode 6+ ແບບ + ຄວາມທຶບ
-- [ ] ຄວາມໄວ: ຄົງທີ່ 0.1×–10× + ເສັ້ນໂຄ້ງ (preset Montage/Hero/Bullet/Flash) + ຮັກສາ pitch (Media3 Sonic) (ໜ້າຈໍ 2)
-- [ ] Keyframe ທຸກ property + ເສັ້ນ Bezier + preset ຂອງຂ້ອຍ + copy/paste keyframe (ໜ້າຈໍ 5)
+**ສ້າງແລ້ວບາງສ່ວນ (2026-10-10) ເທິງ exporter ເກົ່າ:** ຂໍ້ຄວາມ/ຮູບຊົງ/ຮູບທີ່ມີ mask ຖືກວາດເປັນ PNG (`lib/timeline/layer_render.dart`,
+ໃຊ້ painter ດຽວກັນທັງ preview ແລະ export → ພາສາລາວສະແດງຖືກ) ແລ້ວສົ່ງເປັນ image overlay ພ້ອມ keyframe. ສ່ວນທີ່ຕ້ອງການ engine ໃໝ່ (ໄລຍະ 3) ຍັງລໍ.
+- [x] Text layer ອິດສະຫຼະ + ພື້ນຫຼັງ/ເງົາ/ຂອບ (ໜ້າຈໍ 4); animation ເຂົ້າ/ອອກ 4 ແບບ (ຈາງ, ເລື່ອນຂຶ້ນ, ເລື່ອນຊ້າຍ, ເດັ້ງ) ສ້າງເປັນ keyframe
+- [x] ຮູບຊົງ: ສີ່ຫຼ່ຽມ, ວົງມົນ, ຫ້າຫຼ່ຽມ, ດາວ, ລູກສອນ + ເສັ້ນຂອບ
+- [~] Mask 7 ແບບ + ຂອບນຸ້ມ + ກັບດ້ານ — **ສະເພາະຮູບ**; mask ເທິງວິດີໂອ ລໍ engine ໃໝ່
+- [ ] Blend mode 6+ ແບບ — ລໍ engine ໃໝ່ (ຄວາມທຶບມີແລ້ວຜ່ານ keyframe)
+- [ ] ຄວາມໄວ: ຄົງທີ່ + ເສັ້ນໂຄ້ງ + ຮັກສາ pitch — ລໍ engine ໃໝ່
+- [x] Keyframe x/y/ຂະໜາດ/ໝູນ/ຄວາມທຶບ + Bezier + preset + copy/paste keyframe (ໜ້າຈໍ 5); ລາກ/ບີບ/ໝູນ layer ເທິງວິດີໂອໂດຍກົງ
 - [ ] ພື້ນຫຼັງ: ສີ / gradient / blur (ມີແລ້ວ)
 - [ ] ນຳເຂົ້າ SRT / ASS ເປັນແທຣັກຊັບ
 
 ### ໄລຍະ 5 — Transition + ຟິວເຕີ + ປັບແສງສີ  → v1.8
 
-- [ ] Transition 8+ ແບບ (Dissolve, ເລື່ອນ 4 ທິດ, Zoom, ໝູນ, Glitch, Flash) + ໄລຍະເວລາ + ໃຊ້ກັບທຸກ clip (ໜ້າຈໍ 6)
+- [~] Transition: **ມືດລົງ, Zoom, ສັ່ນ** ໃຊ້ໄດ້ ແລະ ສົ່ງອອກໄດ້ (ແປງເປັນ effect ຂອງ exporter ເກົ່າ) + ໄລຍະເວລາ + ໃຊ້ກັບທຸກ clip (ໜ້າຈໍ 6);
+  Dissolve/ເລື່ອນ/Glitch/Flash ສະແດງ "ກຳລັງມາ" — ລໍ engine ໃໝ່
 - [ ] ຟິວເຕີ (LUT) + ຄວາມແຮງ; ປັບແສງສີ: ຄວາມສະຫວ່າງ, contrast, ຄວາມອີ່ມ, ອຸນຫະພູມ, ເງົາ, vignette + ເລື່ອນປຽບທຽບກ່ອນ/ຫຼັງ (ໜ້າຈໍ 7)
 - [ ] Reverse (render ເປັນໄຟລ໌ໃນພື້ນຫຼັງ), Freeze frame
 
@@ -259,3 +262,6 @@ editor ເກົ່າຍັງເປັນຄ່າເລີ່ມຕົ້ນ.
 | 2026-10-10 | 1 | Model v2 + migration + undo + ຂົວ v2→v1 (`lib/timeline/`) |
 | 2026-10-10 | 2 | Pro Editor (beta) ຫຼາຍແທຣັກ (`lib/pro_editor/`), ເປີດຈາກ Home ⋮ |
 | 2026-10-10 | P | ຕົ້ນແບບ PreviewEngine.kt + ໜ້າວັດຜົນ — ລໍມືຖືເພື່ອຕັດສິນ GO/NO-GO. ທັງໝົດ 152 test ຜ່ານ |
+| 2026-10-10 | 2 | ຕັດຕໍ່ກ່ອນ ແລ້ວຈຶ່ງເຮັດຊັບ AI ຈາກສຽງທີ່ຕັດແລ້ວ (ແບບ CapCut); ປຸ່ມ "ຕັດຕໍ່ຄລິບ" ໃນ Home; ໜ້າຕາຕາມແບບ 01–02 (filmstrip, ແຖບບາງ, ເຄື່ອງໝາຍ transition) |
+| 2026-10-10 | 2 | **ແກ້ບັກສົ່ງອອກ:** ຫຼາຍ clip ສົ່ງອອກຜິດວິດີໂອ → `ExportPlan` (ໄຟລ໌ດຽວ + ຊ່ວງທີ່ຕັດ, ຫຼື merge ກ່ອນ); ຊັບ/SFX/effect ຕິດຕາມ clip ເມື່ອ trim/ລຶບ (`TimelineOps.relink`) |
+| 2026-10-10 | 4–5 | ຂໍ້ຄວາມ, ຮູບຊົງ, mask ຮູບ, keyframe + ລາກເທິງວິດີໂອ, animation ເຂົ້າ/ອອກ, transition ມືດ/Zoom/ສັ່ນ — ເທິງ exporter ເກົ່າ. 194 test ຜ່ານ. APK `KarnSub-1.3.0-phase45-TEST.apk` |

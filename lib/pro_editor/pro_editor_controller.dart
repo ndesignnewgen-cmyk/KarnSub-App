@@ -3,6 +3,8 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 
 import '../models/subtitle_style_model.dart';
+import '../services/storage_service.dart';
+import '../timeline/layer_render.dart';
 import '../timeline/timeline_model.dart';
 import '../timeline/timeline_ops.dart';
 import '../timeline/v2_store.dart';
@@ -34,6 +36,9 @@ class ProEditorController extends ChangeNotifier {
   /// What the classic preview/export can't show (from the last save).
   List<String> lossy = const [];
 
+  /// Project cover chosen in the editor ("ໜ້າປົກ"); null = keep the current one.
+  String? coverPath;
+
   ProEditorController(this.base, {String Function()? newId})
       : _newId = newId ?? _defaultId,
         history = TimelineHistory(timelineFor(base, newId: newId));
@@ -56,7 +61,14 @@ class ProEditorController extends ChangeNotifier {
   /// Run an edit; on refusal remember why and change nothing.
   bool _edit(String label, ProjectTimeline Function(ProjectTimeline) f) {
     try {
-      history.run(label, f);
+      // Drags (trim/move) are absolute, so each step restarts from where the
+      // drag began — then content cut away mid-drag comes back on drag-back.
+      final base = history.batchStart ?? history.current;
+      var next = f(base);
+      if (!identical(next, base) && _mainChanged(base, next)) {
+        next = TimelineOps.relink(base, next); // subtitles/SFX/effects follow
+      }
+      history.run(label, (_) => next);
       lastError = null;
       _dropMissingSelection();
       notifyListeners();
@@ -66,6 +78,21 @@ class ProEditorController extends ChangeNotifier {
       notifyListeners();
       return false;
     }
+  }
+
+  static bool _mainChanged(ProjectTimeline a, ProjectTimeline b) {
+    final x = a.mainTrack?.elements ?? const <TimelineElement>[];
+    final y = b.mainTrack?.elements ?? const <TimelineElement>[];
+    if (identical(x, y)) return false;
+    if (x.length != y.length) return true;
+    for (var i = 0; i < x.length; i++) {
+      final p = x[i], q = y[i];
+      if (p.id != q.id || p.startMs != q.startMs || p.durationMs != q.durationMs) return true;
+      if (p is VideoElement && q is VideoElement && (p.trimInMs != q.trimInMs || p.src != q.src)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   void _dropMissingSelection() {
@@ -327,7 +354,8 @@ class ProEditorController extends ChangeNotifier {
       }
       final end = x.mainTrack!.endMs;
       return TimelineOps.addElement(x, x.mainTrack!.id,
-          VideoElement(id: _newId(), startMs: end, durationMs: durationMs, src: path));
+          VideoElement(
+              id: _newId(), startMs: end, durationMs: durationMs, src: path, sourceMs: durationMs));
     });
   }
 
@@ -370,6 +398,301 @@ class ProEditorController extends ChangeNotifier {
     return ok;
   }
 
+  /// Put AI subtitles (already on the TIMELINE clock) on the subtitle track,
+  /// replacing the existing ones — one undo step.
+  bool replaceSubtitles(List<SubtitleSegment> segs) {
+    return _edit('aiSubtitles', (t) {
+      var x = t;
+      for (final tr in x.tracksOf(TrackKind.subtitle)) {
+        x = TimelineOps.removeTrack(x, tr.id);
+      }
+      final els = <TimelineElement>[];
+      for (final s in [...segs]..sort((a, b) => a.startTime.compareTo(b.startTime))) {
+        final a = s.startTime.inMilliseconds;
+        var b = s.endTime.inMilliseconds;
+        if (els.isNotEmpty && a < els.last.endMs) continue; // keep one lane
+        if (b - a < kMinElementMs) b = a + kMinElementMs;
+        els.add(SubtitleElement(
+          id: s.id,
+          startMs: a,
+          durationMs: b - a,
+          text: s.text,
+          wordStartsMs: s.wordTimings
+              ?.map((w) => (w.inMilliseconds - a).clamp(0, b - a))
+              .toList(),
+          data: StorageService.segmentToJson(s),
+        ));
+      }
+      return x.copyWith(tracks: [
+        ...x.tracks,
+        Track(id: 'sub', kind: TrackKind.subtitle, elements: els),
+      ]);
+    });
+  }
+
+  /// Change project-level settings (language, translate mode, font…).
+  void updateSettings(Map<String, dynamic> changes) {
+    _edit('settings', (t) => t.copyWith(settings: {...t.settings, ...changes}));
+  }
+
+  // ── Text & shapes (design 05) ────────────────────────────────────────────
+
+  static const defaultTextStyle = <String, dynamic>{
+    'font': 'NotoSansLao',
+    'color': 0xFFFFFFFF,
+    'align': 'center',
+    'bold': true,
+    'shadow': true,
+    'size': 64,
+  };
+
+  /// New text layer at the playhead (3 s), sized to its nominal font size.
+  String? addText(String text, {Map<String, dynamic>? style}) {
+    final id = _newId();
+    var e = TextElement(
+      id: id,
+      startMs: playhead.value,
+      durationMs: 3000,
+      text: text,
+      style: {...defaultTextStyle, ...?style},
+      transform: const ElementTransform(y: 0.3),
+    );
+    e = e.copyWith(transform: e.transform.copyWith(scale: TextLayer(e).naturalFraction()));
+    final ok = _edit('addText', (t) => _placeOnFreeTrack(t, TrackKind.text, e));
+    if (!ok) return null;
+    _selected
+      ..clear()
+      ..add(id);
+    notifyListeners();
+    return id;
+  }
+
+  /// Change text and/or style; the on-screen font size stays the same.
+  bool updateText(String id, {String? text, Map<String, dynamic>? style}) {
+    final e = timeline.find(id)?.$2;
+    if (e is! TextElement) return false;
+    final next = e.copyWith(text: text, style: style == null ? null : {...e.style, ...style});
+    final k = TextLayer(next).size.width / TextLayer(e).size.width;
+    final scaled = next.copyWith(
+      transform: next.transform.copyWith(scale: (e.transform.scale * k).clamp(0.03, 3.0)),
+      keyframes: [
+        for (final f in next.keyframes)
+          Keyframe(f.timeMs, f.t.copyWith(scale: (f.t.scale * k).clamp(0.03, 3.0)),
+              easing: f.easing, bezier: f.bezier),
+      ],
+    );
+    return _edit('text', (t) => TimelineOps.updateElement(t, scaled));
+  }
+
+  String? addShape(String kind) {
+    final id = _newId();
+    final e = ShapeElement(
+      id: id,
+      startMs: playhead.value,
+      durationMs: 3000,
+      shape: kind,
+      fillColor: 0xFFFFB300,
+      transform: const ElementTransform(y: 0.4, scale: 0.3),
+    );
+    final ok = _edit('addShape', (t) => _placeOnFreeTrack(t, TrackKind.shape, e));
+    if (!ok) return null;
+    _selected
+      ..clear()
+      ..add(id);
+    notifyListeners();
+    return id;
+  }
+
+  bool updateShape(String id, {int? fill, int? stroke, double? strokeWidth}) {
+    final e = timeline.find(id)?.$2;
+    if (e is! ShapeElement) return false;
+    return _edit('shape', (t) => TimelineOps.updateElement(
+        t, e.copyWith(fillColor: fill, strokeColor: stroke, strokeWidth: strokeWidth)));
+  }
+
+  // ── Mask (design 04; images — the exporter bakes it into the picture) ────
+
+  bool setMask(String id, MaskSpec? mask) {
+    final e = timeline.find(id)?.$2;
+    if (e is! ImageElement) return false;
+    final m = mask == null || mask.shape == 'none' ? null : mask;
+    return _edit('mask', (t) => TimelineOps.updateElement(
+        t, m == null ? e.copyWith(clearMask: true) : e.copyWith(mask: m)));
+  }
+
+  // ── Position / keyframes (design 06) ─────────────────────────────────────
+
+  static const int _kfTolMs = 80;
+
+  /// Transform of [id] at the playhead (keyframes applied).
+  ElementTransform? transformNow(String id) {
+    final e = timeline.find(id)?.$2;
+    if (e == null || e is! VisualElement) return null;
+    final v = e as VisualElement;
+    return transformAt(v.transform, v.keyframes, playhead.value - e.startMs);
+  }
+
+  TimelineElement _withVisual(TimelineElement e,
+          {ElementTransform? transform, List<Keyframe>? keyframes}) =>
+      switch (e) {
+        VideoElement() => e.copyWith(transform: transform, keyframes: keyframes),
+        ImageElement() => e.copyWith(transform: transform, keyframes: keyframes),
+        TextElement() => e.copyWith(transform: transform, keyframes: keyframes),
+        ShapeElement() => e.copyWith(transform: transform, keyframes: keyframes),
+        _ => e,
+      };
+
+  /// Move/scale/rotate from the preview. With keyframes, it sets (or adds)
+  /// the keyframe at the playhead; otherwise it changes the layer itself.
+  bool setTransform(String id, ElementTransform tr) {
+    final e = timeline.find(id)?.$2;
+    if (e == null || e is! VisualElement) return false;
+    final kfs = (e as VisualElement).keyframes;
+    if (kfs.isEmpty) {
+      return _edit('transform', (t) => TimelineOps.updateElement(t, _withVisual(e, transform: tr)));
+    }
+    final rel = (playhead.value - e.startMs).clamp(0, e.durationMs);
+    final list = [...kfs];
+    final i = list.indexWhere((k) => (k.timeMs - rel).abs() <= _kfTolMs);
+    if (i >= 0) {
+      list[i] = Keyframe(list[i].timeMs, tr, easing: list[i].easing, bezier: list[i].bezier);
+    } else {
+      list
+        ..add(Keyframe(rel, tr))
+        ..sort((a, b) => a.timeMs.compareTo(b.timeMs));
+    }
+    return _edit('transform', (t) => TimelineOps.updateElement(t, _withVisual(e, keyframes: list)));
+  }
+
+  /// Is there a keyframe of [id] at the playhead?
+  bool hasKeyframeNow(String id) {
+    final e = timeline.find(id)?.$2;
+    if (e == null || e is! VisualElement) return false;
+    final rel = playhead.value - e.startMs;
+    return (e as VisualElement).keyframes.any((k) => (k.timeMs - rel).abs() <= _kfTolMs);
+  }
+
+  /// ◆: add a keyframe at the playhead (current look), or remove the one there.
+  bool toggleKeyframe(String id) {
+    final e = timeline.find(id)?.$2;
+    if (e == null || e is! VisualElement) {
+      lastError = 'wrongTrack';
+      notifyListeners();
+      return false;
+    }
+    final v = e as VisualElement;
+    final rel = playhead.value - e.startMs;
+    if (rel < 0 || rel > e.durationMs) {
+      lastError = 'nothingHere';
+      notifyListeners();
+      return false;
+    }
+    final list = [...v.keyframes];
+    final i = list.indexWhere((k) => (k.timeMs - rel).abs() <= _kfTolMs);
+    if (i >= 0) {
+      list.removeAt(i);
+    } else {
+      // The first keyframe also pins the starting look at time 0.
+      if (list.isEmpty && rel > _kfTolMs) list.add(Keyframe(0, v.transform));
+      list
+        ..add(Keyframe(rel, transformAt(v.transform, v.keyframes, rel)))
+        ..sort((a, b) => a.timeMs.compareTo(b.timeMs));
+    }
+    return _edit('keyframe', (t) => TimelineOps.updateElement(t, _withVisual(e, keyframes: list)));
+  }
+
+  /// Easing of the keyframe at/before the playhead (its outgoing curve).
+  bool setEasing(String id, int easing, {List<double>? bezier}) {
+    final e = timeline.find(id)?.$2;
+    if (e == null || e is! VisualElement) return false;
+    final rel = playhead.value - e.startMs;
+    final list = [...(e as VisualElement).keyframes];
+    var i = easingIndex(list, rel);
+    if (i < 0) i = 0;
+    if (list.isEmpty) return false;
+    list[i] = Keyframe(list[i].timeMs, list[i].t, easing: easing, bezier: easing == 6 ? bezier : null);
+    return _edit('easing', (t) => TimelineOps.updateElement(t, _withVisual(e, keyframes: list)));
+  }
+
+  /// The keyframe whose OUTGOING curve covers [rel]: the last one at/before
+  /// it — but on the final keyframe (nothing after it) the segment leading in.
+  static int easingIndex(List<Keyframe> kfs, int rel) {
+    var i = kfs.lastIndexWhere((k) => k.timeMs <= rel + _kfTolMs);
+    if (i < 0) i = 0;
+    if (i == kfs.length - 1 && i > 0) i--;
+    return i;
+  }
+
+  List<Keyframe> _kfClipboard = const [];
+  bool get hasKeyframeClipboard => _kfClipboard.isNotEmpty;
+
+  void copyKeyframes(String id) {
+    final e = timeline.find(id)?.$2;
+    if (e != null && e is VisualElement) _kfClipboard = List.of((e as VisualElement).keyframes);
+    notifyListeners();
+  }
+
+  bool pasteKeyframes(String id) {
+    final e = timeline.find(id)?.$2;
+    if (e == null || e is! VisualElement || _kfClipboard.isEmpty) return false;
+    final list = [
+      for (final k in _kfClipboard)
+        if (k.timeMs <= e.durationMs) k,
+    ];
+    return _edit('pasteKeyframes', (t) => TimelineOps.updateElement(t, _withVisual(e, keyframes: list)));
+  }
+
+  // ── In/out animations (as keyframes, so the exporter renders them) ───────
+
+  static const animationKinds = ['none', 'fade', 'slideUp', 'slideLeft', 'pop'];
+
+  /// Replace [id]'s keyframes with an in- and/or out-animation of [ms] each
+  /// around its resting look.
+  bool applyAnimation(String id, {String inKind = 'none', String outKind = 'none', int ms = 400}) {
+    final e = timeline.find(id)?.$2;
+    if (e == null || e is! VisualElement) return false;
+    final base = (e as VisualElement).transform;
+    final d = math.min(ms, e.durationMs ~/ 2);
+    ElementTransform from(String kind) => switch (kind) {
+          'fade' => base.copyWith(opacity: 0),
+          'slideUp' => base.copyWith(y: base.y + 0.08, opacity: 0),
+          'slideLeft' => base.copyWith(x: base.x + 0.15, opacity: 0),
+          'pop' => base.copyWith(scale: base.scale * 0.6, opacity: 0),
+          _ => base,
+        };
+    final kfs = <Keyframe>[
+      if (inKind != 'none') ...[Keyframe(0, from(inKind), easing: 2), Keyframe(d, base)],
+      if (outKind != 'none') ...[
+        Keyframe(e.durationMs - d, base, easing: 1),
+        Keyframe(e.durationMs, from(outKind)),
+      ],
+    ];
+    return _edit('animation', (t) => TimelineOps.updateElement(t, _withVisual(e, keyframes: kfs)));
+  }
+
+  // ── Transitions (design 07) ──────────────────────────────────────────────
+
+  bool setTransition(String fromId, String toId, String? kind, int durationMs) => _edit(
+      'transition',
+      (t) => kind == null || kind == 'none'
+          ? TimelineOps.removeTransition(t, fromId, toId)
+          : TimelineOps.setTransition(t, fromId, toId, kind, durationMs));
+
+  /// Same transition between every pair of clips on the main track.
+  bool setTransitionAll(String? kind, int durationMs) => _edit('transitionAll', (t) {
+        var x = t;
+        final els = x.mainTrack?.elements ?? const <TimelineElement>[];
+        for (var i = 0; i + 1 < els.length; i++) {
+          x = kind == null || kind == 'none'
+              ? TimelineOps.removeTransition(x, els[i].id, els[i + 1].id)
+              : TimelineOps.setTransition(x, els[i].id, els[i + 1].id, kind, durationMs);
+        }
+        return x;
+      });
+
+  Transition? transitionBetween(String fromId, String toId) =>
+      timeline.transitions.where((x) => x.fromId == fromId && x.toId == toId).firstOrNull;
+
   /// How many PiP video layers overlap [ms] (the plan caps PRO at 2, Free 1).
   int pipLayersAt(int ms) => timeline
       .tracksOf(TrackKind.video)
@@ -391,8 +714,9 @@ class ProEditorController extends ChangeNotifier {
   }
 
   /// The project to persist (v1 + v2 JSON). Updates [lossy].
-  SubtitleProject toProject() {
-    final (p, l) = saveTimeline(base, timeline);
+  SubtitleProject toProject({Map<String, String> rendered = const {}}) {
+    final (p, l) = saveTimeline(base, timeline, rendered: rendered);
+    if (coverPath != null) p.thumbnailPath = coverPath;
     lossy = l;
     return p;
   }

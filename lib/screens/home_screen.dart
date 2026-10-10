@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 import '../theme/app_theme.dart';
 import '../i18n/i18n.dart';
@@ -122,8 +123,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 _buildHeader(context, projects.length),
                 _buildStatusCard(context),
                 _buildHeroButton(context),
-                // Clip-editing (multi-clip) shelved until ready — entry hidden.
-                // _buildEditClipButton(context),
+                // CapCut flow: edit clips first, AI subtitles later (Pro Editor).
+                _buildEditClipButton(context),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(20, 4, 16, 8),
                   child: Row(
@@ -549,25 +550,46 @@ class _HomeScreenState extends State<HomeScreen> {
         '${tr('home.editClip')} ${DateTime.now().day}/${DateTime.now().month}';
     final project = provider.createProject(name);
 
+    // Keep our own copies (the picker's cache can be cleared by the system).
+    final support = await getApplicationSupportDirectory();
+    final dir = Directory('${support.path}/pro_media')..createSync(recursive: true);
+    final kept = <String>[];
+    for (int i = 0; i < paths.length; i++) {
+      final dot = paths[i].lastIndexOf('.');
+      final ext = dot > 0 ? paths[i].substring(dot) : '.mp4';
+      final dest = '${dir.path}/clip_${DateTime.now().millisecondsSinceEpoch}_$i$ext';
+      try {
+        await File(paths[i]).copy(dest);
+        kept.add(dest);
+      } catch (_) {
+        kept.add(paths[i]);
+      }
+    }
+
     // CapCut model: keep each pick as a SEPARATE clip (no merge) so they stay
     // reorderable + each plays in its own native orientation (no rotation bug).
     final clips = <VideoClip>[];
-    for (int i = 0; i < paths.length; i++) {
-      final meta = await MediaInfoService.meta(paths[i], '${project.id}_clip$i');
+    for (int i = 0; i < kept.length; i++) {
+      final meta = await MediaInfoService.meta(kept[i], '${project.id}_clip$i');
+      if (i == 0 && meta.thumb != null) project.thumbnailPath = meta.thumb;
       clips.add(VideoClip(
         id: '${DateTime.now().microsecondsSinceEpoch}_$i',
-        path: paths[i],
+        path: kept[i],
         durationMs: meta.durationMs > 0 ? meta.durationMs : null,
       ));
     }
     project.clips = clips;
-    project.videoPath = paths.first; // preview shows clip 1 (sequential = stage 3)
+    project.videoPath = kept.first;
+    final firstMs = clips.first.durationMs;
+    if (firstMs != null) project.videoDuration = Duration(milliseconds: firstMs);
     provider.updateProject(project);
+    provider.setCurrentProject(project);
 
     if (!mounted) return;
+    // Straight into the multi-track editor; AI subtitles can be added later.
     await Navigator.push(
       context,
-      MaterialPageRoute(builder: (_) => const EditorScreen()),
+      MaterialPageRoute(builder: (_) => const ProEditorScreen()),
     );
     _loadStatus();
   }

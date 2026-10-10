@@ -33,12 +33,12 @@ MigrationResult migrateV1(SubtitleProject p, {String Function()? newId}) {
   final dropped = <Map<String, dynamic>>[];
 
   // ── 1. Original timeline: what plays, from which source ──────────────────
-  final pieces = <({int a, int b, String src, int trimIn})>[];
+  final pieces = <({int a, int b, String src, int trimIn, int? full})>[];
   if (p.clips.length >= 2) {
     var cursor = 0;
     for (final c in p.clips) {
       final dur = c.effectiveMs > 0 ? c.effectiveMs : 1; // same as the editor
-      pieces.add((a: cursor, b: cursor + dur, src: c.path, trimIn: c.trimStartMs));
+      pieces.add((a: cursor, b: cursor + dur, src: c.path, trimIn: c.trimStartMs, full: c.durationMs));
       cursor += dur;
     }
   } else {
@@ -46,7 +46,7 @@ MigrationResult migrateV1(SubtitleProject p, {String Function()? newId}) {
     final total = p.videoDuration?.inMilliseconds ?? _inferDuration(p);
     if (src != null && total > 0) {
       final trim = p.clips.length == 1 && p.videoPath == null ? p.clips.first.trimStartMs : 0;
-      pieces.add((a: 0, b: total, src: src, trimIn: trim));
+      pieces.add((a: 0, b: total, src: src, trimIn: trim, full: total + trim));
     }
   }
   final originalMs = pieces.isEmpty ? _inferDuration(p) : pieces.last.b;
@@ -68,6 +68,7 @@ MigrationResult migrateV1(SubtitleProject p, {String Function()? newId}) {
           durationMs: e - s,
           src: pc.src,
           trimInMs: pc.trimIn + (s - pc.a),
+          sourceMs: pc.full,
         ));
       }
     }

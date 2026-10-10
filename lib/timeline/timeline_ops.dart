@@ -313,6 +313,101 @@ class TimelineOps {
               .where((x) => !(x.fromId == fromId && x.toId == toId))
               .toList());
 
+  // ── Keep linked tracks on their content ──────────────────────────────────
+
+  /// Tracks whose elements belong to the video content under them (speech
+  /// subtitles, sound effects, effects) and so follow main-track edits.
+  static const linkedKinds = {TrackKind.subtitle, TrackKind.sfx, TrackKind.effect};
+
+  /// After a main-track edit ([before] → [after]), move every element on a
+  /// linked track so it stays over the same moment of the SOURCE video:
+  /// trimming or deleting a clip shifts what follows; content that was cut
+  /// away takes its elements with it (partly cut → shortened).
+  static ProjectTimeline relink(ProjectTimeline before, ProjectTimeline after) {
+    final oldMain = before.mainTrack?.elements.whereType<VideoElement>().toList() ?? const [];
+    final newMain = after.mainTrack?.elements.whereType<VideoElement>().toList() ?? const [];
+    if (oldMain.isEmpty) return after;
+
+    int? mapPoint(int t, {required bool isEnd}) {
+      VideoElement? m;
+      for (final c in oldMain) {
+        if (isEnd ? (t > c.startMs && t <= c.endMs) : (t >= c.startMs && t < c.endMs)) {
+          m = c;
+          break;
+        }
+      }
+      if (m == null) return null;
+      final src = m.trimInMs + ((t - m.startMs) * m.speed).round();
+      bool covers(VideoElement c) =>
+          c.src == m!.src && (isEnd ? (src > c.trimInMs && src <= c.trimOutMs) : (src >= c.trimInMs && src < c.trimOutMs));
+      final same = newMain.where((c) => c.id == m!.id && covers(c));
+      final any = same.isNotEmpty ? same.first : newMain.where(covers).firstOrNull;
+      if (any == null) return null;
+      return any.startMs + ((src - any.trimInMs) / any.speed).round();
+    }
+
+    // The new clip(s) that a cut-away start/end should snap to.
+    int? snapInto(TimelineElement e, int? s, int? end) {
+      if (s != null || end == null) return s;
+      // Start was cut away: begin at the start of the clip that holds the end.
+      for (final c in newMain) {
+        if (end > c.startMs && end <= c.endMs) return c.startMs;
+      }
+      return null;
+    }
+
+    final tracks = <Track>[];
+    for (final tr in after.tracks) {
+      if (!linkedKinds.contains(tr.kind) || tr.locked) {
+        tracks.add(tr);
+        continue;
+      }
+      final els = <TimelineElement>[];
+      for (final e in tr.elements) {
+        var s = mapPoint(e.startMs, isEnd: false);
+        var end = mapPoint(e.endMs, isEnd: true);
+        s = snapInto(e, s, end);
+        if (s != null && end == null) {
+          // End was cut away: stop at the end of the clip that holds the start.
+          for (final c in newMain) {
+            if (s >= c.startMs && s < c.endMs) {
+              end = c.endMs;
+              break;
+            }
+          }
+        }
+        if (s == null || end == null || end - s < kMinElementMs) continue; // content gone
+        final s0 = s, e0 = end;
+        var moved = e.startMs == s ? e : e.withTiming(startMs: s);
+        if (moved.durationMs != end - s) moved = moved.withTiming(durationMs: end - s);
+        if (moved is SubtitleElement && moved.wordStartsMs != null) {
+          final shift = s - e.startMs;
+          moved = moved.copyWith(
+            wordStartsMs: [
+              for (final w in moved.wordStartsMs!)
+                (mapPoint(e.startMs + w, isEnd: false) ?? (e.startMs + w + shift)) - s0,
+            ].map((w) => w.clamp(0, e0 - s0)).toList(),
+          );
+        }
+        els.add(moved);
+      }
+      els.sort((a, b) => a.startMs.compareTo(b.startMs));
+      // Never leave overlaps behind on one track.
+      final clean = <TimelineElement>[];
+      for (final e in els) {
+        if (clean.isNotEmpty && e.startMs < clean.last.endMs) {
+          final room = clean.last.endMs - e.startMs;
+          if (e.durationMs - room < kMinElementMs) continue;
+          clean.add(e.withTiming(startMs: clean.last.endMs, durationMs: e.durationMs - room));
+        } else {
+          clean.add(e);
+        }
+      }
+      tracks.add(tr.copyWith(elements: clean));
+    }
+    return after.copyWith(tracks: tracks);
+  }
+
   // ── Snapping (for drag/trim in the UI) ───────────────────────────────────
 
   /// Edges of every element (except [excludeId]), bookmarks, 0 and [extra].
@@ -362,6 +457,9 @@ class TimelineHistory {
   String? get undoLabel => _undo.isEmpty ? null : _undo.last.$2;
   String? get redoLabel => _redo.isEmpty ? null : _redo.last.$2;
   bool get inBatch => _batchStart != null;
+
+  /// Timeline when the current batch began (null outside a batch).
+  ProjectTimeline? get batchStart => _batchStart;
 
   /// Apply [edit] (a pure function, usually a [TimelineOps] call). If it
   /// throws, nothing changes. Returns the new timeline.

@@ -331,6 +331,7 @@ class VideoElement extends TimelineElement implements MediaElement, VisualElemen
   @override
   final MaskSpec? mask;
   final bool cover; // fill the frame (crop), ignore transform position/scale
+  final int? sourceMs; // full length of the source file (export needs it)
 
   const VideoElement({
     required super.id,
@@ -347,6 +348,7 @@ class VideoElement extends TimelineElement implements MediaElement, VisualElemen
     this.blend = LayerBlend.normal,
     this.mask,
     this.cover = false,
+    this.sourceMs,
   });
 
   @override
@@ -372,6 +374,7 @@ class VideoElement extends TimelineElement implements MediaElement, VisualElemen
     LayerBlend? blend,
     MaskSpec? mask,
     bool? cover,
+    int? sourceMs,
   }) =>
       VideoElement(
         id: id ?? this.id,
@@ -388,6 +391,7 @@ class VideoElement extends TimelineElement implements MediaElement, VisualElemen
         blend: blend ?? this.blend,
         mask: mask ?? this.mask,
         cover: cover ?? this.cover,
+        sourceMs: sourceMs ?? this.sourceMs,
       );
 
   @override
@@ -410,6 +414,7 @@ class VideoElement extends TimelineElement implements MediaElement, VisualElemen
         if (blend != LayerBlend.normal) 'blend': blend.name,
         if (mask != null) 'mask': mask!.toJson(),
         if (cover) 'cover': true,
+        if (sourceMs != null) 'sourceMs': sourceMs,
       };
 
   static VideoElement fromJson(Map<String, dynamic> j) => VideoElement(
@@ -427,6 +432,7 @@ class VideoElement extends TimelineElement implements MediaElement, VisualElemen
         blend: _blend(j['blend']),
         mask: MaskSpec.fromJson(j['mask'] as Map<String, dynamic>?),
         cover: j['cover'] == true,
+        sourceMs: (j['sourceMs'] as num?)?.toInt(),
       );
 }
 
@@ -467,6 +473,7 @@ class ImageElement extends TimelineElement implements VisualElement {
     List<Keyframe>? keyframes,
     LayerBlend? blend,
     MaskSpec? mask,
+    bool clearMask = false,
     bool? cover,
   }) =>
       ImageElement(
@@ -478,7 +485,7 @@ class ImageElement extends TimelineElement implements VisualElement {
         transform: transform ?? this.transform,
         keyframes: keyframes ?? this.keyframes,
         blend: blend ?? this.blend,
-        mask: mask ?? this.mask,
+        mask: clearMask ? null : (mask ?? this.mask),
         cover: cover ?? this.cover,
       );
 
@@ -603,6 +610,24 @@ class TextElement extends TimelineElement implements VisualElement {
   @override
   String get type => 'text';
 
+  TextElement copyWith({
+    String? text,
+    Map<String, dynamic>? style,
+    ElementTransform? transform,
+    List<Keyframe>? keyframes,
+  }) =>
+      TextElement(
+        id: id,
+        startMs: startMs,
+        durationMs: durationMs,
+        text: text ?? this.text,
+        style: style ?? this.style,
+        transform: transform ?? this.transform,
+        keyframes: keyframes ?? this.keyframes,
+        blend: blend,
+        mask: mask,
+      );
+
   @override
   TextElement withTiming({int? startMs, int? durationMs}) => TextElement(
         id: id,
@@ -683,16 +708,33 @@ class ShapeElement extends TimelineElement implements VisualElement {
   @override
   String get type => 'shape';
 
-  ShapeElement _copy({String? id, int? startMs, int? durationMs}) => ShapeElement(
+  ShapeElement _copy({String? id, int? startMs, int? durationMs}) => copyWith(
+        id: id,
+        startMs: startMs,
+        durationMs: durationMs,
+      );
+
+  ShapeElement copyWith({
+    String? id,
+    int? startMs,
+    int? durationMs,
+    String? shape,
+    int? fillColor,
+    int? strokeColor,
+    double? strokeWidth,
+    ElementTransform? transform,
+    List<Keyframe>? keyframes,
+  }) =>
+      ShapeElement(
         id: id ?? this.id,
         startMs: startMs ?? this.startMs,
         durationMs: durationMs ?? this.durationMs,
-        shape: shape,
-        fillColor: fillColor,
-        strokeColor: strokeColor,
-        strokeWidth: strokeWidth,
-        transform: transform,
-        keyframes: keyframes,
+        shape: shape ?? this.shape,
+        fillColor: fillColor ?? this.fillColor,
+        strokeColor: strokeColor ?? this.strokeColor,
+        strokeWidth: strokeWidth ?? this.strokeWidth,
+        transform: transform ?? this.transform,
+        keyframes: keyframes ?? this.keyframes,
         blend: blend,
         mask: mask,
       );

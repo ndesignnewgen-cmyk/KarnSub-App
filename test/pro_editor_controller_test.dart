@@ -73,10 +73,66 @@ void main() {
     expect(c.timeline.mainTrack!.elements.single.startMs, 0);
     expect(c.timeline.mainTrack!.elements.single.durationMs, 7000);
 
-    c.ripple = true;
-    c.select('s1');
-    c.deleteSelected();
-    expect(c.timeline.find('s2')!.$2.startMs, 3000);
+    // Subtitles follow their content: s1 was over the deleted clip → gone;
+    // s2 (4.0–5.0 s of the video) moves up with the remaining clip.
+    expect(c.timeline.find('s1'), isNull);
+    final s2 = c.timeline.find('s2')!.$2;
+    expect((s2.startMs, s2.endMs), (1000, 2000));
+
+    // Ripple delete of a subtitle pulls the later ones left.
+    final c2 = ProEditorController(project(), newId: ids());
+    c2.ripple = true;
+    c2.select('s1');
+    c2.deleteSelected();
+    expect(c2.timeline.find('s2')!.$2.startMs, 3000);
+  });
+
+  group('subtitles follow their clip', () {
+    test('trimming a clip start shifts its subtitles with the content', () {
+      final c = ProEditorController(project(), newId: ids());
+      c.snapping = false;
+      c.trimTo(mainId(c), leftEdge: true, ms: 1500); // cut the first 1.5 s
+      expect(c.timeline.find('s1')!.$2.startMs, 0); // 1.0–2.0 s → partly cut
+      expect(c.timeline.find('s1')!.$2.endMs, 500);
+      expect(c.timeline.find('s2')!.$2.startMs, 2500); // 4.0 s → 2.5 s
+    });
+
+    test('content cut away mid-drag comes back when dragged back', () {
+      final c = ProEditorController(project(), newId: ids());
+      c.snapping = false;
+      c.beginDrag('trim');
+      c.trimTo(mainId(c), leftEdge: true, ms: 2500); // s1 fully cut away
+      expect(c.timeline.find('s1'), isNull);
+      c.trimTo(mainId(c), leftEdge: true, ms: 500); // drag back
+      c.endDrag();
+      final s1 = c.timeline.find('s1')!.$2;
+      expect((s1.startMs, s1.endMs), (500, 1500));
+      c.undo();
+      expect(c.timeline.find('s1')!.$2.startMs, 1000); // one undo step
+    });
+
+    test('re-ordering clips takes their subtitles along', () {
+      final c = ProEditorController(project(), newId: ids());
+      c.seek(3000);
+      c.splitAtPlayhead(); // [0–3 s][3–10 s]; s2 (4–5 s) is in the second
+      final second = c.timeline.mainTrack!.elements[1].id;
+      c.moveTo(second, 'main', 0); // second clip to the front
+      final s2 = c.timeline.find('s2')!.$2;
+      expect((s2.startMs, s2.endMs), (1000, 2000));
+      final s1 = c.timeline.find('s1')!.$2;
+      expect((s1.startMs, s1.endMs), (8000, 9000)); // first clip now starts at 7 s
+    });
+
+    test('stickers and music stay where they are (not linked)', () {
+      final c = ProEditorController(project(), newId: ids());
+      c.seek(4000);
+      c.addOverlay(file('st.png'), 1000, isVideo: false);
+      final st = c.primary!;
+      c.clearSelection();
+      c.snapping = false;
+      c.trimTo(mainId(c), leftEdge: true, ms: 2000);
+      expect(c.timeline.find(st)!.$2.startMs, 4000);
+    });
   });
 
   test('trim snaps to the playhead and other edges', () {
@@ -198,7 +254,10 @@ void main() {
     final saved = c.toProject();
     expect(saved.id, 'p1');
     expect(saved.name, 'Test');
-    expect(saved.clips.length, 2); // split → v1 multi-clip
+    // One source → saved as the file + removed ranges (exportable as-is).
+    expect(saved.clips, isEmpty);
+    expect(saved.videoPath, isNotNull);
+    expect(saved.removedRanges, isEmpty); // a split removes nothing
     expect(saved.timelineV2, isNotNull);
     expect(saved.timelineV2Base, v1Fingerprint(saved));
 
@@ -210,6 +269,35 @@ void main() {
     saved.segments.first.startTime = d(milliseconds: 1100);
     final rebuilt = timelineFor(saved, newId: ids());
     expect(rebuilt.find('s1')!.$2.startMs, 1100);
+  });
+
+  test('AI subtitles replace the old ones on one subtitle track (one undo)', () {
+    final c = ProEditorController(project(), newId: ids());
+    c.replaceSubtitles([
+      SubtitleSegment(id: 'n2', text: 'ສອງ', startTime: d(milliseconds: 3000),
+          endTime: d(milliseconds: 4000)),
+      SubtitleSegment(id: 'n1', text: 'ໜຶ່ງ', startTime: d(milliseconds: 500),
+          endTime: d(milliseconds: 2000), words: ['ໜຶ່ງ', 'x'],
+          wordTimings: [d(milliseconds: 500), d(milliseconds: 1200)]),
+      SubtitleSegment(id: 'overlap', text: 'ທັບ', startTime: d(milliseconds: 3500),
+          endTime: d(milliseconds: 3800)),
+    ]);
+    final subs = c.timeline.tracksOf(TrackKind.subtitle);
+    expect(subs.length, 1);
+    final els = subs.single.elements.cast<SubtitleElement>();
+    expect(els.map((e) => e.id), ['n1', 'n2']); // sorted; overlapping one dropped
+    expect(els.first.wordStartsMs, [0, 700]);
+    expect(c.timeline.find('s1'), isNull); // old subtitles gone
+    c.undo();
+    expect(c.timeline.find('s1'), isNotNull);
+    expect(c.timeline.find('n1'), isNull);
+  });
+
+  test('settings changes are saved into the project', () {
+    final c = ProEditorController(project(), newId: ids());
+    c.updateSettings({'language': 'th', 'sourceLanguage': 'th'});
+    final p = c.toProject();
+    expect((p.language, p.sourceLanguage), ('th', 'th'));
   });
 
   test('renaming does not invalidate the saved timeline', () {
