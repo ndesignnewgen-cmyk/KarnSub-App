@@ -1,31 +1,91 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/subtitle_style_model.dart';
+import 'project_store.dart';
 
 class StorageService {
+  /// Old storage: every project in ONE SharedPreferences string. Migrated once
+  /// into per-project files (see [ProjectStore]) and then removed.
   static const _keyProjects = 'saved_projects';
 
+  static ProjectStore? _store;
+
+  /// Tests point the store at a temp directory.
+  @visibleForTesting
+  static set debugStore(ProjectStore? s) => _store = s;
+
+  static Future<ProjectStore> _getStore() async {
+    final s = _store;
+    if (s != null) return s;
+    final docs = await getApplicationDocumentsDirectory();
+    return _store = ProjectStore(Directory('${docs.path}/projects'));
+  }
+
   static Future<void> saveProjects(List<SubtitleProject> projects) async {
-    final prefs = await SharedPreferences.getInstance();
-    final list = projects.map((p) => _projectToJson(p)).toList();
-    await prefs.setString(_keyProjects, jsonEncode(list));
+    // Encode before any await so the snapshot is exactly "now".
+    final entries = [
+      for (final p in projects) MapEntry(p.id, projectToJson(p)),
+    ];
+    final store = await _getStore();
+    await store.save(entries);
   }
 
   static Future<List<SubtitleProject>> loadProjects() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_keyProjects);
-    if (raw == null) return [];
-    try {
-      final list = jsonDecode(raw) as List<dynamic>;
-      return list.map((j) => _projectFromJson(j)).toList();
-    } catch (_) {
-      return [];
+    final store = await _getStore();
+    await _migrateLegacy(store);
+    final maps = await store.load(
+      onCorrupt: (id, e) => debugPrint('[Storage] set aside $id: $e'),
+    );
+    final out = <SubtitleProject>[];
+    for (final m in maps) {
+      try {
+        out.add(projectFromJson(m));
+      } catch (e) {
+        // One bad project must never cost the others.
+        debugPrint('[Storage] cannot read project ${m['id']}: $e');
+        final id = m['id'];
+        if (id is String) await store.quarantine(id);
+      }
     }
+    return out;
   }
 
-  static Map<String, dynamic> _projectToJson(SubtitleProject p) => {
+  /// One-time move from SharedPreferences to per-project files. The raw old
+  /// data is first copied to `legacy_prefs_backup.json`, and the old key is
+  /// only removed after the new files are written.
+  static Future<void> _migrateLegacy(ProjectStore store) async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_keyProjects);
+    if (raw == null) return;
+    final backup = File('${store.dir.path}/${ProjectStore.legacyBackupName}');
+    if (store.hasIndex) {
+      // Migrated before but the app stopped before removing the old key.
+      if (await backup.exists()) await prefs.remove(_keyProjects);
+      return;
+    }
+    await store.dir.create(recursive: true);
+    await ProjectStore.writeAtomic(backup, raw);
+    final entries = <MapEntry<String, Map<String, dynamic>>>[];
+    try {
+      for (final item in jsonDecode(raw) as List<dynamic>) {
+        if (item is Map<String, dynamic> && item['id'] is String) {
+          entries.add(MapEntry(item['id'] as String, item));
+        }
+      }
+    } catch (e) {
+      debugPrint('[Storage] legacy data unreadable (kept in backup): $e');
+    }
+    // Raw maps are stored as-is (not decoded + re-encoded) so nothing that
+    // the decoder would drop (e.g. clips on a missing SD card) is lost.
+    await store.save(entries);
+    await store.flush();
+    await prefs.remove(_keyProjects);
+  }
+
+  static Map<String, dynamic> projectToJson(SubtitleProject p) => {
         'id': p.id,
         'name': p.name,
         'videoPath': p.videoPath,
@@ -83,11 +143,11 @@ class StorageService {
         'zoomEffects': p.zoomEffects.map(_zoomEffectToJson).toList(),
         'fadeEffects': p.fadeEffects.map(_fadeEffectToJson).toList(),
         'shakeEffects': p.shakeEffects.map(_shakeEffectToJson).toList(),
-        'segments': p.segments.map(_segmentToJson).toList(),
+        'segments': p.segments.map(segmentToJson).toList(),
         'sfxBlocks': p.sfxBlocks.map(_sfxBlockToJson).toList(),
       };
 
-  static SubtitleProject _projectFromJson(Map<String, dynamic> j) {
+  static SubtitleProject projectFromJson(Map<String, dynamic> j) {
     final styleIndex = (j['styleType'] as int).clamp(0, subtitlePresets.length - 1);
     return SubtitleProject(
       id: j['id'],
@@ -181,7 +241,7 @@ class StorageService {
               .toList() ??
           [],
       segments: (j['segments'] as List<dynamic>)
-          .map((s) => _segmentFromJson(s))
+          .map((s) => segmentFromJson(s))
           .toList(),
       sfxBlocks: (j['sfxBlocks'] as List<dynamic>?)
               ?.map((s) => _sfxBlockFromJson(s))
@@ -342,7 +402,7 @@ class StorageService {
         customName: j['customName'] as String?,
       );
 
-  static Map<String, dynamic> _segmentToJson(SubtitleSegment s) => {
+  static Map<String, dynamic> segmentToJson(SubtitleSegment s) => {
         'id': s.id,
         'text': s.text,
         'start': s.startTime.inMilliseconds,
@@ -366,7 +426,7 @@ class StorageService {
         if (s.emoji != null) 'segEmoji': s.emoji,
       };
 
-  static SubtitleSegment _segmentFromJson(Map<String, dynamic> j) {
+  static SubtitleSegment segmentFromJson(Map<String, dynamic> j) {
     final animIdx = j['segAnimation'] as int?;
     return SubtitleSegment(
       id: j['id'],
