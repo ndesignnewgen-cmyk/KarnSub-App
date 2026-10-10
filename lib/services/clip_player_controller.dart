@@ -29,6 +29,8 @@ class ClipPlayerController {
   Future<void> seek(int index, int ms) =>
       _ch.invokeMethod('seek', {'index': index, 'ms': ms});
   Future<void> setVolume(double v) => _ch.invokeMethod('setVolume', {'v': v});
+  Future<void> setSpeed(double speed) =>
+      _ch.invokeMethod('setSpeed', {'speed': speed});
 
   /// {index, posMs, playing, ended}
   Future<Map<String, dynamic>> position() async {

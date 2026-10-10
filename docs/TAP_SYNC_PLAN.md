@@ -1,6 +1,6 @@
 # ແຕະໃຫ້ຕົງ (Tap Sync) — ແຜນພັດທະນາ
 
-> ສ້າງ: 2026-10-09 · ສະຖານະ: **ແຜນ** · ກ່ຽວຂ້ອງ: [PRO_EDITOR_PLAN.md](PRO_EDITOR_PLAN.md) (ໄລຍະ T)
+> ສ້າງ: 2026-10-09 · ສະຖານະ: **T1–T6 ຂຽນແລ້ວ (2026-10-10, branch `feat/tap-sync`) — ລໍທົດສອບໃນມືຖືແທ້** · ກ່ຽວຂ້ອງ: [PRO_EDITOR_PLAN.md](PRO_EDITOR_PLAN.md) (ໄລຍະ T)
 > ໄອເດຍຈາກເຈົ້າຂອງແອັບ: ຟັງສຽງ ແລ້ວແຕະທີລະປະໂຫຍກ ບອກວ່າຄຳນີ້ເວົ້າຮອດໃສ → ແຕະຕໍ່ໄປ → ຊັບຕົງກັບສຽງທຸກປະໂຫຍກ
 
 ---
@@ -91,8 +91,24 @@ Editor → ຊັບ → [ແຕະໃຫ້ຕົງ]
 - ຄວາມຄາດເຄື່ອນ (median) **≤ 100 ms** ເມື່ອທຽບກັບເວລາທີ່ຈັບດ້ວຍມືຢ່າງລະອຽດ (ເປີດ snap)
 - ທົດສອບກັບຜູ້ໃຊ້ລາວແທ້ 5 ຄົນ: ສຽງເວົ້າ 2 ຄລິບ + ເພງ 1 ຄລິບ; ຖາມວ່າງ່າຍກວ່າລາກເທິງ timeline ບໍ
 
-## 9. ສິ່ງທີ່ຕ້ອງຕັດສິນໃຈ
+## 8.1 ສະຖານະການສ້າງ (2026-10-10)
 
-1. Free ຫຼື PRO? ແນະນຳ: ແຕະທີລະປະໂຫຍກ **ຟຣີ** (ດຶງຜູ້ໃຊ້ໃໝ່, ບໍ່ຕ້ອງມີ API key); ດູດເຂົ້າສຽງ + karaoke ທີລະຄຳ **PRO**
-2. ໂໝດເລີ່ມຕົ້ນ: ກົດຄ້າງ (ແນະນຳ) ຫຼື ແຕະ?
-3. ເຮັດກ່ອນໄລຍະ P ບໍ? (ແນະນຳ: **ເຮັດກ່ອນ** — ໄດ້ຜົນໄວ, ບໍ່ຂຶ້ນກັບການຂຽນ editor ໃໝ່)
+| ຂັ້ນ | ສະຖານະ | ໄຟລ໌ |
+|---|---|---|
+| T1 | ✅ + 31 unit test | `lib/services/tap_sync_session.dart`, `test/tap_sync_session_test.dart` |
+| T2 | ✅ ໜ້າບັນທຶກ (ກົດຄ້າງ/ແຕະ, waveform ເລື່ອນ, ↶, ຂ້າມ, ສັ່ນ, 0.5–1×, ນັບ 3-2-1) | `lib/screens/tap_sync_screen.dart`, `lib/widgets/tap_sync_widgets.dart` |
+| T3 | ✅ snap (PRO), ປັບຕາມມື (ສຽງຕິກ 8 ຄັ້ງ, median), ກວດ BT (offset ແຍກ), ປຸ່ມ volume | `tap_sync_calibration.dart`, `TapSyncBridge.kt`, `MainActivity.dispatchKeyEvent` |
+| T4 | ✅ ໜ້າກວດ: preview+ຊັບ, waveform ຈຸດກົດ/ຈຸດສຸດທ້າຍ, ±50 ms, ແຕະໃໝ່ທີລະປະໂຫຍກ, badge | `tap_sync_screen.dart` |
+| T5 | ✅ ວາງບົດ → ແບ່ງແຖວ (ບໍ່ຕັດກາງຄຳ, ICU), ແກ້/ແຍກ/ລວມແຖວ | `lib/services/script_splitter.dart` + test |
+| T6 | ✅ Karaoke ທີລະຄຳ (PRO) → `words` + `wordTimings` | `TapSyncApply.applyWords` |
+
+- ບັນທຶກເປັນ **1 undo step** ໃນ editor (`updateSegments`).
+- Multi-clip: ຢືມ native player ຂອງ editor (ມີແຕ່ 1 instance — `create()` ຈະທຳລາຍອັນເກົ່າ) + ເພີ່ມ `setSpeed` ໃນ `ClipPlayer.kt`.
+- Test ທັງໝົດ 63 ອັນຜ່ານ (ລວມ flow test ດ້ວຍ player ປອມ: ກົດຄ້າງ, ແຕະ, ↶, ±50 ms, ວາງບົດ, karaoke).
+- **ຍັງບໍ່ໄດ້ກວດໃນມືຖືແທ້:** ຄວາມແມ່ນຍຳຂອງເວລາ (ເປົ້າ median ≤ 100 ms), ປຸ່ມ volume, ການເຕືອນ BT, ຄວາມໄວ multi-clip.
+
+## 9. ການຕັດສິນໃຈ (ສະຫຼຸບແລ້ວ 2026-10-10)
+
+1. **Free / PRO:** ແຕະທີລະປະໂຫຍກ + ວາງບົດເອງ + ປັບຕາມມື + ເຕືອນ BT = **ຟຣີ** (ດຶງຜູ້ໃຊ້ໃໝ່, ບໍ່ຕ້ອງມີ API key); ດູດເຂົ້າສຽງ (snap) + karaoke ທີລະຄຳ = **PRO**
+2. **ໂໝດເລີ່ມຕົ້ນ:** ກົດຄ້າງ, ແລະ ຈື່ໂໝດທີ່ຜູ້ໃຊ້ເລືອກຄັ້ງລ່າສຸດ. ໂໝດ karaoke ເລີ່ມຕົ້ນເປັນ **ແຕະ**
+3. **ເຮັດກ່ອນໄລຍະ P:** ແມ່ນ — ໄດ້ຜົນໄວ ແລະ ບໍ່ຂຶ້ນກັບການຂຽນ editor ໃໝ່

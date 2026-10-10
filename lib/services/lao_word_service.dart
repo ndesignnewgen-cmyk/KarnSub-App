@@ -7,6 +7,12 @@ import '../models/subtitle_style_model.dart';
 class LaoWordService {
   static const _channel = MethodChannel('com.anniekaydee.subtitle_app/audio');
 
+  /// Word units for each of [texts] (whitespace dropped). Falls back to the
+  /// whole text as one unit when the native segmenter is unavailable.
+  static Future<List<List<String>>> segment(
+          List<String> texts, String locale) =>
+      _segment(texts, locale);
+
   static Future<List<List<String>>> _segment(
       List<String> texts, String locale) async {
     if (texts.isEmpty) return [];

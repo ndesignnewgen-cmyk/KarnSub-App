@@ -44,6 +44,11 @@ class ClipPlayer(
                 player?.volume = (call.argument<Double>("v") ?: 1.0).toFloat()
                 result.success(null)
             }
+            "setSpeed" -> {
+                // Pitch is preserved (Media3 Sonic) — used by Tap Sync 0.5×/0.75×.
+                player?.setPlaybackSpeed((call.argument<Double>("speed") ?: 1.0).toFloat())
+                result.success(null)
+            }
             "position" -> result.success(positionMap())
             "size" -> {
                 val vs = player?.videoSize

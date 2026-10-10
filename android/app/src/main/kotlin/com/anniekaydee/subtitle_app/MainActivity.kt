@@ -33,6 +33,13 @@ class MainActivity : FlutterActivity() {
     private val TARGET_CHANNELS = 1
     private var methodChannel: MethodChannel? = null
     private var lastEmittedPct = -1
+    private var tapSync: TapSyncBridge? = null
+
+    // Tap Sync: volume keys act as the tap button while its screen is open.
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        if (tapSync?.handleKeyEvent(event) == true) return true
+        return super.dispatchKeyEvent(event)
+    }
 
     // ── Image overlays (B-roll/sticker) composited onto each frame ────────────
     private data class ImgOverlay(
@@ -643,6 +650,12 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger,
             "com.anniekaydee.subtitle_app/clipplayer")
             .setMethodCallHandler(clipPlayer)
+        val bridge = TapSyncBridge(applicationContext)
+        val tapCh = MethodChannel(flutterEngine.dartExecutor.binaryMessenger,
+            "com.anniekaydee.subtitle_app/tapsync")
+        tapCh.setMethodCallHandler(bridge)
+        bridge.channel = tapCh
+        tapSync = bridge
         val ch = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
         methodChannel = ch
         ch.setMethodCallHandler { call, result ->
