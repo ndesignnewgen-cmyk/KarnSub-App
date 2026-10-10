@@ -656,6 +656,10 @@ class MainActivity : FlutterActivity() {
         tapCh.setMethodCallHandler(bridge)
         bridge.channel = tapCh
         tapSync = bridge
+        // Phase-P preview-engine prototype (Settings → engine test).
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger,
+            "com.anniekaydee.subtitle_app/previewengine")
+            .setMethodCallHandler(PreviewEngine(applicationContext, flutterEngine.renderer))
         val ch = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
         methodChannel = ch
         ch.setMethodCallHandler { call, result ->

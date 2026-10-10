@@ -74,11 +74,11 @@ X  (ຂະໜານ, ທາງເລືອກ) ສົ່ງອອກເປັນ
 **ເປົ້າໝາຍ:** ພິສູດວ່າ native GL compositor ສະແດງຫຼາຍຊັ້ນໄດ້ລື່ນໃນມືຖືແທ້ ກ່ອນລົງທຶນຫຼາຍເດືອນ.
 
 ວຽກ:
-- [ ] Branch ໃໝ່ `proto/preview-engine` (ບໍ່ແຕະ code ທີ່ໃຊ້ງານ)
-- [ ] `PreviewEngine.kt`: ExoPlayer 2 ຕົວ (ຫຼັກ playlist + PiP) → SurfaceTexture → GL ລວມເປັນ 1 frame → Flutter `Texture`
-- [ ] ຂໍ້ຄວາມ/ຊັບ: Flutter ວາດເປັນຮູບ (ຮອງຮັບການປະສົມສະຫຼະລາວຖືກຕ້ອງ) → ສົ່ງເປັນ texture, cache ໄວ້ຈົນກວ່າຂໍ້ຄວາມປ່ຽນ
-- [ ] ໜ້າທົດສອບງ່າຍໆ: ຫຼິ້ນ / ຢຸດ / scrub / ສະແດງ fps ແລະ frame ທີ່ຕົກ
-- [ ] ທົດສອບ **ຢ່າງໜ້ອຍ 3 ເຄື່ອງ**: ລຸ້ນຕ່ຳ (RAM 3–4 GB), ລຸ້ນກາງ, ລຸ້ນດີ
+- [x] ຢູ່ branch `feat/tap-sync` ແຕ່ແຍກອອກຈາກ code ທີ່ໃຊ້ງານ (ເຂົ້າໄດ້ທາງ Settings → "ທົດສອບ engine ໃໝ່" ເທົ່ານັ້ນ)
+- [x] `PreviewEngine.kt` (2026-10-10): ExoPlayer 2 ຕົວ (ຫຼັກ + PiP) → OES SurfaceTexture → GL thread ລວມເປັນ 1 frame ຕໍ່ vsync → Flutter `Texture` (compile ຜ່ານ, **ຍັງບໍ່ໄດ້ run ໃນມືຖື**)
+- [x] ຂໍ້ຄວາມ: Flutter ວາດ (ພາສາລາວຖືກ) → PNG → texture
+- [x] ໜ້າທົດສອບ (`preview_bench_screen.dart`): ຫຼິ້ນ/ຢຸດ/scrub + render fps, video fps, % frame ຊ້າ, seek latency, ເວລາ run — ສີຂຽວ/ແດງຕາມເງື່ອນໄຂ GO
+- [ ] ທົດສອບ **ຢ່າງໜ້ອຍ 3 ເຄື່ອງ**: ລຸ້ນຕ່ຳ (RAM 3–4 GB), ລຸ້ນກາງ, ລຸ້ນດີ ← **ລໍມືຖື**
 
 **ເງື່ອນໄຂ GO:** ລຸ້ນກາງ ≥ 30 fps ກັບ 3 ຊັ້ນ, scrub ≤ 100 ms, ບໍ່ crash 10 ນາທີ.
 **ຖ້າ NO-GO:** ຫຼຸດເປົ້າ (PiP 1 ຊັ້ນ, preview 720p) ຫຼື ເລືອກທາງ X (CapCut draft) ແທນ.
@@ -86,10 +86,10 @@ X  (ຂະໜານ, ທາງເລືອກ) ສົ່ງອອກເປັນ
 ### ໄລຍະ 0 — ຄວາມປອດໄພ + ແບ່ງ code + ຄວາມລື່ນ UI
 
 ຄວາມປອດໄພ:
-- [ ] Commit ວຽກທີ່ຄ້າງ (ຕອນນີ້ມີ 6 ໄຟລ໌ modified + `sticker_service.dart` ໃໝ່)
-- [ ] **ຍ້າຍບ່ອນເກັບ project**: 1 ໄຟລ໌ JSON ຕໍ່ 1 project (`<appDocs>/projects/<id>.json`) + ດັດຊະນີ; ຂຽນແບບ atomic (temp → rename); ອ່ານ SharedPreferences ເກົ່າຄັ້ງດຽວແລ້ວຍ້າຍ
-- [ ] parse ຜິດ → ເກັບໄຟລ໌ເສຍໄວ້ `*.corrupt` + ຂ້າມສະເພາະ project ນັ້ນ (ບໍ່ໃຫ້ຫາຍທັງໝົດ)
-- [ ] ໃສ່ `schemaVersion` ໃນ JSON ທຸກ project
+- [x] Commit ວຽກທີ່ຄ້າງ (sticker picker commit ແລ້ວ d644ef4)
+- [x] **ຍ້າຍບ່ອນເກັບ project** (2026-10-10, `lib/services/project_store.dart`): 1 ໄຟລ໌ JSON ຕໍ່ 1 project (`<appDocs>/projects/<id>.json`) + `index.json`; ຂຽນແບບ atomic (temp → rename) + ເກັບເວີຊັນກ່ອນເປັນ `.bak`; ຂຽນສະເພາະ project ທີ່ປ່ຽນ; save ຕໍ່ຄິວ (ບໍ່ແຂ່ງກັນ); ຍ້າຍຈາກ SharedPreferences ຄັ້ງດຽວ + ເກັບຂໍ້ມູນດິບໄວ້ `legacy_prefs_backup.json`
+- [x] parse ຜິດ → ລອງ `.bak` ກ່ອນ, ບໍ່ດັ່ງນັ້ນເກັບໄຟລ໌ເສຍໄວ້ `*.corrupt-*` + ຂ້າມສະເພາະ project ນັ້ນ; ໄຟລ໌ທີ່ບໍ່ຢູ່ໃນ index ກໍຍັງໂຫຼດ; ໄຟລ໌ schema ໃໝ່ກວ່າ = ບໍ່ແຕະ
+- [x] ໃສ່ `schemaVersion` ໃນ JSON ທຸກ project (wrapper `{schemaVersion, project}`) — 17 test ໃນ `test/project_store_test.dart`
 
 ແບ່ງ `editor_screen.dart` (ບໍ່ປ່ຽນພຶດຕິກຳ):
 ```
@@ -104,7 +104,12 @@ lib/editor/
   toolbar/main_toolbar.dart
   panels/  (subtitle_style, sfx, overlay, zoom_fade_shake, audio_mixer, keyframe, auto_tools…)
 ```
-ຄວາມລື່ນ:
+**ເຮັດແລ້ວ (2026-10-10), ແບບທີ່ຕ່າງຈາກຮ່າງ:** ແບ່ງເປັນ `part` files + `extension _X on _EditorScreenState`
+ໃນ `lib/screens/editor/` (playback, effects, text_tools, preview, style, timeline, transcript, auto, overlays, export, painters).
+ຍ້າຍ code ແບບກົງໂຕດ້ວຍ script (ກວດແລ້ວວ່າທຸກແຖວຢູ່ຄົບ, ບໍ່ຊ້ຳ), `editor_screen.dart` ເຫຼືອ **578 ແຖວ** (fields + initState/build/dispose).
+static 6 ອັນຍ້າຍໄປເປັນ top-level. ຂັ້ນຕໍ່ໄປ (ເມື່ອແກ້ສ່ວນໃດ): ຍ້າຍ state ຂອງສ່ວນນັ້ນອອກເປັນ controller/widget ຂອງມັນເອງ.
+
+ຄວາມລື່ນ (⏸ ລໍມືຖືລຸ້ນກາງ — ຕ້ອງວັດກ່ອນ/ຫຼັງດ້ວຍ DevTools ຕາມຫຼັກການ "ວັດແທກກ່ອນສ້າງ"):
 - [ ] Playhead + ເວລາ ໃຊ້ `ValueNotifier` ແທນ `setState` ທັງໜ້າ
 - [ ] `RepaintBoundary` ຄອບ preview, timeline, toolbar ແຍກກັນ
 - [ ] Timeline ໃຊ້ `CustomPainter` + ວາດສະເພາະສ່ວນທີ່ເຫັນ
@@ -141,20 +146,27 @@ Migration (schemaVersion 1 → 2):
 | `zoomEffects` / `fadeEffects` / `shakeEffects` | `effects` ຂອງ element ຫຼັກທີ່ກວມຊ່ວງນັ້ນ |
 | `sfxBlocks` / `bgMusicPath` / `aiVoicePath` | ແທຣັກ `sfx` / `music` / `voice` (ຮັກສາ volume, mute, duck) |
 
-- [ ] Migration ເປັນ pure function + unit test ກັບ project ຕົວຢ່າງແທ້ຫຼາຍແບບ
-- [ ] ເກັບ JSON v1 ໄວ້ເປັນ backup ຢ່າງໜ້ອຍ 2 ເວີຊັນ
-- [ ] Undo/redo ແບບ **command** (add/remove/move/trim/split/update-prop) + ລວມຫຼາຍ command ເປັນ 1 ຂັ້ນ (batch)
-- [ ] ບໍລິການ AI ທັງໝົດ (ຊັບ, Auto-Cut, Auto SFX, B-roll, Hook) ປ່ຽນໄປຂຽນລົງ model ໃໝ່
+- [x] Migration ເປັນ pure function + unit test (2026-10-10, `lib/timeline/migrate_v1.dart`): ຊ່ວງທີ່ຕັດ → clip ແຍກໃນແທຣັກຫຼັກ, ທຸກເວລາຍ້າຍຈາກ timeline ເດີມ → timeline ຫຼັງຕັດ (`time_map.dart`); ສິ່ງທີ່ຢູ່ໃນຊ່ວງຕັດທັງໝົດ ເກັບໄວ້ `settings.v1Dropped` (ກູ້ຄືນໄດ້)
+- [x] ເກັບ JSON v1 ໄວ້ເປັນ backup: ໄຟລ໌ project ຍັງເປັນ v1 + `.bak` (ProjectStore); v2 ຢູ່ຄຽງຂ້າງ
+- [x] Undo/redo (`lib/timeline/timeline_ops.dart`): model ເປັນ immutable → ແຕ່ລະຂັ້ນເກັບແຕ່ reference (element ທີ່ບໍ່ປ່ຽນ share ກັນ, ບໍ່ copy ທັງ list) + batch (ລາກ 1 ຄັ້ງ = 1 ຂັ້ນ) + ຈຳກັດ 100 ຂັ້ນ; ops: add/remove(ripple)/move/trim/split/update/duplicate/tracks/transitions/snap
+- [x] **ຂົວ v2 → v1** (`project_v1.dart`): editor ໃໝ່ໃຊ້ preview/export ເກົ່າໄດ້ທັນທີ ຈົນກວ່າ engine ໄລຍະ 3 ມາ; ສິ່ງທີ່ v1 ສະແດງບໍ່ໄດ້ ຖືກລາຍງານ (`lossy`)
+- [ ] ບໍລິການ AI ຂຽນລົງ model ໃໝ່ໂດຍກົງ — ຕອນນີ້ຜ່ານຂົວ v1 (AI ຍັງຂຽນ segment v1 ແລ້ວ migrate); ປ່ຽນເມື່ອ editor ເກົ່າຖືກປົດ
+
+Test: 41 (model/ops/history) + 5 (ຂົວ round-trip v1→v2→v1).
 
 ### ໄລຍະ 2 — Timeline ຫຼາຍແທຣັກ + ການແກ້ໄຂພື້ນຖານ  → v1.5
 
-- [ ] UI timeline ຫຼາຍແທຣັກ (ໜ້າຈໍ 1 ໃນການອອກແບບ): ປ້າຍແທຣັກ, mute/lock/hide
-- [ ] ລາກ element ຂ້າມແທຣັກ, trim ດ້ວຍມືຈັບ, ແຍກ (split) ທີ່ playhead
-- [ ] Snap (ຂອບ clip, playhead, bookmark), Ripple edit (ເປີດ/ປິດໄດ້)
-- [ ] ເລືອກຫຼາຍອັນ, ສຳເນົາ/ວາງ, duplicate, ລຶບ
-- [ ] Bookmark ເທິງ ruler
-- [ ] ເພີ່ມ PiP ວິດີໂອ (ຈຳກັດ **2 ຊັ້ນ** ໃນລຸ້ນຕ່ຳ, 3 ໃນລຸ້ນກາງຂຶ້ນໄປ — ກວດຈຳນວນ decoder ຕອນເປີດແອັບ)
-- [ ] Preview ໃຊ້ `PreviewEngine` ຈາກໄລຍະ P
+**Beta ສ້າງແລ້ວ (2026-10-10):** ໜ້າ "Pro Editor (beta)" ແຍກຕ່າງຫາກ (`lib/pro_editor/`), ເປີດຈາກ Home → ⋮ → "ເປີດໃນ Pro Editor (beta)".
+editor ເກົ່າຍັງເປັນຄ່າເລີ່ມຕົ້ນ. ບັນທຶກກັບເປັນ v1 + `timelineV2` (ຜ່ານຂົວ) → editor ເກົ່າ/ສົ່ງອອກ ໃຊ້ project ດຽວກັນໄດ້;
+ຖ້າ editor ເກົ່າແກ້ project ຫຼັງຈາກນັ້ນ (fingerprint ປ່ຽນ) → ສ້າງ timeline ໃໝ່ຈາກ v1. Test: 16 (controller) + 10 (ໜ້າຈໍ).
+- [x] UI timeline ຫຼາຍແທຣັກ: playhead ກາງຈໍ, ruler, ສີຕາມປະເພດ, mute ທີ່ຫົວແທຣັກຫຼັກ, ກົດຄ້າງ → mute/lock/hide
+- [x] ລາກ element ຂ້າມແທຣັກ (ກົດຄ້າງ), trim ດ້ວຍມືຈັບ, ແຍກ (split) ທີ່ playhead
+- [x] Snap (ຂອບ element, playhead, bookmark), Ripple edit (ເປີດ/ປິດໄດ້)
+- [~] ສຳເນົາ/ວາງ, duplicate, ລຶບ ✅ — ເລືອກຫຼາຍອັນມີໃນ controller ແຕ່ຍັງບໍ່ມີທ່າທາງໃນ UI
+- [x] Bookmark ເທິງ ruler
+- [x] ເພີ່ມ PiP ວິດີໂອ (Free 1 ຊັ້ນ, PRO 2 ຊັ້ນ) + ຮູບ/ສະຕິກເກີ + ເພງ + ຕໍ່ clip ທ້າຍແທຣັກຫຼັກ (+)
+- [ ] Preview ໃຊ້ `PreviewEngine` ຈາກໄລຍະ P — ຕອນນີ້ preview ປະກອບໃນ Flutter (`pro_preview.dart`): ວິດີໂອຫຼັກຫຼິ້ນແທ້, ສະຕິກເກີ/ຊັບ/zoom/fade ສະແດງ, **PiP ວິດີໂອຍັງເປັນກ່ອງແທນ (ບໍ່ຫຼິ້ນ)**
+- ຂໍ້ຄວາມ/ຄວາມໄວ/Mask/Animation/Effect/ຟິວເຕີ ມີປຸ່ມແຕ່ສະແດງ "ກຳລັງມາໃນເວີຊັນ 1.7/1.8"
 
 ### ໄລຍະ 3 — Engine render ດຽວ + proxy  → v1.6
 
@@ -192,11 +204,11 @@ Migration (schemaVersion 1 → 2):
 
 ---
 
-## 5. ຟີເຈີ Free / PRO (ຮ່າງ — ລໍຖ້າຕັດສິນ)
+## 5. ຟີເຈີ Free / PRO (ຕັດສິນແລ້ວ 2026-10-10)
 
 | Free | PRO |
 |---|---|
-| Timeline ຫຼາຍແທຣັກ, ແຍກ/trim/ສຳເນົາ, ຂໍ້ຄວາມ, ຮູບຊົງ, transition ພື້ນຖານ 3 ແບບ, export 720p/1080p (ມີ watermark ຕາມເດີມ) | PiP ຫຼາຍຊັ້ນ, mask, blend, ຄວາມໄວແບບເສັ້ນໂຄ້ງ, bezier, transition/ຟິວເຕີທັງໝົດ, 2K/4K/60fps, ບໍ່ມີ watermark |
+| Timeline ຫຼາຍແທຣັກ, ແຍກ/trim/ສຳເນົາ, ຂໍ້ຄວາມ, ຮູບຊົງ, PiP 1 ຊັ້ນ, transition ພື້ນຖານ 3 ແບບ, export 720p/1080p (ມີ watermark ຕາມເດີມ), ແຕະໃຫ້ຕົງທີລະປະໂຫຍກ | PiP 2 ຊັ້ນ, mask, blend, ຄວາມໄວແບບເສັ້ນໂຄ້ງ, bezier, transition/ຟິວເຕີທັງໝົດ, 2K/4K/60fps, ບໍ່ມີ watermark, ດູດເຂົ້າສຽງ (snap), karaoke ທີລະຄຳ |
 
 ---
 
@@ -218,13 +230,20 @@ Migration (schemaVersion 1 → 2):
 | ໃຊ້ເວລາເກີນຄາດ | ສູງ | gate ທີ່ໄລຍະ P, ອອກເປັນຂັ້ນ, ຕັດໄລຍະ 4–5 ໄດ້ |
 | ແອັບໜັກຂຶ້ນ / ກິນແບັດ | ກາງ | proxy, ປິດ engine ເມື່ອອອກຈາກ editor |
 
-## 8. ສິ່ງທີ່ຕ້ອງຕັດສິນໃຈ (ເຈົ້າຂອງແອັບ)
+## 8. ການຕັດສິນໃຈ (ສະຫຼຸບແລ້ວ 2026-10-10 — ເຈົ້າຂອງແອັບມອບໃຫ້ Claude ຕັດສິນ)
 
-1. ມືຖືທົດສອບ 3 ເຄື່ອງ: ລຸ້ນໃດແດ່ (ໃຫ້ກົງກັບລູກຄ້າແທ້)?
-2. PiP ສູງສຸດຈັກຊັ້ນ?
-3. ຈະເຮັດທາງ X (CapCut draft) ຂະໜານບໍ?
-4. ແບ່ງ Free / PRO ຕາມຕາຕະລາງຂໍ້ 5 ບໍ?
-5. iOS: ເຮັດຫຼັງ v1.8 ຫຼື ບໍ່ເຮັດ?
+1. **ມືຖືທົດສອບ 3 ເຄື່ອງ** — ໃຫ້ກວມ GPU ທັງ 3 ຕະກູນ (PowerVR / Mali / Adreno):
+   - **ລຸ້ນຕ່ຳ:** Redmi A3 ຫຼື ເຄື່ອງ Helio G36 (PowerVR, RAM 3–4 GB) — ກໍລະນີຮ້າຍສຸດ
+   - **ລຸ້ນກາງ = ເຄື່ອງຕັດສິນ GO/NO-GO:** ເຄື່ອງ Helio G85 (Mali-G52, RAM 4–6 GB) ເຊັ່ນ Redmi 13C / Galaxy A05 — ຊິບທີ່ພົບຫຼາຍທີ່ສຸດໃນມືຖືລາຄາຖືກຢູ່ລາວ
+   - **ລຸ້ນດີ:** ມືຖືຂອງເຈົ້າຂອງແອັບເອງ. ຖ້າບໍ່ແມ່ນ Snapdragon ໃຫ້ຢືມເຄື່ອງ Snapdragon (Adreno) ມາທົດສອບເພີ່ມ
+   - ⚠️ ກວດຊິບໃນສະເປັກກ່ອນຊື້ທຸກຄັ້ງ (ລຸ້ນດຽວກັນບາງປະເທດໃຊ້ຊິບຕ່າງກັນ)
+2. **PiP ສູງສຸດ:** Free 1 ຊັ້ນ, PRO 2 ຊັ້ນ. ເຄື່ອງທີ່ decoder ບໍ່ພໍ ຈຳກັດເປັນ 1 ອັດຕະໂນມັດ. ຈະເປີດ 3 ຊັ້ນໃນເຄື່ອງແຮງ **ສະເພາະເມື່ອ** ຕົວເລກຈາກໄລຍະ P ຜ່ານ (ເລີ່ມແບບລະວັງ ແລ້ວຄ່ອຍເພີ່ມ ດີກວ່າສັນຍາແລ້ວກະຕຸກ)
+3. **ທາງ X (CapCut draft): ບໍ່ເຮັດຂະໜານ.** ຍັງບໍ່ຮູ້ວ່າ CapCut ມືຖືນຳເຂົ້າ draft ໄດ້ບໍ, ແລະ ມັນພາຜູ້ໃຊ້ໜີໄປ CapCut ເຊິ່ງຂັດກັບຕຳແໜ່ງຂອງແອັບ. ເກັບໄວ້ເປັນ **ແຜນສຳຮອງ ຖ້າໄລຍະ P ໄດ້ NO-GO** ເທົ່ານັ້ນ
+4. **Free / PRO:** ໃຊ້ຕາຕະລາງຂໍ້ 5 ຕາມຮ່າງ. ແຕະໃຫ້ຕົງ: ແຕະທີລະປະໂຫຍກ + ວາງບົດເອງ + ປັບຕາມມື + ເຕືອນ BT = **ຟຣີ**; ດູດເຂົ້າສຽງ (snap) + karaoke ທີລະຄຳ = **PRO**
+5. **iOS: ບໍ່ເຮັດກ່ອນ v1.8.** ຕ້ອງຂຽນ native ໃໝ່ທັງໝົດ (ExoPlayer/GL ທີ່ເປັນ Kotlin → AVFoundation/Metal) ແລະ ຕະຫຼາດລາວເປັນ Android ສ່ວນໃຫຍ່. ຫຼັງ v1.8 ຈຶ່ງປະເມີນອີກຄັ້ງຕາມຄຳຂໍຂອງຜູ້ໃຊ້ແທ້
+6. **ໂໝດເລີ່ມຕົ້ນຂອງແຕະໃຫ້ຕົງ:** ກົດຄ້າງ (ຈັບຊ່ວງງຽບໄດ້ຖືກ). ແອັບຈື່ໂໝດທີ່ຜູ້ໃຊ້ເລືອກຄັ້ງລ່າສຸດ. ໂໝດ karaoke ທີລະຄຳ ເລີ່ມຕົ້ນເປັນ **ແຕະ** (ຄຳຮ້ອງຕໍ່ເນື່ອງ ບໍ່ມີຊ່ວງງຽບ)
+
+**ລຳດັບເຮັດວຽກ:** ໄລຍະ T (ແຕະໃຫ້ຕົງ) ກ່ອນ → ໄລຍະ P. ຊື້/ຫາເຄື່ອງທົດສອບໄວ້ລະຫວ່າງເຮັດໄລຍະ T.
 
 ---
 
@@ -234,3 +253,9 @@ Migration (schemaVersion 1 → 2):
 |---|---|---|
 | 2026-10-09 | — | ສ້າງແຜນ + ອອກແບບ 8 ໜ້າຈໍ |
 | 2026-10-09 | — | ປັບການອອກແບບເປັນວິທີໃຊ້ແບບ CapCut (10 ໜ້າຈໍ) + ເພີ່ມແຜນ Tap Sync (ໄລຍະ T) |
+| 2026-10-10 | — | ຕັດສິນທັງ 6 ຂໍ້ທີ່ຄ້າງ (ຂໍ້ 8): ເຄື່ອງທົດສອບ, PiP 1/2, ບໍ່ເຮັດທາງ X, Free/PRO, iOS ຫຼັງ v1.8, ກົດຄ້າງເປັນຄ່າເລີ່ມຕົ້ນ |
+| 2026-10-10 | T | ຂຽນ Tap Sync T1–T6 ຄົບ (branch `feat/tap-sync`), 63 test ຜ່ານ — ລໍທົດສອບໃນມືຖືແທ້ ກ່ອນເລີ່ມໄລຍະ P |
+| 2026-10-10 | 0 | ບ່ອນເກັບ project ແບບໄຟລ໌ (ປອດໄພ) + ແບ່ງ editor_screen.dart 14,425 → 578 ແຖວ (11 part files); 80 test ຜ່ານ. ຄວາມລື່ນ + ແບ່ງ MainActivity.kt ລໍມືຖືທົດສອບ |
+| 2026-10-10 | 1 | Model v2 + migration + undo + ຂົວ v2→v1 (`lib/timeline/`) |
+| 2026-10-10 | 2 | Pro Editor (beta) ຫຼາຍແທຣັກ (`lib/pro_editor/`), ເປີດຈາກ Home ⋮ |
+| 2026-10-10 | P | ຕົ້ນແບບ PreviewEngine.kt + ໜ້າວັດຜົນ — ລໍມືຖືເພື່ອຕັດສິນ GO/NO-GO. ທັງໝົດ 152 test ຜ່ານ |

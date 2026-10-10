@@ -12,6 +12,7 @@ import '../services/free_quota_service.dart';
 import 'setup_screen.dart';
 import 'editor_screen.dart';
 import 'settings_screen.dart';
+import '../pro_editor/pro_editor_screen.dart';
 
 enum _ProjectSort { newest, oldest, name }
 
@@ -885,6 +886,13 @@ class _HomeScreenState extends State<HomeScreen> {
         final provider = context.read<ProjectProvider>();
         if (v == 'rename') {
           _renameDialog(p);
+        } else if (v == 'pro') {
+          provider.setCurrentProject(p);
+          await Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => const ProEditorScreen()),
+          );
+          _loadStatus();
         } else if (v == 'dup') {
           provider.duplicateProject(p);
         } else if (v == 'del') {
@@ -895,6 +903,7 @@ class _HomeScreenState extends State<HomeScreen> {
         }
       },
       itemBuilder: (_) => [
+        _menuItem('pro', Icons.view_timeline_outlined, tr('pe.open')),
         _menuItem('rename', Icons.edit_outlined, tr('home.rename')),
         _menuItem('dup', Icons.copy_all_outlined, tr('home.duplicate')),
         _menuItem('del', Icons.delete_outline, tr('common.delete'), danger: true),

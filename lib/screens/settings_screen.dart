@@ -16,6 +16,7 @@ import '../services/subscription_service.dart';
 import '../services/payment_config.dart';
 import '../services/slip_verify_service.dart';
 import '../widgets/gradient_button.dart';
+import '../pro_editor/preview_bench_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -557,6 +558,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   const SizedBox(height: 26),
                   _buildLanguageSection(),
                   const SizedBox(height: 24),
+                  // Phase-P engine test (GO/NO-GO measurement for the Pro Editor).
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.speed, color: AppColors.textHint),
+                    title: Text(tr('set.engineTest'),
+                        style: const TextStyle(color: AppColors.textSecondary, fontSize: 13)),
+                    onTap: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (_) => const PreviewBenchScreen()),
+                    ),
+                  ),
                 ],
               ),
             ),
