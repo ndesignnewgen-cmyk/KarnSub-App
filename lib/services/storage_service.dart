@@ -136,6 +136,8 @@ class StorageService {
         'bgMusicMuted': p.bgMusicMuted,
         'bgMusicDuck': p.bgMusicDuck,
         'bgBlur': p.bgBlur,
+        if (p.timelineV2 != null) 'timelineV2': p.timelineV2,
+        if (p.timelineV2Base != null) 'timelineV2Base': p.timelineV2Base,
         'removedRanges': p.removedRanges,
         'splitPointsMs': p.splitPointsMs,
         'clips': p.clips.map((c) => c.toJson()).toList(),
@@ -209,6 +211,8 @@ class StorageService {
       bgMusicMuted: j['bgMusicMuted'] as bool? ?? false,
       bgMusicDuck: j['bgMusicDuck'] as bool? ?? true,
       bgBlur: j['bgBlur'] as bool? ?? false,
+      timelineV2: (j['timelineV2'] as Map?)?.cast<String, dynamic>(),
+      timelineV2Base: j['timelineV2Base'] as String?,
       removedRanges: (j['removedRanges'] as List<dynamic>?)
               ?.map((r) => (r as List<dynamic>).map((e) => e as int).toList())
               .toList() ??

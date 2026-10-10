@@ -1026,6 +1026,12 @@ class SubtitleProject {
   bool bgMusicDuck;
   // Blurred background: fit a non-9:16 video into a 9:16 frame with blurred fill.
   bool bgBlur;
+  // Pro Editor (beta): the v2 multi-track timeline JSON, kept next to the v1
+  // data so v2-only things (text layers, masks…) survive. [timelineV2Base] is
+  // the fingerprint of the v1 data it was saved with — if the classic editor
+  // changed the project since, the timeline is rebuilt from v1.
+  Map<String, dynamic>? timelineV2;
+  String? timelineV2Base;
 
   SubtitleProject({
     required this.id,
@@ -1086,6 +1092,8 @@ class SubtitleProject {
     this.bgMusicMuted = false,
     this.bgMusicDuck = true,
     this.bgBlur = false,
+    this.timelineV2,
+    this.timelineV2Base,
   })  : segments = segments ?? [],
         sfxBlocks = sfxBlocks ?? [],
         removedRanges = removedRanges ?? [],
